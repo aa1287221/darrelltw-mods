@@ -386,3 +386,52 @@ def test_build_futures_holdings_payload_empty_rows_still_has_shape():
     assert payload["source"] == "永豐 期貨"
     assert payload["holdings"] == []
     assert "asOf" in payload
+
+
+# ---------------------------------------------------------------------------
+# fetch_futures_positions: unsigned / missing futopt_account is a normal
+# shape (one clear log line, empty result), never a guess
+# ---------------------------------------------------------------------------
+
+def test_fetch_futures_positions_missing_account_logs_one_line(capsys):
+    api = types.SimpleNamespace(futopt_account=None)
+
+    result = fetcher.fetch_futures_positions(api)
+
+    assert result == []
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1
+    assert "futopt_account" in err
+
+
+def test_fetch_futures_positions_unsigned_account_skips_the_sdk_call(capsys):
+    # list_positions must never be called for an unsigned account - it would
+    # only raise HTTP 406, so the `signed` guard is meant to short-circuit
+    # before that network round trip, not merely catch the resulting error.
+    def raise_if_called(*args, **kwargs):
+        raise AssertionError("list_positions should not be called for an unsigned account")
+
+    account = types.SimpleNamespace(signed=False, account_id="X")
+    api = types.SimpleNamespace(futopt_account=account, list_positions=raise_if_called)
+
+    result = fetcher.fetch_futures_positions(api)
+
+    assert result == []
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1
+    assert "signed=False" in err
+
+
+def test_fetch_futures_positions_signed_account_passes_through():
+    canned = [make_position("SRFJ6", BUY, 67, 107.2276, 110.35, 205100.0)]
+    account = types.SimpleNamespace(signed=True, account_id="Y")
+
+    def list_positions(acct):
+        assert acct is account
+        return canned
+
+    api = types.SimpleNamespace(futopt_account=account, list_positions=list_positions)
+
+    result = fetcher.fetch_futures_positions(api)
+
+    assert result is canned
