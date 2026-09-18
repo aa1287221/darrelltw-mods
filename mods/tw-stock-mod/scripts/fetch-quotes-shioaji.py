@@ -320,11 +320,19 @@ def resample_5min(rows: list[dict]) -> list[dict]:
     return [buckets[key] for key in sorted(buckets)]
 
 
-def bars_5min(kbars, limit: int = FUTURES_BAR_LIMIT) -> list[list[float]]:
-    """Corrected 1-minute kbar rows -> the most recent `limit` [o,h,l,c] 5-minute bars, oldest first."""
+def bars_5min_with_bucket(kbars, limit: int = FUTURES_BAR_LIMIT) -> tuple[list[list[float]], int]:
+    """Corrected 1-minute kbar rows -> (the most recent `limit` [o,h,l,c]
+    5-minute bars oldest first, the bucket ts the trailing bar covers - 0
+    when empty). The bucket is what lets a later tick tell "still this bar"
+    from "open a new one"."""
     buckets = resample_5min(kbars_to_rows(kbars))
     trimmed = buckets[-limit:] if limit else buckets
-    return [[b["Open"], b["High"], b["Low"], b["Close"]] for b in trimmed]
+    bars = [[b["Open"], b["High"], b["Low"], b["Close"]] for b in trimmed]
+    return bars, (trimmed[-1]["ts"] if trimmed else 0)
+
+
+def bars_5min(kbars, limit: int = FUTURES_BAR_LIMIT) -> list[list[float]]:
+    return bars_5min_with_bucket(kbars, limit)[0]
 
 
 def futures_quote_row(contract, snapshot, bars: list, requested_code: str) -> dict | None:
@@ -395,6 +403,28 @@ def tick_ts_ms(at: datetime) -> int:
     return int(at.timestamp() * 1000)
 
 
+def update_trailing_bar(entry: dict, ts_ms: int, price: float, limit: int = FUTURES_BAR_LIMIT) -> bool:
+    """Fold one trade into a kbars-cache entry ({"bars": [[o,h,l,c]...],
+    "bucket": ts}) in place: same bucket moves h/l/c, a newer bucket opens a
+    bar (oldest dropped past `limit`), an older one is ignored. Returns
+    whether anything changed."""
+    bars = entry["bars"]
+    bucket = (ts_ms // FUTURES_BAR_MS) * FUTURES_BAR_MS
+    current = entry.get("bucket", 0)
+    if bars and bucket < current:
+        return False
+    if not bars or bucket > current:
+        bars.append([price, price, price, price])
+        del bars[:-limit]
+        entry["bucket"] = bucket
+        return True
+    bar = bars[-1]
+    bar[1] = max(bar[1], price)
+    bar[2] = min(bar[2], price)
+    bar[3] = price
+    return True
+
+
 def apply_tick(rows: dict, tick: TickEvent, code_map: dict) -> list[str]:
     """Fold one tick into the overlay rows (requested code -> row with a
     `dataAt`); `code_map` is resolved code -> requested codes. Returns the
@@ -437,11 +467,13 @@ def refresh_futures_kbars(api, contract, code: str, start: str, today: str, kbar
         if age_s < FUTURES_KBARS_REFRESH_S:
             return cached["bars"], f"（沿用 {age_s / 60:.1f} 分前）"
     try:
-        bars = bars_5min(api.kbars(contract, start=start, end=today))
+        bars, bucket = bars_5min_with_bucket(api.kbars(contract, start=start, end=today))
     except Exception as err:  # noqa: BLE001 - a bad K-bar fetch keeps the quote, just with no bars
         print(f"{code} K 棒取得失敗（沿用{'上次結果' if cached else '空陣列'}）: {type(err).__name__}: {err}", file=sys.stderr)
         return (cached["bars"] if cached else []), "（取得失敗，未更新快取）"
-    kbars_cache[code] = {"at": tick_now, "bars": bars}
+    # the entry is shared with the tick overlay: update_trailing_bar mutates
+    # this same list, so ticks survive the next snapshot's cache reuse
+    kbars_cache[code] = {"at": tick_now, "bars": bars, "bucket": bucket}
     return bars, "（重抓）"
 
 

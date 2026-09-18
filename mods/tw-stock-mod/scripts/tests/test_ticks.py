@@ -143,3 +143,115 @@ def test_stock_tick_uses_the_same_path():
 
     assert changed == ["2330"]
     assert rows["2330"]["price"] == 1005.0
+
+
+# ---------------------------------------------------------------------------
+# update_trailing_bar: ticks advance the live 5-minute bar between kbars
+# refreshes; the kbars cache entry carries the bars AND the bucket they end on
+# ---------------------------------------------------------------------------
+
+BUCKET_2100 = utc_ms(2026, 9, 18, 13, 0)  # Taipei 21:00 bucket
+BUCKET_2105 = utc_ms(2026, 9, 18, 13, 5)
+
+
+def make_entry(bars, bucket):
+    return {"at": 0.0, "bars": bars, "bucket": bucket}
+
+
+def test_tick_inside_the_bucket_moves_high_low_close_not_open():
+    entry = make_entry([[100.0, 105.0, 98.0, 104.0]], BUCKET_2100)
+
+    assert fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 13, 2, 10), 106.0) is True
+    assert entry["bars"] == [[100.0, 106.0, 98.0, 106.0]]
+
+    fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 13, 3, 0), 97.0)
+    assert entry["bars"] == [[100.0, 106.0, 97.0, 97.0]]
+    assert entry["bucket"] == BUCKET_2100
+
+
+def test_tick_in_a_new_bucket_opens_a_bar():
+    entry = make_entry([[100.0, 105.0, 98.0, 104.0]], BUCKET_2100)
+
+    fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 13, 5, 0), 104.5)
+
+    assert entry["bars"] == [[100.0, 105.0, 98.0, 104.0], [104.5, 104.5, 104.5, 104.5]]
+    assert entry["bucket"] == BUCKET_2105
+
+
+def test_bar_count_is_capped_at_40():
+    bars = [[float(i), float(i), float(i), float(i)] for i in range(40)]
+    entry = make_entry(bars, BUCKET_2100)
+
+    fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 13, 5, 0), 999.0)
+
+    assert len(entry["bars"]) == 40
+    assert entry["bars"][0] == [1.0, 1.0, 1.0, 1.0]  # the oldest fell off
+    assert entry["bars"][-1] == [999.0, 999.0, 999.0, 999.0]
+
+
+def test_tick_from_an_older_bucket_changes_nothing():
+    entry = make_entry([[100.0, 105.0, 98.0, 104.0]], BUCKET_2100)
+
+    assert fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 12, 59, 59), 50.0) is False
+    assert entry["bars"] == [[100.0, 105.0, 98.0, 104.0]]
+
+
+def test_empty_bars_open_a_bar():
+    entry = make_entry([], 0)
+
+    fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 13, 2, 0), 104.5)
+
+    assert entry["bars"] == [[104.5, 104.5, 104.5, 104.5]]
+    assert entry["bucket"] == BUCKET_2100
+
+
+# --- the kbars cache carries the bucket, and tick updates survive a snapshot --
+
+import types
+
+
+def raw_ns(year, month, day, hour, minute):
+    """kbars/snapshot ts as the SDK stamps it: the Taipei wall-clock digits read as UTC."""
+    return utc_ms(year, month, day, hour, minute) * 1_000_000
+
+
+KBARS = types.SimpleNamespace(
+    # Taipei 21:00, 21:01, 21:06 -> buckets 21:00 and 21:05
+    ts=[raw_ns(2026, 9, 18, 21, 0), raw_ns(2026, 9, 18, 21, 1), raw_ns(2026, 9, 18, 21, 6)],
+    Open=[100, 101, 110], High=[102, 103, 111], Low=[99, 100, 109], Close=[101, 102, 110], Volume=[1, 1, 1],
+)
+TXF = types.SimpleNamespace(code="TXFJ6", multiplier=200, decimal_locator=0, reference=17000.0, name="臺股期貨 202610", target_code=None)
+
+
+class FakeApi:
+    def __init__(self):
+        self.kbars_calls = 0
+
+    def snapshots(self, contracts):
+        return [types.SimpleNamespace(code=c.code, close=17010.0, ts=raw_ns(2026, 9, 18, 21, 6)) for c in contracts]
+
+    def kbars(self, contract, start=None, end=None):
+        self.kbars_calls += 1
+        return KBARS
+
+
+def test_kbars_refresh_records_the_trailing_bucket():
+    cache = {}
+
+    fetcher.refresh_futures_kbars(FakeApi(), TXF, "TXFJ6", "2026-09-17", "2026-09-18", cache, 0.0)
+
+    assert cache["TXFJ6"]["bars"] == [[100.0, 103.0, 99.0, 102.0], [110.0, 111.0, 109.0, 110.0]]
+    assert cache["TXFJ6"]["bucket"] == BUCKET_2105
+
+
+def test_tick_updated_bars_survive_the_next_snapshot_inside_the_kbars_window():
+    api = FakeApi()
+    cache = {}
+    clock = lambda: 60.0  # noqa: E731 - inside the 5-minute window either call
+    fetcher.fetch_futures_rows(api, {"TXFJ6": TXF}, ["TXFJ6"], "2026-09-18", kbars_cache=cache, now=clock)
+
+    fetcher.update_trailing_bar(cache["TXFJ6"], utc_ms(2026, 9, 18, 13, 7, 0), 115.0)
+    rows = fetcher.fetch_futures_rows(api, {"TXFJ6": TXF}, ["TXFJ6"], "2026-09-18", kbars_cache=cache, now=clock)
+
+    assert api.kbars_calls == 1
+    assert rows["TXFJ6"]["bars"][-1] == [110.0, 115.0, 109.0, 115.0]
