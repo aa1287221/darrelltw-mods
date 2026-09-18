@@ -73,11 +73,6 @@ async function boot(tag, clock) {
     feedTimers[0].fn()
     await new Promise(r => setTimeout(r, 150))
   }
-  /** fires the poll timer so a rewritten config is picked up */
-  const pollTick = async () => {
-    for (const t of timers) if (t.ms === REFRESH_MS) t.fn()
-    await new Promise(r => setTimeout(r, 150))
-  }
   const draw = async () => {
     const tree = await handlers.get('ui.render')($, { props: {}, surface: 'terminal', viewport: { columns: 100 } }, async () => ({ kids: [] }))
     let props
@@ -96,7 +91,7 @@ async function boot(tag, clock) {
   }
   const argOf = (argv, flag) => { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1] : undefined }
   const setHttp = status => { httpStatus = status }
-  return { feedTick, pollTick, draw, heartbeats, lastHeartbeat, argOf, setHttp, logs, fetched, writes, spawns }
+  return { feedTick, draw, heartbeats, lastHeartbeat, argOf, setHttp, logs, fetched, writes, spawns }
 }
 const sameSet = (a, b) => a.length === b.length && [...a].sort().join() === [...b].sort().join()
 
