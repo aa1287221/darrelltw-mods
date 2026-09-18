@@ -2,7 +2,7 @@
 # One entry point for the scripts/dev harnesses that can fail: builds
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
-# file-bars / tf-market / tf-quotes against them plus check-personal.sh, and
+# file-bars / tf-market / tf-quotes / tf-feed against them plus check-personal.sh, and
 # prints a PASS/FAIL line per check. Exits non-zero if any of them did.
 #
 # rank-cross and chart-nav's "名次交叉" section once pinned the PR-a bug
@@ -178,6 +178,24 @@ cat > "$FIXTURES/tf-override/.claude/stock-quotes.json" <<'JSON'
 }
 JSON
 
+# tf-feed: 美股 pinned, twSources shioaji, a `futures` list - the harness fakes
+# the clock at 夜盤 and stubs fs.write / process.run, so no network and no
+# real spawn; it rewrites this config per scenario (market / futures).
+mkdir -p "$FIXTURES/tf-feed/.claude"
+cat > "$FIXTURES/tf-feed/.claude/stock-band.json" <<'JSON'
+{
+  "market": "us",
+  "feed": "auto",
+  "twSources": ["shioaji"],
+  "feedMs": 30000,
+  "refreshMs": 3000,
+  "pageMs": 0,
+  "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
+  "us": [{ "code": "AAPL", "name": "Apple", "prevClose": 300 }],
+  "futures": [{ "code": "TXFR1", "name": "台指近" }, { "code": "SRFJ6" }]
+}
+JSON
+
 # --- run -----------------------------------------------------------------
 declare -a results
 run_check() {
@@ -197,6 +215,7 @@ run_check "rank-cross"     node "$SCRIPT_DIR/rank-cross.mjs"  "$OUT/board.js" "$
 run_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/file-bars"
 run_check "tf-market"      node "$SCRIPT_DIR/tf-market.mjs"   "$OUT/register.js" "$FIXTURES/tf-market" "$FIXTURES/tf-plain"
 run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-quotes" "$FIXTURES/tf-override"
+run_check "tf-feed"        node "$SCRIPT_DIR/tf-feed.mjs"     "$OUT/register.js" "$FIXTURES/tf-feed"
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
 echo
