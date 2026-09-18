@@ -242,3 +242,35 @@ def test_split_futures_codes_empty_does_no_futures_work():
 
 def test_split_futures_codes_trims_and_drops_blanks():
     assert fetcher.split_futures_codes("TXFR1, SRFJ6 ,") == ["TXFR1", "SRFJ6"]
+
+
+# ---------------------------------------------------------------------------
+# calendar-day kbars range: a 夜盤 tick past midnight still needs yesterday's
+# bars, since api.kbars(start, end) filters by Taipei calendar day
+# ---------------------------------------------------------------------------
+
+EMPTY_KBARS = types.SimpleNamespace(ts=[], Open=[], High=[], Low=[], Close=[], Volume=[])
+
+
+class FakeApi:
+    """Records every api.kbars(contract, start=, end=) call; snapshots() answers from a canned map."""
+
+    def __init__(self, snapshot_by_code):
+        self.snapshot_by_code = snapshot_by_code
+        self.kbars_calls = []
+
+    def snapshots(self, contracts):
+        return [self.snapshot_by_code[c.code] for c in contracts if c.code in self.snapshot_by_code]
+
+    def kbars(self, contract, start=None, end=None):
+        self.kbars_calls.append({"code": contract.code, "start": start, "end": end})
+        return EMPTY_KBARS
+
+
+def test_fetch_futures_rows_requests_yesterday_through_today():
+    snap = make_snapshot("TXFJ6", 17010.0, utc_ns(2026, 9, 19, 1, 0))
+    api = FakeApi(snapshot_by_code={"TXFJ6": snap})
+
+    fetcher.fetch_futures_rows(api, {"TXFJ6": TXF_CONTRACT}, ["TXFJ6"], "2026-09-19")
+
+    assert api.kbars_calls == [{"code": "TXFJ6", "start": "2026-09-18", "end": "2026-09-19"}]
