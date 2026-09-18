@@ -65,6 +65,7 @@ from __future__ import annotations  # defers `X | None` annotations so --check's
 
 import argparse
 import json
+import math
 import os
 import signal
 import sys
@@ -413,6 +414,81 @@ def fetch_futures_rows(api, contracts: dict, codes: list, today: str) -> dict:
     return rows
 
 
+def fetch_futures_positions(api) -> list:
+    """
+    `api.list_positions(api.futopt_account)` - a login with no futures
+    account at all has `futopt_account is None`, and an account that exists
+    but never passed 簽署中心 has `signed=False` (list_positions on it raises
+    HTTP 406). Both are normal shapes, never guessed at, so both are checked
+    here before the call rather than leaving the 406 to the caller's
+    try/except every single tick.
+    """
+    account = getattr(api, "futopt_account", None)
+    if account is None:
+        print("期貨帳戶未設定（futopt_account 是 None），期貨庫存視為空", file=sys.stderr)
+        return []
+    if not getattr(account, "signed", True):
+        print(f"期貨帳戶未簽署（{field(account, 'account_id', '?')} signed=False），期貨庫存視為空", file=sys.stderr)
+        return []
+    return api.list_positions(account) or []
+
+
+def futures_holding_row(position, contract) -> dict | None:
+    """
+    One futures-holdings.json entry; multiplier/prevClose always come from
+    `contract`, never a lookup table. qty carries the direction sign (Sell
+    negative) the same way build_holdings_payload's stock qty does, so the
+    band's (price - cost) * qty * multiplier needs no separate sign lookup.
+    """
+    code = str(field(position, "code", "")).strip()
+    qty = float(field(position, "quantity", 0) or 0)
+    if not code or qty == 0:
+        return None
+    direction = "Sell" if "Sell" in str(field(position, "direction", "Buy")) else "Buy"
+    if direction == "Sell":
+        qty = -qty
+    return {
+        "code": code,
+        "name": field(contract, "name", None) or code,
+        "qty": qty,
+        "cost": round(float(field(position, "price", 0) or 0), 4),
+        "price": round(float(field(position, "last_price", 0) or 0), 4),
+        "prevClose": round(float(field(contract, "reference", 0) or 0), 4),
+        "multiplier": field(contract, "multiplier", 1),
+        "direction": direction,
+    }
+
+
+def check_futures_pnl(position, contract) -> str | None:
+    """
+    The SDK's own `pnl` vs (last_price - price) * quantity * multiplier
+    (verified against a real SRFJ6 position) - neither side is trusted
+    silently. `abs_tol` absorbs float noise from the multiplication chain
+    (e.g. 1200.0000000000027), not a real mismatch: a genuine mismatch is
+    off by many multiples of one price tick, never a fraction of a cent.
+    """
+    quantity = float(field(position, "quantity", 0) or 0)
+    price = float(field(position, "price", 0) or 0)
+    last_price = float(field(position, "last_price", 0) or 0)
+    multiplier = float(field(contract, "multiplier", 1) or 1)
+    expected = (last_price - price) * quantity * multiplier
+    sdk_pnl = float(field(position, "pnl", 0) or 0)
+    if math.isclose(expected, sdk_pnl, rel_tol=0, abs_tol=1.0):
+        return None
+    code = field(position, "code", "?")
+    return f"{code} pnl 不符：SDK={sdk_pnl}，算出={expected}"
+
+
+def build_futures_holdings_payload(rows: list) -> dict:
+    """
+    futures-holdings.json's shape. Unlike build_futures_payload (None when
+    there are no quotes), this always returns a payload - `holdings: []` on
+    an unsigned or missing futopt_account - written every tick so the band
+    can tell "no positions" from "fetcher dead" from asOf alone.
+    """
+    return {"asOf": int(time.time() * 1000), "market": "tf", "source": "永豐 期貨", "holdings": rows}
+
+
 def build_holdings_payload(positions: list, contracts: dict, quotes: dict, watchlist_names: dict) -> dict | None:
     """
     `api.list_positions` -> the holdings file's shape (see
@@ -660,6 +736,7 @@ def main() -> None:
     out_path = out_dir / "stock-quotes.json"
     holdings_path = out_dir / "stock-holdings.json"
     futures_out_path = out_dir / "futures-quotes.json"
+    futures_holdings_path = out_dir / "futures-holdings.json"
     futures_codes = split_futures_codes(args.futures)
 
     pidfile = Path(args.pidfile).expanduser().resolve() if args.pidfile else None
@@ -744,8 +821,9 @@ def main() -> None:
         if contract is not None:
             index_contracts.append((name, contract))
 
-    # Futures codes are fixed for the process lifetime (they come only from
-    # --futures, never from positions - T5), so contracts resolve once here.
+    # --futures codes resolve once here; a position's code (T5) resolves
+    # lazily inside the tick loop instead, the same way a stock position
+    # adds itself to `symbols` there - contracts persist across ticks either way.
     futures_contracts: dict = {}
 
     def ensure_futures_contract(code: str):
@@ -765,6 +843,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
 
     first_tick = True
+    last_futures_positions: list = []  # kept across ticks the same way `positions` is - see below
     try:
         while running:
             # Heartbeat check first, before doing any work this tick: a stale
@@ -813,9 +892,27 @@ def main() -> None:
                 write_atomic(holdings_path, holdings_payload)
                 print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
 
-            if futures_codes:
+            try:
+                futures_positions = fetch_futures_positions(api)
+            except Exception as err:  # noqa: BLE001 - keep last tick's positions rather than crash (the unsigned-account 406 lands here)
+                print(f"期貨庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
+                futures_positions = last_futures_positions
+            last_futures_positions = futures_positions
+
+            # union: a held code not on --futures still gets a live quote
+            # (spec story 22) - resolve its contract the same way a --futures
+            # code resolves, via the same flat Contracts.Futures lookup.
+            tick_futures_codes = list(futures_codes)
+            for pos in futures_positions:
+                pos_code = str(field(pos, "code", "")).strip()
+                if pos_code:
+                    ensure_futures_contract(pos_code)
+                    if pos_code not in tick_futures_codes:
+                        tick_futures_codes.append(pos_code)
+
+            if futures_codes or futures_positions:
                 try:
-                    futures_rows = fetch_futures_rows(api, futures_contracts, futures_codes, date.today().isoformat())
+                    futures_rows = fetch_futures_rows(api, futures_contracts, tick_futures_codes, date.today().isoformat())
                 except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
                     print(f"期貨快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                     futures_rows = {}
@@ -823,6 +920,32 @@ def main() -> None:
                 if futures_payload:
                     write_atomic(futures_out_path, futures_payload)
                     print(f"{len(futures_payload['quotes'])} 檔期貨 -> {futures_out_path}", file=sys.stderr)
+
+                try:
+                    holding_rows = []
+                    for pos in futures_positions:
+                        pos_code = str(field(pos, "code", "")).strip()
+                        contract = futures_contracts.get(pos_code)
+                        if not contract:
+                            print(f"期貨庫存 {pos_code} 略過：合約未解析", file=sys.stderr)
+                            continue
+                        row = futures_holding_row(pos, contract)
+                        if row is None:
+                            continue
+                        mismatch = check_futures_pnl(pos, contract)
+                        holding_rows.append(row)
+                        status = mismatch if mismatch else "OK"
+                        print(
+                            f"期貨庫存 {row['code']} 方向={row['direction']} qty={row['qty']} 乘數={row['multiplier']} pnl={status}",
+                            file=sys.stderr,
+                        )
+                    futures_holdings_payload = build_futures_holdings_payload(holding_rows)
+                except Exception as err:  # noqa: BLE001 - same story as the quotes side
+                    print(f"期貨庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    futures_holdings_payload = None
+                if futures_holdings_payload:
+                    write_atomic(futures_holdings_path, futures_holdings_payload)
+                    print(f"{len(futures_holdings_payload['holdings'])} 檔期貨庫存 -> {futures_holdings_path}", file=sys.stderr)
 
             if args.interval <= 0:
                 break
