@@ -762,12 +762,18 @@ function pageSize(columns: 1 | 2): number {
   return columns === 2 ? PAGE_SIZE_2COL : PAGE_SIZE_1COL
 }
 
-/** the markets one feed tick prices, given where the band is pointed right now */
+/**
+ * The markets one feed tick prices, given where the band is pointed right
+ * now. `tf` rides along whenever the config lists futures, whatever is on
+ * screen: it costs no HTTP request, and the 永豐 fetcher must not die every
+ * night just because 美股 (21:30-04:00) is the market on the band. Whether
+ * its session is open is marketNeedsFeed's call.
+ */
 function feedMarkets(cfg: Config, market: MarketId): MarketId[] {
   if (cfg.feed === 'off') return []
-  if (cfg.feed === 'both') return ['tw', 'us']
-  if (cfg.feed === 'auto') return [market]
-  return [cfg.feed]
+  const markets: MarketId[] = cfg.feed === 'both' ? ['tw', 'us'] : cfg.feed === 'auto' ? [market] : [cfg.feed]
+  if (hasFutures(cfg) && !markets.includes('tf')) markets.push('tf')
+  return markets
 }
 
 /** what one market costs per tick, before the chart view's own bar fetch is added */
@@ -1708,6 +1714,8 @@ let loggedDroppedFutures = false
 // whether the runtime-dir quotes file specifically (not the project
 // override) is fresh - feedTwShioaji's own health signal, set every poll
 let runtimeQuotesFresh = false
+// same for the runtime-dir futures file - the tf route's only health signal
+let futuresQuotesFresh = false
 // when spawnShioaji last ran, so it is never re-run more than once a minute
 // (see spawnShioaji's own comment for the full respawn rule)
 let lastShioajiSpawn = 0
@@ -1898,6 +1906,10 @@ function snapshotHolds(asOf: number, now: number, market: MarketId): boolean {
  */
 function marketNeedsFeed(now: number, market: MarketId): boolean {
   if (phaseOf(now, market) === 'open') return true
+  // tf only ever arrives through the file (never publish, so liveBy.tf is
+  // never set): the closing-snapshot rule below would read as "always",
+  // and the heartbeat would keep the fetcher alive all weekend
+  if (market === 'tf') return false
   const snap = liveBy[market]
   // never fetched, or the snapshot predates the close and so is not the
   // closing price yet
@@ -2143,7 +2155,9 @@ export const register: Register = on => {
       runtimeQuotesFresh = runtimeQuotes !== undefined
       quotesFiles = {}
       fillQuoteSlots(runtimeQuotes ?? parseQuotes(projectQuotesText, now), ['tw', 'us'])
-      fillQuoteSlots(parseQuotes(futuresQuotesText, now), ['tf'])
+      const futuresQuotes = parseQuotes(futuresQuotesText, now)
+      futuresQuotesFresh = futuresQuotes !== undefined
+      fillQuoteSlots(futuresQuotes, ['tf'])
       // The project-path holdings file only: a 0.9-era Shioaji fetcher wrote
       // its output straight here (before runtimeDir existed) and always
       // stamped it "永豐 庫存" - see parseHoldingsFile's docblock. That file
@@ -2391,31 +2405,100 @@ export const register: Register = on => {
      * dead fetcher from either this respawn check or the visible-failure
      * warning below.
      *
-     * Respawn rule: once at session start (the first feed tick), then only
-     * when the quotes file has gone stale (>120s, i.e. no script is feeding
-     * it) AND the last spawn attempt was more than 60s ago - so a script
-     * that is merely slow to log in is never spawned a second time on top of
-     * itself, and a script that died is retried at most once a minute.
+     * Respawn rule (spawnShioaji): once at session start (the first feed
+     * tick), then only when the quotes file has gone stale (>120s, i.e. no
+     * script is feeding it) AND the last spawn attempt was more than 60s ago
+     * - so a script that is merely slow to log in is never spawned a second
+     * time on top of itself, and a script that died is retried at most once
+     * a minute. The heartbeat itself is feedOnce's, written before any route
+     * runs, so the script's first-tick exemption still sees a fresh one.
      */
-    const feedTwShioaji = async (now: number): Promise<boolean> => {
-      const heartbeatPath = `${runtime}stock-band.heartbeat`
-      // Written every tick the Shioaji route is wanted, whether or not this
-      // call ends up spawning - it is the signal the script watches: it
-      // exits by itself once the heartbeat is older than 90s (band closed,
-      // or moved to the US board), so a session that stops asking for
-      // Taiwan prices does not leave the script running forever.
-      try {
-        await $.fs.write(heartbeatPath, String(now))
-      } catch (err) {
-        $.ui.log(`tw-stock-mod: could not write the shioaji heartbeat: ${err}`)
-      }
+    const heartbeatPath = `${runtime}stock-band.heartbeat`
+    const expand = (p: string) => (home && p.startsWith('~') ? home + p.slice(1) : p)
+    const shioajiLogPath = `${runtime}stock-shioaji.log`
+    const shioajiPidPath = `${runtime}stock-shioaji.pid`
 
-      const expand = (p: string) => (home && p.startsWith('~') ? home + p.slice(1) : p)
+    /**
+     * The one spawn path for the fetcher, whichever market asks first. It
+     * always carries both `--codes` and `--futures` (possibly empty): the
+     * pidfile means the first spawn fixes the argv for the process lifetime,
+     * so a fetcher started for 台股 at 10:00 must already know the futures
+     * codes it will be asked for at 15:00. A changed list takes effect on
+     * the next spawn; a live fetcher is never restarted for it.
+     */
+    const spawnShioaji = async (now: number): Promise<void> => {
+      if (lastShioajiSpawn && now - lastShioajiSpawn < 60_000) return
+      lastShioajiSpawn = now
       const python = expand(config.shioaji.python)
       const env = expand(config.shioaji.env)
       const script = `${$.plugin.root}/scripts/fetch-quotes-shioaji.py`
-      const logPath = `${runtime}stock-shioaji.log`
-      const pidPath = `${runtime}stock-shioaji.pid`
+      try {
+        // `nohup ... >>log 2>&1 &`, wrapped in `/bin/sh -c`, is what lets
+        // $.process.run resolve at all: run() is one-shot and waits for
+        // the child's stdout/stderr pipes to close as well as its exit,
+        // and a long-lived daemon's pipes never close on their own.
+        // Redirecting them to the log file gives the wrapper's OWN
+        // short-lived pipes something to close immediately - `&`
+        // backgrounds the real script before that happens, so run() sees
+        // the wrapper exit at once while the script keeps going past it,
+        // logging to logPath instead of to a pipe nothing is reading.
+        //
+        // This also means the wrapper resolves with exitCode 0 whether or
+        // not the BACKGROUNDED script itself goes on to fail (missing
+        // python, missing env file, a bad login) - that failure happens
+        // after `sh -c` has already returned, so this try/catch can only
+        // ever catch a failure to launch the shell itself, never a
+        // failure inside the detached job. The only signal this module
+        // can observe for "the script isn't feeding the file" is the file
+        // staying stale, which is exactly what the callers act on.
+        // --codes is the band's own effective Taiwan watchlist (built-in
+        // list included, not just whatever `stock-band.json` overrides) -
+        // without it the script fell back to reading `tw` out of
+        // stock-band.json itself, which is empty whenever a project has no
+        // config file at all, and it then snapshotted only the account's
+        // positions: every OTHER watchlist row stayed on a demo price
+        // while the footer still said 永豐 即時. Passing the codes here is
+        // what makes the script price the same list the table draws.
+        const codes = config.lists.tw.map(t => t.code).join(',')
+        const futures = config.lists.tf.map(t => t.code).join(',')
+        await $.process.run(
+          [
+            '/bin/sh',
+            '-c',
+            `nohup "$0" "$@" >>"${shioajiLogPath}" 2>&1 &`,
+            python,
+            script,
+            '--project',
+            project,
+            '--out-dir',
+            runtime,
+            '--env',
+            env,
+            '--interval',
+            String(config.shioaji.interval),
+            '--codes',
+            codes,
+            '--futures',
+            futures,
+            '--heartbeat',
+            heartbeatPath,
+            '--pidfile',
+            shioajiPidPath,
+          ],
+          { cwd: project, timeoutMs: 15000 },
+        )
+      } catch (err) {
+        // The shell itself failed to launch (e.g. no /bin/sh) - logged,
+        // but not fatal: the callers act on the file staying stale.
+        $.ui.log(`tw-stock-mod: shioaji spawn failed (${err})`)
+      }
+    }
+
+    const feedTwShioaji = async (now: number): Promise<boolean> => {
+      const python = expand(config.shioaji.python)
+      const script = `${$.plugin.root}/scripts/fetch-quotes-shioaji.py`
+      const logPath = shioajiLogPath
+      const pidPath = shioajiPidPath
 
       // Visible failure: a script that spawned (or is already running, per
       // its own pidfile) but still has not produced a fresh runtime-dir
@@ -2454,67 +2537,7 @@ export const register: Register = on => {
       const stale = !runtimeQuotesFresh
       if (!stale) return true
 
-      if (!lastShioajiSpawn || now - lastShioajiSpawn >= 60_000) {
-        lastShioajiSpawn = now
-        try {
-          // `nohup ... >>log 2>&1 &`, wrapped in `/bin/sh -c`, is what lets
-          // $.process.run resolve at all: run() is one-shot and waits for
-          // the child's stdout/stderr pipes to close as well as its exit,
-          // and a long-lived daemon's pipes never close on their own.
-          // Redirecting them to the log file gives the wrapper's OWN
-          // short-lived pipes something to close immediately - `&`
-          // backgrounds the real script before that happens, so run() sees
-          // the wrapper exit at once while the script keeps going past it,
-          // logging to logPath instead of to a pipe nothing is reading.
-          //
-          // This also means the wrapper resolves with exitCode 0 whether or
-          // not the BACKGROUNDED script itself goes on to fail (missing
-          // python, missing env file, a bad login) - that failure happens
-          // after `sh -c` has already returned, so this try/catch can only
-          // ever catch a failure to launch the shell itself, never a
-          // failure inside the detached job. The only signal this module
-          // can observe for "the script isn't feeding the file" is the file
-          // staying stale, which is exactly what returning false does: the
-          // dispatcher below falls through to the next configured source.
-          // --codes is the band's own effective Taiwan watchlist (built-in
-          // list included, not just whatever `stock-band.json` overrides) -
-          // without it the script fell back to reading `tw` out of
-          // stock-band.json itself, which is empty whenever a project has no
-          // config file at all, and it then snapshotted only the account's
-          // positions: every OTHER watchlist row stayed on a demo price
-          // while the footer still said 永豐 即時. Passing the codes here is
-          // what makes the script price the same list the table draws.
-          const codes = config.lists.tw.map(t => t.code).join(',')
-          await $.process.run(
-            [
-              '/bin/sh',
-              '-c',
-              `nohup "$0" "$@" >>"${logPath}" 2>&1 &`,
-              python,
-              script,
-              '--project',
-              project,
-              '--out-dir',
-              runtime,
-              '--env',
-              env,
-              '--interval',
-              String(config.shioaji.interval),
-              '--codes',
-              codes,
-              '--heartbeat',
-              heartbeatPath,
-              '--pidfile',
-              pidPath,
-            ],
-            { cwd: project, timeoutMs: 15000 },
-          )
-        } catch (err) {
-          // The shell itself failed to launch (e.g. no /bin/sh) - logged,
-          // but not fatal: returning false lets the dispatcher fall through.
-          $.ui.log(`tw-stock-mod: shioaji spawn failed (${err})`)
-        }
-      }
+      await spawnShioaji(now)
 
       // A missing python, a missing env file, or a dead login all show up
       // the same way from here: the runtime-dir quotes file stays stale.
@@ -2540,12 +2563,38 @@ export const register: Register = on => {
       }
     }
 
+    /**
+     * 台指期: 永豐 is the only route, so there is nothing to fall through to
+     * and no warning to raise - a stale futures file is drawn as no-data by
+     * the poll. All this does is keep the fetcher alive (the heartbeat, in
+     * feedOnce) and (re)spawn it on the shared rule when its file is stale.
+     */
+    const feedTf = async (now: number) => {
+      if (futuresQuotesFresh) return
+      await spawnShioaji(now)
+    }
+
+    /**
+     * The signal the fetcher watches: it exits by itself once this is older
+     * than 90s, and each tick works only the markets named here. `tw` is
+     * named only when 永豐 is a configured 台股 route, `tf` whenever its
+     * session is open and futures are listed - whatever is on screen.
+     */
+    const writeHeartbeat = async (now: number, markets: MarketId[]) => {
+      try {
+        await $.fs.write(heartbeatPath, JSON.stringify({ ts: now, markets }))
+      } catch (err) {
+        $.ui.log(`tw-stock-mod: could not write the shioaji heartbeat: ${err}`)
+      }
+    }
+
     const feed = async () => {
       const now = await $.clock.now()
       // Snoozed means the table is not on screen at all, so the 30 minutes it
-      // covers need no prices; a 429 sets feedSkipUntil; feedInFlight keeps a
-      // slow answer from stacking a second request on top of it.
-      if (config.feed === 'off' || now < snoozedUntil || now < feedSkipUntil || feedInFlight) return
+      // covers need no prices; feedInFlight keeps a slow answer from stacking
+      // a second request on top of it. A 429 back-off (feedSkipUntil) is
+      // feedOnce's: it holds the HTTP markets only, never the heartbeat.
+      if (config.feed === 'off' || now < snoozedUntil || feedInFlight) return
       feedInFlight = true
       try {
         await feedOnce(now)
@@ -2556,10 +2605,13 @@ export const register: Register = on => {
 
     const feedOnce = async (now: number) => {
       const onScreen = pickMarket(now, modeOverride ?? config.market, hasFutures(config)).market
-      for (const market of feedMarkets(config, onScreen)) {
-        if (market === 'tf') continue // T4 wires the futures feed; nothing to fetch here yet
-        if (!marketNeedsFeed(now, market)) continue
-        if (market === 'us') await feedUs(now)
+      const markets = feedMarkets(config, onScreen).filter(market => marketNeedsFeed(now, market))
+      const wanted = markets.filter(m => m === 'tf' || (m === 'tw' && config.twSources.includes('shioaji')))
+      if (wanted.length > 0) await writeHeartbeat(now, wanted)
+      for (const market of markets) {
+        if (market === 'tf') await feedTf(now)
+        else if (now < feedSkipUntil) continue
+        else if (market === 'us') await feedUs(now)
         else await feedTw(now)
       }
     }
