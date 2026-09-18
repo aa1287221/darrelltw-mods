@@ -70,6 +70,7 @@ import argparse
 import json
 import math
 import os
+import queue
 import signal
 import sys
 import time
@@ -223,9 +224,13 @@ def build_payload(api, contracts: dict, index_contracts: list, watchlist_names: 
 
     # the exchange's own clock, in ms: the band prints it as 更新, so it must
     # be when the prices traded and not when this script woke up
-    traded_ns = max((row.pop("ts", 0) for row in quotes.values()), default=0)
+    traded_ns = max(row["ts"] for row in quotes.values())
     now_ms = int(time.time() * 1000)
-    data_at = traded_ns // 1_000_000 - TAIPEI_OFFSET_MS if traded_ns else now_ms
+    data_at = fix_taipei_ts(traded_ns) if traded_ns else now_ms
+    # per-row stamp too: the tick overlay's stale guard compares against it
+    for row in quotes.values():
+        row_ns = row.pop("ts", 0)
+        row["dataAt"] = fix_taipei_ts(row_ns) if row_ns else data_at
 
     index_rows = snapshot_rows(api, {c.code: c for _, c in index_contracts})
     indices = []
@@ -253,7 +258,7 @@ def build_payload(api, contracts: dict, index_contracts: list, watchlist_names: 
         # (watchlist UNION positions, kept current every tick in main()), so
         # this covers a position-only code the same as a watchlist one.
         "quotes": {
-            code: {"price": round(row["price"], 4), "prevClose": round(row["prevClose"], 4), "name": row["name"]}
+            code: {"price": round(row["price"], 4), "prevClose": round(row["prevClose"], 4), "name": row["name"], "dataAt": row["dataAt"]}
             for code, row in quotes.items()
         },
     }
@@ -358,11 +363,14 @@ def futures_quote_row(contract, snapshot, bars: list, requested_code: str) -> di
 
 
 def build_futures_payload(rows: dict) -> dict | None:
-    """futures-quotes.json's shape; dataAt is the newest corrected snapshot ts across rows, like build_payload's own dataAt."""
+    """futures-quotes.json's shape; each row keeps its own corrected snapshot
+    ts as `dataAt`, and the file's dataAt is the newest of them."""
     if not rows:
         return None
     now_ms = int(time.time() * 1000)
-    data_at = max((row.pop("ts", 0) for row in rows.values()), default=0) or now_ms
+    for row in rows.values():
+        row["dataAt"] = row.pop("ts", 0)
+    data_at = max(row["dataAt"] for row in rows.values()) or now_ms
     return {
         "asOf": now_ms,
         "dataAt": data_at,
@@ -447,6 +455,125 @@ def apply_tick(rows: dict, tick: TickEvent, code_map: dict) -> list[str]:
 def should_write(last_write_ms: int, now_ms: int, dirty: bool) -> bool:
     """A dirty overlay is flushed at most once per second; a clean one never."""
     return dirty and (now_ms - last_write_ms) >= TICK_WRITE_MIN_INTERVAL_MS
+
+
+class QuotesOverlay:
+    """One quotes file's in-memory copy between snapshots: `rows` are the
+    payload's quotes (each with its own dataAt), `template` the rest."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.template: dict | None = None
+        self.rows: dict = {}
+        self.dirty = False
+        self.last_write_ms = 0
+
+    def absorb(self, payload: dict, now_ms: int) -> dict:
+        """A fresh snapshot replaces the overlay; a row whose tick is newer
+        than the snapshot's stamp keeps the tick. Returns the payload to
+        write (the overlay is clean afterwards)."""
+        rows = {}
+        for code, row in payload["quotes"].items():
+            old = self.rows.get(code)
+            if old and old.get("dataAt", 0) > row.get("dataAt", 0):
+                row = dict(row, price=old["price"], dataAt=old["dataAt"])
+            rows[code] = row
+        self.rows = rows
+        self.template = {k: v for k, v in payload.items() if k != "quotes"}
+        self.dirty = False
+        self.last_write_ms = now_ms
+        return self.payload(now_ms)
+
+    def clear(self) -> None:
+        self.template = None
+        self.rows = {}
+        self.dirty = False
+
+    def payload(self, now_ms: int) -> dict:
+        out = dict(self.template or {})
+        out["asOf"] = now_ms
+        out["dataAt"] = max((row.get("dataAt", 0) for row in self.rows.values()), default=0) or out.get("dataAt", now_ms)
+        out["quotes"] = self.rows
+        return out
+
+
+def new_tick_stats() -> dict:
+    return {"applied": {}, "simtrade": 0, "ignored": 0, "other_market": 0, "writes": {}}
+
+
+def drain_ticks(tick_queue: queue.Queue, overlays: dict, code_maps: dict, kbars_cache: dict, stats: dict) -> None:
+    """Apply every queued tick to the worked markets' overlays (`overlays`
+    holds only those, so a tick for any other market is dropped) and fold
+    futures ticks into the trailing bar. SDK events ride the same queue so
+    they print from the main thread, in order."""
+    while True:
+        try:
+            item = tick_queue.get_nowait()
+        except queue.Empty:
+            return
+        if not isinstance(item, TickEvent):
+            print(f"永豐 事件 resp={item[1]} code={item[2]} {item[3]} {item[4]}", file=sys.stderr)
+            continue
+        overlay = overlays.get(item.market)
+        if overlay is None:
+            stats["other_market"] += 1
+            continue
+        changed = apply_tick(overlay.rows, item, code_maps.get(item.market, {}))
+        if not changed:
+            stats["simtrade" if item.simtrade else "ignored"] += 1
+            continue
+        stats["applied"][item.code] = stats["applied"].get(item.code, 0) + 1
+        overlay.dirty = True
+        if item.market == "tf":
+            for code in changed:
+                entry = kbars_cache.get(code)
+                if entry is not None:
+                    update_trailing_bar(entry, tick_ts_ms(item.at), float(item.close))
+
+
+def flush_overlays(overlays: dict, now_ms: int, stats: dict) -> None:
+    for market, overlay in overlays.items():
+        if should_write(overlay.last_write_ms, now_ms, overlay.dirty):
+            write_atomic(overlay.path, overlay.payload(now_ms))
+            overlay.last_write_ms = now_ms
+            overlay.dirty = False
+            stats["writes"][market] = stats["writes"].get(market, 0) + 1
+
+
+def format_tick_stats(stats: dict) -> str:
+    applied = " ".join(f"{code}={n}" for code, n in sorted(stats["applied"].items())) or "（沒有）"
+    writes = " ".join(f"{m}={n}" for m, n in sorted(stats["writes"].items())) or "（沒有）"
+    return (
+        f"tick 套用 {applied} · 略過 試撮={stats['simtrade']} 過期/未知={stats['ignored']} "
+        f"非目前市場={stats['other_market']} · tick 寫檔 {writes}"
+    )
+
+
+def sync_subscriptions(api, sj, desired: dict, subscribed: dict) -> None:
+    """Bring the SDK's tick subscriptions to `desired` ((market, code) ->
+    contract): subscribe what is new, unsubscribe what is gone. A failure
+    is logged with its reason and retried next time round."""
+    for key, contract in desired.items():
+        if key in subscribed:
+            continue
+        market, code = key
+        resolved = field(contract, "target_code", None) or code
+        try:
+            api.subscribe(contract, quote_type=sj.QuoteType.Tick, version=sj.QuoteVersion.v1)
+        except Exception as err:  # noqa: BLE001 - one bad subscription must not stop the others or the snapshots
+            print(f"訂閱 tick 失敗 {market} {code}: {type(err).__name__}: {err}", file=sys.stderr)
+            continue
+        subscribed[key] = contract
+        print(f"訂閱 tick {market} {code}" + (f" -> {resolved}" if resolved != code else ""), file=sys.stderr)
+    for key in [k for k in subscribed if k not in desired]:
+        market, code = key
+        try:
+            api.unsubscribe(subscribed[key], quote_type=sj.QuoteType.Tick, version=sj.QuoteVersion.v1)
+        except Exception as err:  # noqa: BLE001 - keep it listed and retry next time round
+            print(f"退訂 tick 失敗 {market} {code}: {type(err).__name__}: {err}", file=sys.stderr)
+            continue
+        del subscribed[key]
+        print(f"退訂 tick {market} {code}", file=sys.stderr)
 
 
 def split_futures_codes(raw: str) -> list[str]:
@@ -893,6 +1020,34 @@ def main() -> None:
         running = False
 
     running = True
+
+    # Ticks arrive on an SDK thread: the callbacks only queue a plain tuple,
+    # the main loop applies them every 0.2 s of its sleep (drain_ticks).
+    tick_queue: queue.Queue = queue.Queue()
+
+    def queue_tick(market: str, tick) -> None:
+        tick_queue.put(
+            TickEvent(
+                market=market,
+                code=str(field(tick, "code", "")),
+                at=field(tick, "datetime", datetime.now(TAIPEI_TZ).replace(tzinfo=None)),
+                close=field(tick, "close", 0),
+                price_chg=field(tick, "price_chg", 0),
+                pct_chg=field(tick, "pct_chg", 0),
+                total_volume=int(field(tick, "total_volume", 0) or 0),
+                simtrade=bool(field(tick, "simtrade", False)),
+            )
+        )
+
+    # *args: the pyi types the callback as (tick) but classic shioaji passed
+    # (exchange, tick) - the tick is the last argument either way
+    api.set_on_tick_stk_v1_callback(lambda *args: queue_tick("tw", args[-1]))
+    api.set_on_tick_fop_v1_callback(lambda *args: queue_tick("tf", args[-1]))
+    api.set_event_callback(lambda resp_code, event_code, info, event: tick_queue.put(("event", resp_code, event_code, info, event)))
+    tw_overlay = QuotesOverlay(out_path)
+    tf_overlay = QuotesOverlay(futures_out_path)
+    subscribed: dict = {}
+    tick_stats = new_tick_stats()
     try:
         positions = fetch_positions(api)
     except Exception as err:  # noqa: BLE001 - a failed first fetch just means no holdings this run
@@ -1015,6 +1170,9 @@ def main() -> None:
                 f"期貨={tf_note}  （{why}）",
                 file=sys.stderr,
             )
+            if subscribed:
+                print(format_tick_stats(tick_stats), file=sys.stderr)
+            tick_stats = new_tick_stats()
 
             if work_tw:
                 try:
@@ -1034,7 +1192,7 @@ def main() -> None:
                     print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                     payload = None
                 if payload:
-                    write_atomic(out_path, payload)
+                    write_atomic(out_path, tw_overlay.absorb(payload, int(time.time() * 1000)))
                     rows = len(payload["quotes"])
                     stamp = time.strftime("%H:%M:%S", time.localtime(payload["dataAt"] / 1000))
                     print(f"{stamp}  {rows} 檔 -> {out_path}", file=sys.stderr)
@@ -1063,7 +1221,7 @@ def main() -> None:
                     futures_rows = {}
                 futures_payload = build_futures_payload(futures_rows)
                 if futures_payload:
-                    write_atomic(futures_out_path, futures_payload)
+                    write_atomic(futures_out_path, tf_overlay.absorb(futures_payload, int(time.time() * 1000)))
                     print(f"{len(futures_payload['quotes'])} 檔期貨 -> {futures_out_path}", file=sys.stderr)
 
                 try:
@@ -1092,12 +1250,41 @@ def main() -> None:
                     write_atomic(futures_holdings_path, futures_holdings_payload)
                     print(f"{len(futures_holdings_payload['holdings'])} 檔期貨庫存 -> {futures_holdings_path}", file=sys.stderr)
 
+            # Ticks follow the worked set: subscribe what this tick served,
+            # unsubscribe what it no longer does, and only keep an overlay
+            # (a tick target) for a market whose snapshot succeeded.
+            desired: dict = {}
+            overlays: dict = {}
+            code_maps: dict = {}
+            if work_tw:
+                desired.update({("tw", code): contract for code, contract in contracts.items()})
+                code_maps["tw"] = {code: [code] for code in contracts}
+                if tw_overlay.template is not None:
+                    overlays["tw"] = tw_overlay
+            else:
+                tw_overlay.clear()
+            if work_tf:
+                code_maps["tf"] = {}
+                for code in tick_futures_codes:
+                    contract = futures_contracts.get(code)
+                    if contract is None:
+                        continue
+                    desired[("tf", code)] = contract
+                    code_maps["tf"].setdefault(field(contract, "target_code", None) or code, []).append(code)
+                if tf_overlay.template is not None:
+                    overlays["tf"] = tf_overlay
+            else:
+                tf_overlay.clear()
+            sync_subscriptions(api, sj, desired, subscribed)
+
             if args.interval <= 0:
                 break
             slept = 0.0
             while running and slept < args.interval:
                 time.sleep(0.2)
                 slept += 0.2
+                drain_ticks(tick_queue, overlays, code_maps, futures_kbars_cache, tick_stats)
+                flush_overlays(overlays, int(time.time() * 1000), tick_stats)
     finally:
         try:
             api.logout()

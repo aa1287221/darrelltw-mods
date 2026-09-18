@@ -255,3 +255,82 @@ def test_tick_updated_bars_survive_the_next_snapshot_inside_the_kbars_window():
 
     assert api.kbars_calls == 1
     assert rows["TXFJ6"]["bars"][-1] == [110.0, 115.0, 109.0, 115.0]
+
+
+# ---------------------------------------------------------------------------
+# per-row dataAt: the stale-tick guard's state, written into the file so a
+# reader can see which row moved (jq .quotes.TXFR1.dataAt)
+# ---------------------------------------------------------------------------
+
+def test_futures_payload_stamps_each_row_with_its_own_data_at():
+    rows = {
+        "TXFR1": {"price": 17010.0, "prevClose": 17000.0, "name": "n", "multiplier": 200, "decimals": 0, "bars": [], "ts": utc_ms(2026, 9, 18, 2, 5)},
+        "SRFJ6": {"price": 109.5, "prevClose": 108.3, "name": "n", "multiplier": 1000, "decimals": 2, "bars": [], "ts": utc_ms(2026, 9, 18, 2, 0)},
+    }
+
+    payload = fetcher.build_futures_payload(rows)
+
+    assert payload["quotes"]["TXFR1"]["dataAt"] == utc_ms(2026, 9, 18, 2, 5)
+    assert payload["quotes"]["SRFJ6"]["dataAt"] == utc_ms(2026, 9, 18, 2, 0)
+    assert payload["dataAt"] == utc_ms(2026, 9, 18, 2, 5)
+
+
+class FakeStockApi:
+    def snapshots(self, contracts):
+        return [types.SimpleNamespace(code=c.code, close=1005.0, change_price=15.0, ts=raw_ns(2026, 9, 18, 10, 30)) for c in contracts]
+
+
+def test_stock_payload_stamps_each_row_with_its_own_data_at():
+    contract = types.SimpleNamespace(code="2330", reference=990.0, name="台積電")
+
+    payload = fetcher.build_payload(FakeStockApi(), {"2330": contract}, [], {})
+
+    assert payload["quotes"]["2330"]["dataAt"] == utc_ms(2026, 9, 18, 2, 30)  # Taipei 10:30 corrected
+    assert payload["dataAt"] == utc_ms(2026, 9, 18, 2, 30)
+
+
+# ---------------------------------------------------------------------------
+# QuotesOverlay.absorb: a snapshot replaces the overlay, except a row whose
+# tick is newer than the snapshot's own stamp keeps the tick
+# ---------------------------------------------------------------------------
+
+def snapshot_payload(price, data_at):
+    return {"asOf": 1, "dataAt": data_at, "market": "tf", "source": "永豐",
+            "quotes": {"TXFR1": {"price": price, "prevClose": 47428.0, "name": "n", "dataAt": data_at}}}
+
+
+def test_absorb_keeps_a_tick_newer_than_the_snapshot():
+    overlay = fetcher.QuotesOverlay(Path("/nonexistent/futures-quotes.json"))
+    overlay.absorb(snapshot_payload(47557.0, T0), now_ms=T0)
+    fetcher.apply_tick(overlay.rows, make_tick("TXFJ6", taipei(21, 0, 5), Decimal("47560")), CODE_MAP)
+
+    written = overlay.absorb(snapshot_payload(47550.0, T0 + 3_000), now_ms=T0 + 6_000)  # snapshot stamped before the tick
+
+    assert written["quotes"]["TXFR1"]["price"] == 47560.0
+    assert written["quotes"]["TXFR1"]["dataAt"] == T0 + 5_000
+    assert written["dataAt"] == T0 + 5_000
+    assert overlay.dirty is False
+
+
+def test_absorb_takes_a_newer_snapshot():
+    overlay = fetcher.QuotesOverlay(Path("/nonexistent/futures-quotes.json"))
+    overlay.absorb(snapshot_payload(47557.0, T0), now_ms=T0)
+    fetcher.apply_tick(overlay.rows, make_tick("TXFJ6", taipei(21, 0, 5), Decimal("47560")), CODE_MAP)
+
+    written = overlay.absorb(snapshot_payload(47550.0, T0 + 8_000), now_ms=T0 + 9_000)
+
+    assert written["quotes"]["TXFR1"]["price"] == 47550.0
+    assert written["dataAt"] == T0 + 8_000
+
+
+def test_overlay_payload_after_ticks_advances_data_at_and_as_of():
+    overlay = fetcher.QuotesOverlay(Path("/nonexistent/futures-quotes.json"))
+    overlay.absorb(snapshot_payload(47557.0, T0), now_ms=T0)
+    fetcher.apply_tick(overlay.rows, make_tick("TXFJ6", taipei(21, 0, 7), Decimal("47570")), CODE_MAP)
+
+    payload = overlay.payload(now_ms=T0 + 7_500)
+
+    assert payload["asOf"] == T0 + 7_500
+    assert payload["dataAt"] == T0 + 7_000
+    assert payload["quotes"]["TXFR1"]["price"] == 47570.0
+    assert payload["market"] == "tf" and payload["source"] == "永豐"
