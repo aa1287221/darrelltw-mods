@@ -187,16 +187,17 @@ highlighted top mover:
   band's own table rows to show them). `翻頁` / `趨勢圖` /
   `收起 30 分` stay right-aligned in the same row. **In the trend view the
   row changes**: the session state and hours step aside (the chart draws its
-  own title with both on it) and `◀ 上一檔` / `下一檔 ▶ n/N` / `回清單` take
-  that space, left-aligned after the tabs — next to the symbol they move
-  through, rather than across the terminal from it; the tabs stay, so
+  own title with both on it) and `◀ 上一檔` / `下一檔 ▶ n/N` / `回清單`, the
+  timeframe buttons and the `K線` / `曲線` pair take that space, left-aligned
+  after the tabs — next to the symbol they move through, rather than across
+  the terminal from it (see [The trend view](#the-trend-view-k-bars)); the tabs stay, so
   another market is one press away from the chart too. **No hotkeys**: a letter hotkey only fires
   once a Button already holds the focus ring, which buys nothing over Enter,
   and a digit hotkey would eat a prompt that starts with that digit — every
   button here is a click, or focus then Enter.
 - **8 rows below that** in the table (header, rule, five quote rows, footer);
-  the chart view keeps its own 9, title included, since that title names the
-  symbol being charted rather than the market. **Price gets the widest,
+  the chart view is `chartRows` tall (default 16) with its own title row,
+  since that title names the symbol being charted rather than the market. **Price gets the widest,
   brightest column** in the single-column table, with its own breathing room;
   change$ and change% are right-anchored after it, capped at column 74. Under
   ~46 columns the name goes too.
@@ -233,29 +234,112 @@ highlighted top mover:
 ## The trend view (K bars)
 
 ```
- 美股 [台股] 台股庫存  ◀ 上一檔  下一檔 ▶ 2/10  回清單            [收起 30分]
- 2330 台積電  1,188.29 ▲ +23.29 (+2.00%)           K 棒（示範）· 台股 ☀ 盤中
- ▀▄          ▄▀▀▀▀▄          ▄▀▄▀▀          ▄▄▀▄▀▄          ▄▀▀   1,190.77
-  ...candles, one per two columns, red/green by bar direction...
- 09:00────────────────────────11:15───────────────────────13:30
- 10 檔中第 2 檔                                    示範資料（未接 API） · darrell_tw_
+ 美股 台股 台股庫存 [台指期]  ◀ 上一檔  下一檔 ▶ 1/3  回清單  1分 [5分] 15分 60分  [K線] 曲線                  [收起 30分]
+ TXFR1 台指近 (TXFJ6)  47,500 ▲ +72 (+0.15%)  開 47,472 高 47,511 低 47,456 收 47,500 量 112             5 分 K（永豐）
+                                      █ ▄               █ ▄                               ▄   ▄                  47,532
+                                    ▄ ▀ ▀ ▄             ▀ ▀ ▄           ▄ ▄ █ ▄           █ █ █             ▄
+                                    ▀ █ █ █           ▄ █ ▀ █           ▀ ▀ ▀ ▀           █ ▀ █ █           ▀    47,500
+                                    █ █ ▀ █         █ █ ▀ █ █         █ █ █ ▀ █ █         █ ▀ ▀ █ ▄       ▄ █    47,492
+                                  ▄ █     █ ▀       ▀ █ ▀   █ █       █ ▀     █ ▀       ▀ █   █ █ ▀       █ █
+                                ▄ █ ▀     █ █ █   ▄ █ ▀     █ ▀       █ █     █ █     ▄ █ █     ▀ █ ▄   █ █ ▀
+                                █ █ █       █ ▀   ▀ █       ▀ █ ▄ ▄ ▄ █       ▀ █ ▄   █ █         █ █   █ ▀ ▀
+                              █ █ ▀         █ █ ▄ █ █         ▀ █ █ █ ▀         █ ▀ █ █ ▀         ▀ █ ▄ █ █      47,440
+ ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈█┈▀┈┈┈┈┈┈┈┈┈┈┈▀┈█┈▀┈█┈┈┈┈┈┈┈┈┈┈┈▀┈▀┈█┈█┈▀┈┈┈┈┈┈┈┈┈█┈█┈█┈▀┈▀┈┈┈┈┈┈┈┈┈▀┈█┈█┈▀┈┈┈┈    47,428
+                              ▀ ▀             █ ▀ ▀             █ ▀ ▀           ▀ ▀ █ ▀             ▀ ▀ ▀    
+                              █                   ▀               ▀                                 █ ▀          47,400
+ ─────────────────────────────19:40───20:00───────20:30───────21:00───────21:30───────22:00───────22:30─22:55
+                              ▄ █ ▄ ▄ █ ▄ ▄ █ ▄ ▄ █ █ ▄ ▄ █ ▄ ▄ █ ▄ ▄ █ █ ▄ ▄ █ ▄ ▄ █ ▄ ▄ █ █ ▄ ▄ █ ▄ ▄ █ ▄ ▄    量 152
+                              █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █ █
+ 3 檔中第 1 檔                                                                                       永豐 · darrell_tw_
 ```
 
-Same 9 rows as the button row draws it into, one symbol's candles instead of
-the table — this view keeps its own title row, since the line names the
-symbol rather than the market. The plot is 6 terminal rows of **12 pixel
-rows**: each cell packs two pixels as a half-block (`▀` with the top pixel as
-foreground and the bottom as background) — and unlike braille, those glyphs
-are everywhere. Body color
-follows the market's convention (a bar that closed above its open is red on
-the Taiwan board), wicks are the same hue darkened, and the previous close is
-a faint horizontal reference line. The right edge carries high / previous
-close / low; the axis under the plot is the session's own clock.
+The chart is `chartRows` tall (default 16, see [Configure](#configure)) and
+draws like a broker's intraday chart — the 16 rows above are the harness's
+own render of a 5 分 K 台指期 chart at 120 columns: a title row, 11 plot
+rows, the time axis, two volume rows and the footer. The table and 損益
+views stay 8 rows. At render time the height is clamped to the band's own
+`maxRows − 2`, so the chart never makes the band scroll; `chartRows: 8` is
+the old one-screen layout (title, five plot rows, axis, footer — under 12
+rows the volume rows go first).
 
-Bars come from the quotes file (`bars`), so with no feed connected the chart
-draws demo bars and says so in the title. Only the focused symbol's bars are
-sent to the board, which is why moving through the list is a button press
-rather than a scroll.
+**Plot.** Half-block cells, two price levels per row, so 16 rows are 22
+levels; a cell holds two colours (`▀` with the top pixel as foreground and
+the bottom as background), which is what keeps a one-pixel body distinct
+from the wick above it. Body colour follows the market's convention (a bar
+that closed above its open is red on the Taiwan board), wicks are the same
+hue darkened. Candles sit two columns apart while they fit and one per
+column once they would not (120 one-minute bars fill 108 columns at 120
+wide); the newest bars that fit are drawn, right-aligned to the axis, so
+the empty space is on the old side, as on a broker's chart. The chart is
+not held to the table's 74-column cap: it grows with the terminal up to
+134 columns.
+
+**Price axis.** The last price sits on the axis as a filled tag in the
+row's tone; the previous settlement (昨結) is a dim dotted line across the
+plot with its value on the axis; hi, lo and a label every ~4 rows fill in
+between, at the row's own `decimals`. One label per row and never the same
+number twice — the 8-row chart used to print `47,428` on two rows when the
+previous close was also the top of the range, and a 2-point range at 0
+decimals would round two rows to the same text; `chart-view.mjs` pins both.
+
+**Time axis.** Labels come from the bars' own timestamps (each bar carries
+its bucket start — see the file shape below), so 19:40–23:00 of bars reads
+`19:40 … 22:55` rather than the session's 15:00 / 05:00: first and last bar
+always, round times at the coarsest step whose labels do not collide (every
+30 minutes for 5 分 K two columns apart, every hour one column apart), and
+a dim vertical rule wherever the bars jump a session (夜盤 → 日盤, a day
+change on the 60 分 chart), with that bar's time on the axis. Bars without
+a timestamp (an older quotes file with `[o, h, l, c]`) keep the session's
+open / midpoint / close axis.
+
+**Volume.** At 12 rows or more, bars that carry a volume get two rows of
+half-block histogram under the axis in the bar's tone, the largest bar's
+volume named on the axis (`量 152`, `量 1.4M`).
+
+**Timeframes.** `1分 5分 15分 60分` sit after `回清單` whenever the row's
+file carries a `barsBy` block (the 永豐 futures fetcher writes one,
+resampled from the 1-minute bars it already caches — see [Taiwan futures
+(tf)](#taiwan-futures-tf)); the active one is bracketed, the bar label
+follows it (`60 分 K（永豐）`). A stock row (Yahoo `chart` answers 5 m only)
+shows no timeframe buttons and its 5 分 bars. The choice holds for the
+session.
+
+**K線 / 曲線.** `曲線` draws each bar's close as a continuous braille line
+(four sub-rows per terminal row) in the row's tone, the 昨結 dotted line
+behind it and the area between the two lightly shaded, the way broker apps
+draw the intraday line; axes, volume and timeframes are the same. The mode
+is remembered per market for the session:
+
+```
+ TXFR1 台指近 (TXFJ6)  47,500 ▲ +72 (+0.15%)  開 47,472 高 47,511 低 47,456 收 47,500 量 112             5 分 K（永豐）
+                                                                                                                 47,532
+                                     ⣠⢶⡀                ⣤⡀                                ⣀⣀⣀
+                                    ⡞⠁ ⠳⡄             ⢀⡞⠁⠉⢳             ⡤⠴⠒⠒⢲⡀           ⢠⠇ ⠘⢦              ⡤    47,500
+                                   ⣸⠁   ⠹⡄           ⣠⠏   ⠈⡇          ⢀⡞⠁    ⢧           ⡞   ⠈⠳⡄           ⣰⠃    47,492
+                                  ⢠⠇     ⠙⣆         ⡴⠃     ⢹⡀        ⢀⡏      ⠈⢧         ⣸⠁     ⠙⢦         ⢠⠇
+                                 ⢀⡞       ⠘⣆       ⡼⠁       ⢧        ⣸        ⠘⡆       ⢠⠇       ⠘⣆       ⣰⠋
+                                ⢠⠞         ⠈⢧     ⡼⠁        ⠈⢧⡀     ⢠⠇         ⢳      ⢀⡏         ⠸⡄    ⢀⡞⠁
+                               ⣰⠋           ⠘⣆   ⣰⠃           ⠳⣄   ⢀⡞          ⠈⣇   ⢀⣠⠞           ⠹⡄   ⡼         47,440
+ ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈⠘⠁┈┈┈┈┈┈┈┈┈┈┈┈┈⠸⡄┈⢠⠇┈┈┈┈┈┈┈┈┈┈┈┈┈⠈⠳⣄⣠⠞┈┈┈┈┈┈┈┈┈┈┈┈⠈⠳⣤⠴⠋┈┈┈┈┈┈┈┈┈┈┈┈┈┈⢳⡀⢀⡼⠁┈┈┈┈┈    47,428
+                                              ⠉⠉⠉                 ⠉                                 ⠛⠉
+                                                                                                                 47,400
+ ─────────────────────────────19:40───20:00───────20:30───────21:00───────21:30───────22:00───────22:30─22:55
+```
+
+**Readout.** The title row keeps symbol / price / change and adds the last
+bar's `開 高 低 收` and `量` (dim). At 100 columns a long contract name
+leaves no room for everything, so the row sheds in order: the session badge,
+then the readout, then the bar label.
+
+**The file shape.** A bar is `[open, high, low, close, volume, ts]` with
+`ts` the bucket start in ms; `volume` and `ts` are optional (`[o, h, l, c]`
+and `{o, h, l, c}` still parse). A futures row may add
+`barsBy: { "1": […], "5": […], "15": […], "60": […] }`; `bars` stays the
+5 分 set for older readers. Up to 120 bars per set are kept (a 5 分 chart
+covers ten hours, a 60 分 chart a week). Only the focused symbol's bars —
+and only the timeframe on screen — cross into the board, which is why moving
+through the list is a button press rather than a scroll; with no feed
+connected the chart draws demo bars and says so in the title.
 
 **Three buttons, one job each.** `◀ 上一檔` and `下一檔 ▶` step through the
 symbols on the current page and wrap around at both ends; `回清單` leaves.
@@ -292,6 +376,7 @@ who opens it keeps their own preference — see
 | --- | --- | --- |
 | `market` | `"auto"` | the state a session starts in: `auto` picks by the clock and keeps tracking it until a tab is pressed; `tw`/`us`/`tf` opens on that market instead |
 | `refreshMs` | `3000` | how often the module rebuilds the snapshot (min 1000; fixed at session start — changing it needs `/reload-plugins`). `1000` redraws every second, which is what makes the 永豐 tick overlay visible — see [Taiwan futures (tf)](#taiwan-futures-tf) |
+| `chartRows` | `16` | how tall the trend view is, in rows (min 8; clamped to the band's `maxRows − 2` at render so it never scrolls). `8` is the old one-screen layout; under 12 the volume rows go — see [The trend view](#the-trend-view-k-bars) |
 | `sort` | `"change"` | `change` = by change% desc, `list` = your order |
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
 | `columns` | `"auto"` | how many symbols a row draws: `auto` = 1 when the watchlist is 5 symbols or fewer, 2 for 6 or more; `1`/`2` force it (the board still falls back to 1 if the terminal is too narrow — see [What the band shows](#what-the-band-shows)) |
