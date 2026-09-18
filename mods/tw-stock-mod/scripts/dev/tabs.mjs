@@ -205,6 +205,16 @@ ok(at74.name === '-/-/-', `74 cols: six tabs only, notes and badge gone: ${at74.
 ok(monotone && seen.every(s => ALLOWED.includes(s.split(':')[1])), `drop order sessionNote → taipeiNote → badge, never a tab: ${[...new Set(seen.map(s => s.split(':')[1]))].join(' → ')}`)
 ok(new Set(seen.map(s => s.split(':')[1])).size === 4, 'each of the four rungs is reached somewhere in the sweep')
 
+// --- width, three-tab default: what a plain user sees at the 74-col cap ---------
+// Pinned so the threshold is recorded, not implied: base drew sessionNote
+// unconditionally; the tab row's fits() gate lets it back in from ~82 cols.
+pressTab((await plain.draw()).tabs, '台股')
+const plain74 = shape(await plain.draw(74))
+const plain100 = shape(await plain.draw(100))
+console.log('three tabs:', `74:${plain74.name}`, `100:${plain100.name}`)
+ok(plain74.name === 'badge/-/-', `three tabs at 74 cols: badge stays, sessionNote already gone: ${plain74.name}`)
+ok(plain100.name === 'badge/session/-', `three tabs at 100 cols (台股, no taipeiNote): badge + sessionNote: ${plain100.name}`)
+
 // --- cleanup: the shared fixture goes back to its documented shape -------------
 await rm(`${runtime}futures-holdings.json`, { force: true })
 await band.setConfig({ market: 'us', futures: [], holdings: { us: [] } })

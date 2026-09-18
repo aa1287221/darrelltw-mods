@@ -178,7 +178,9 @@ highlighted top mover:
   clock.) The session state (`☀ 盤中` orange / `☾ 休市` blue), the hours, and
   — when there is room — the same hours restated in Taipei time sit next to
   the tabs; on a narrow terminal the hours go first, then the Taipei
-  restatement, then the session state, never a tab. `翻頁` / `趨勢圖` /
+  restatement, then the session state, never a tab (with the three default
+  tabs the hours need ~82 columns; the mockups above are drawn wider than the
+  band's own table rows to show them). `翻頁` / `趨勢圖` /
   `收起 30 分` stay right-aligned in the same row. **In the trend view the
   row changes**: the session state and hours step aside (the chart draws its
   own title with both on it) and `◀ 上一檔` / `下一檔 ▶ n/N` / `回清單` take
