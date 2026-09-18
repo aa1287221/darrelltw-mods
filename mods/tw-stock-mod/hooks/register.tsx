@@ -25,9 +25,11 @@ import type { Register } from 'claude-code'
 // `.claude/stock-quotes.json` - which stays as the override seam (see
 // stock-band.example.json and docs/stock-api-notes.md) for a hand-edited
 // snapshot or another fetcher to take the band over - then the built-in
-// feed. Holdings follow the same order, except the runtime-dir file never
-// expires (see parseHoldingsFile): a position does not go stale just
-// because nobody wrote a fresh copy recently.
+// feed. 台指期 reads only the fetcher's runtime-dir `futures-quotes.json`
+// (no override, no feed: 永豐 is its only route). Holdings follow the same
+// order, except the runtime-dir file never expires (see parseHoldingsFile):
+// a position does not go stale just because nobody wrote a fresh copy
+// recently.
 //
 // Never name a local variable `h`: every JSX tag in this file compiles to h(...).
 
@@ -449,6 +451,8 @@ type QuoteRow = {
    * instead of the price/change/pct fields; see buildProps' quotes.map.
    */
   noData?: boolean
+  /** price/change digits when the contract says (a futures file's `decimals`); the board defaults to 2 */
+  decimals?: number
 }
 
 // PROTOTYPE: a deterministic sine walk off the previous close, so the band
@@ -504,7 +508,16 @@ function quoteRow(sym: Ticker, price: number, prevClose: number, bars?: Bar[], w
 }
 
 // --- optional config / quotes files ----------------------------------------
-type FileQuote = { price: number; prevClose?: number; name?: string; bars?: Bar[] }
+type FileQuote = {
+  price: number
+  prevClose?: number
+  name?: string
+  bars?: Bar[]
+  /** futures only (futures-quotes.json): points-to-money factor, display digits, and the month an alias resolved to */
+  multiplier?: number
+  decimals?: number
+  resolved?: string
+}
 
 // A holding as the holdings file or `stock-band.json`'s `holdings` block
 // states it - `price`/`prevClose` are optional because the live feed usually
@@ -973,8 +986,10 @@ function parseBars(value: unknown): Bar[] | undefined {
 
 // Parses a `stock-quotes.json` file's text, whichever of the two locations
 // it came from (runtime-dir or the project's `.claude/`, see runtimeDir and
-// the header comment); see stock-band.example.json for the shape. Anything
-// stale or malformed is ignored and the band falls back to demo prices.
+// the header comment), or the fetcher's `futures-quotes.json` (same shape,
+// `market: "tf"`, plus multiplier/decimals/resolved per quote); see
+// stock-band.example.json for the shape. Anything stale or malformed is
+// ignored and the band falls back to demo prices (no-data rows for tf).
 function parseQuotes(text: string | undefined, now: number): QuotesFile | undefined {
   if (!text) return undefined
   let root: Record<string, unknown> | undefined
@@ -994,11 +1009,17 @@ function parseQuotes(text: string | undefined, now: number): QuotesFile | undefi
     if (!entry) continue
     const price = num(entry.price, NaN)
     if (!Number.isFinite(price)) continue
+    // decimals feed toFixed(), which throws outside 0..100 - a bad value in a
+    // fetcher-written file must not take the render down with it
+    const decimals = num(entry.decimals, NaN)
     quotes[code] = {
       price,
       prevClose: typeof entry.prevClose === 'number' ? entry.prevClose : undefined,
       name: typeof entry.name === 'string' ? entry.name : undefined,
       bars: parseBars(entry.bars),
+      multiplier: typeof entry.multiplier === 'number' && entry.multiplier > 0 ? entry.multiplier : undefined,
+      decimals: Number.isInteger(decimals) && decimals >= 0 && decimals <= 8 ? decimals : undefined,
+      resolved: typeof entry.resolved === 'string' && entry.resolved ? entry.resolved : undefined,
     }
   }
   const market = root.market === 'tw' || root.market === 'us' || root.market === 'tf' ? root.market : undefined
@@ -1375,6 +1396,18 @@ type BoardProps = {
   holdingsScroll: number
 }
 
+/**
+ * A futures row's name: the config's own `name` when it gave one (parseFutures
+ * leaves `name === code` when it did not, the idiom pricedHoldings reads too),
+ * else the contract name from the file, else the code - then ` (TXFJ6)` for
+ * an alias, so the table says which month `TXFR1` means today. The stock
+ * markets keep their file-name-first rule; this one is tf only.
+ */
+function futuresName(sym: Ticker, quote: FileQuote): string {
+  const base = sym.name !== sym.code ? sym.name : (quote.name ?? sym.code)
+  return quote.resolved && quote.resolved !== sym.code ? `${base} (${quote.resolved})` : base
+}
+
 /** how long after a page change the outgoing rows are still worth turning from */
 const PAGE_TURN_WINDOW_MS = 2500
 /** holdings per page in the pnl view - rows 2..6 of its 8-row board */
@@ -1400,13 +1433,12 @@ function buildProps(
     if (fromFile) {
       usedFile = true
       const prevClose = fromFile.prevClose ?? sym.prevClose
-      return quoteRow(
-        { ...sym, name: fromFile.name ?? sym.name },
-        fromFile.price,
-        prevClose,
-        fromFile.bars,
-        quotesFile?.prev?.[sym.code]?.price,
-      )
+      const name = market === 'tf' ? futuresName(sym, fromFile) : (fromFile.name ?? sym.name)
+      return {
+        ...quoteRow({ ...sym, name }, fromFile.price, prevClose, fromFile.bars, quotesFile?.prev?.[sym.code]?.price),
+        // omitted, not undefined: see quoteRow on what a Client's props may hold
+        ...(fromFile.decimals !== undefined ? { decimals: fromFile.decimals } : {}),
+      }
     }
     if (quotesFile) {
       // The market HAS a live/override snapshot - it just never priced this
@@ -1528,11 +1560,12 @@ function buildProps(
   // Only the one symbol the chart view is showing gets bars at all: a whole
   // page of chart-length bars would be hundreds of numbers crossing into the
   // board every refresh for nothing. demoBars fills that in only for the demo
-  // walk (no quotes file, no live snapshot). A quotes file (永豐, 證交所)
-  // never carries its own candles, but quotesFor layers in whatever Yahoo has
-  // fetched for the focused symbol (see withLiveBars) the same way the
-  // built-in feed already does - until that fetch lands, the chart shows no
-  // bars yet rather than a demo-walk stand-in for a real price.
+  // walk (no quotes file, no live snapshot). A stock quotes file (永豐,
+  // 證交所) never carries its own candles, but quotesFor layers in whatever
+  // Yahoo has fetched for the focused symbol (see withLiveBars) the same way
+  // the built-in feed already does - until that fetch lands, the chart shows
+  // no bars yet rather than a demo-walk stand-in for a real price. The
+  // futures file is the exception: its rows arrive with 永豐's own 5 分 K.
   //
   // `focusIdx` is looked up by CODE, not carried as a position: `shown` is
   // freshly re-sorted every render when `cfg.sort === 'change'`, so the code
@@ -1626,8 +1659,10 @@ function buildProps(
       quotesFile?.indices && quotesFile.indices.length > 0
         ? quotesFile.indices
         : [{ name: conf.indexName, value: idxValue, change: idxChange, pct: idxPct }],
-    source: usedFile ? (quotesFile?.origin ?? 'file') : 'demo',
-    sourceLabel: usedFile ? (quotesFile?.sourceLabel ?? '') : '',
+    // tf without a fresh file draws dashes, not fake prices - so the footer
+    // must not say 示範 (nor blink a live dot) over them
+    source: usedFile ? (quotesFile?.origin ?? 'file') : market === 'tf' ? 'file' : 'demo',
+    sourceLabel: usedFile ? (quotesFile?.sourceLabel ?? '') : market === 'tf' ? '無報價' : '',
     version,
     highlight: cfg.highlight,
     sorted: cfg.sort === 'change',
@@ -1656,7 +1691,12 @@ function buildProps(
 // file); ui.render builds the props from it on every draw, so a button press
 // changes the view on the same frame instead of waiting out a refresh tick.
 let ready = false
-let lastFile: QuotesFile | undefined // runtime-dir file (fresh) or project override file
+// The quotes file each market is drawn from: tw/us share the stock file
+// (runtime-dir while fresh, else the project override - a file naming no
+// market fills both), tf only ever the fetcher's futures-quotes.json. Keyed
+// by market for the same reason liveBy is: 永豐 futures under 加權指數, or a
+// stock override pricing a contract, would be worse than no price at all.
+let quotesFiles: Partial<Record<MarketId, QuotesFile>> = {}
 let lastHoldingsFile: HoldingsFile | undefined // runtime-dir or project holdings; never expired, see parseHoldingsFile
 // true once the 0.9-legacy-holdings-file warning has been logged this
 // session, so a file left behind at the project path is reported once
@@ -1867,13 +1907,13 @@ function marketNeedsFeed(now: number, market: MarketId): boolean {
 /** the badge a Yahoo-sourced bar set gets when the quotes file itself names none */
 const YAHOO_BAR_LABEL = '5 分 K（Yahoo）'
 
-// Neither a 永豐 report nor a 證交所/MIS snapshot carries candles, so a quotes
-// file's own entries never have `bars` - feedBars (fetched per focused
-// symbol, always from Yahoo) is the only source for either market's K-bar
-// view. This layers that cache under a market's quotes: an entry that
-// already has bars (the built-in feed's own snapshot, once one exists) keeps
-// them, and only a gap gets the Yahoo set, and only while it is still within
-// BARS_STALE_MS.
+// Neither a 永豐 stock report nor a 證交所/MIS snapshot carries candles, so a
+// stock quotes file's entries never have `bars` - feedBars (fetched per
+// focused symbol, always from Yahoo) is the only source for a stock market's
+// K-bar view. This layers that cache under a market's quotes: an entry that
+// already has bars (the built-in feed's own snapshot, or every entry of the
+// futures file, whose 5 分 K come from 永豐) keeps them, and only a gap gets
+// the Yahoo set, and only while it is still within BARS_STALE_MS.
 function withLiveBars(
   market: MarketId,
   quotes: Record<string, FileQuote>,
@@ -1897,11 +1937,22 @@ function withLiveBars(
   return { quotes: out, barsFromYahoo }
 }
 
+/**
+ * Which of `allowed` a parsed file drives: the market it names (a stock file
+ * saying `tf`, or a futures file saying `tw`, drives nothing), or every one
+ * of them when it names none - the pre-tf override semantics for tw/us.
+ */
+function fillQuoteSlots(file: QuotesFile | undefined, allowed: MarketId[]): void {
+  if (!file) return
+  for (const market of allowed) if (!file.market || file.market === market) quotesFiles[market] = file
+}
+
 // The quotes file wins over the feed: it is the explicit override. A market
 // with no snapshot falls back to the demo walk, which is what the footer's
 // 示範資料 tag is for.
 function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
-  if (lastFile && (!lastFile.market || lastFile.market === market)) {
+  const file = quotesFiles[market]
+  if (file) {
     // The override file wins, but it does not have to be COMPLETE to win: a
     // fetcher whose own watchlist is narrower than the band's (or briefly
     // out of date) can leave a code the table draws with no quote at all.
@@ -1914,12 +1965,12 @@ function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
     // always win over the bridge's.
     const bridge = liveBy[market]
     const bridgeHolds = bridge && snapshotHolds(bridge.file.asOf, now, market)
-    const merged = bridgeHolds ? { ...bridge.file.quotes, ...lastFile.quotes } : lastFile.quotes
+    const merged = bridgeHolds ? { ...bridge.file.quotes, ...file.quotes } : file.quotes
     const { quotes, barsFromYahoo } = withLiveBars(market, merged, now)
     return {
-      ...lastFile,
+      ...file,
       quotes,
-      ...(barsFromYahoo && !lastFile.barLabel ? { barLabel: YAHOO_BAR_LABEL } : {}),
+      ...(barsFromYahoo && !file.barLabel ? { barLabel: YAHOO_BAR_LABEL } : {}),
     }
   }
   const snap = liveBy[market]
@@ -2078,6 +2129,8 @@ export const register: Register = on => {
       // parses - see parseHoldingsFile for why it never goes stale.
       const runtimeQuotesText = await readOptional(`${runtime}stock-quotes.json`)
       const projectQuotesText = await readOptional(QUOTES_PATH)
+      // futures have no project-level override: 永豐 is their only route
+      const futuresQuotesText = await readOptional(`${runtime}futures-quotes.json`)
       const runtimeHoldingsText = await readOptional(`${runtime}stock-holdings.json`)
       const projectHoldingsText = await readOptional(HOLDINGS_PATH)
 
@@ -2088,7 +2141,9 @@ export const register: Register = on => {
       }
       const runtimeQuotes = parseQuotes(runtimeQuotesText, now)
       runtimeQuotesFresh = runtimeQuotes !== undefined
-      lastFile = runtimeQuotes ?? parseQuotes(projectQuotesText, now)
+      quotesFiles = {}
+      fillQuoteSlots(runtimeQuotes ?? parseQuotes(projectQuotesText, now), ['tw', 'us'])
+      fillQuoteSlots(parseQuotes(futuresQuotesText, now), ['tf'])
       // The project-path holdings file only: a 0.9-era Shioaji fetcher wrote
       // its output straight here (before runtimeDir existed) and always
       // stamped it "永豐 庫存" - see parseHoldingsFile's docblock. That file
@@ -2467,7 +2522,7 @@ export const register: Register = on => {
       // than waiting out QUOTE_STALE_MS is what keeps the band off demo
       // prices in the meantime - a fresh runtime-dir file, once the script
       // does log in, wins over whatever that fallback publishes on the very
-      // next poll (quotesFor prefers `lastFile` first).
+      // next poll (quotesFor prefers the file slot first).
       return false
     }
 
@@ -2601,9 +2656,10 @@ export const register: Register = on => {
 
     // the trend view is the only thing that needs K bars, so it is the only
     // thing that asks for them; feedBars drops a request it already answered.
-    // A quotes file (永豐, 證交所) never carries bars of its own, so it asks
-    // Yahoo the same way the built-in feed does - only the demo walk skips
-    // this and draws demoBars instead (see the demoBars call below).
+    // A stock quotes file (永豐, 證交所) never carries bars of its own, so it
+    // asks Yahoo the same way the built-in feed does - only the demo walk
+    // skips this and draws demoBars instead (see the demoBars call below),
+    // and feedBars itself drops a tf request: those bars are in the file.
     if (view === 'chart' && props.source !== 'demo' && props.quotes[props.focus]) {
       requestBars?.(props.market, props.quotes[props.focus].code)
     }

@@ -40,6 +40,8 @@ export type QuoteRow = {
    * of the price/change/pct fields (see drawTwoColQuote and the table loop).
    */
   noData?: boolean
+  /** price/change digits when the contract says so (futures `decimals`); absent = 2, as stocks always were */
+  decimals?: number
 }
 
 /** a holding, already priced by register.tsx - the 損益 view only formats these */
@@ -908,11 +910,12 @@ function drawTwoColQuote(r: Row, half: HalfLayout, q: QuoteRow, market: MarketId
   }
 
   const color = tone(market, q.pct)
+  const digits = q.decimals ?? 2
   const pctText = (v: number) => `${v > 0 ? '▲' : v < 0 ? '▼' : '-'} ${signed(v)}%`
   const turn = q.was ? rowTurn - slot * (turned ? PAGE_ROW_STAGGER : ROW_STAGGER) : RESTING
   const was = q.was ?? q
   const stagger = turned ? 0 : STAGGER
-  flapRight(r, half.priceRight, thousands(was.price), thousands(q.price), WHITE, turn, half.priceCol, stagger)
+  flapRight(r, half.priceRight, thousands(was.price, digits), thousands(q.price, digits), WHITE, turn, half.priceCol, stagger)
   flapRight(r, half.pctRight, pctText(was.pct), pctText(q.pct), color, turn, half.priceCol, stagger)
 }
 
@@ -1055,16 +1058,24 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     const focus = Math.max(0, Math.min(quotes.length - 1, props.focus))
     const q = quotes[focus]
     const color = tone(props.market, q.pct)
+    const digits = q.decimals ?? 2
     const plotW = Math.max(10, lay.pctRight - 2 - AXIS_W)
 
     // row 0: which symbol this is, its price, what the bars are
     const title = rows[0]
     title.put(lay.symCol, q.code, SYMBOL)
     title.put(title.width() + 1, q.name, DIM)
-    title.put(title.width() + 2, thousands(q.price), WHITE)
+    title.put(title.width() + 2, thousands(q.price, digits), WHITE)
     const arrow = q.pct > 0 ? '▲' : q.pct < 0 ? '▼' : '-'
-    title.put(title.width() + 1, `${arrow} ${signed(q.change)} (${signed(q.pct)}%)`, color)
-    title.putRightIfFits(lay.pctRight, `${props.barLabel} · ${props.marketLabel} ${open ? `${SUN} 盤中` : `${MOON} 休市`}`, DIM)
+    title.put(title.width() + 1, `${arrow} ${signed(q.change, digits)} (${signed(q.pct)}%)`, color)
+    // a contract name plus its resolved month (台指近 (TXFJ6)) leaves no room
+    // for the whole tag at the 74-column cap, so it sheds the badge first and
+    // the bar label last - the same "least essential piece first" rule as
+    // the table footer - rather than vanish entirely
+    const badge = `${props.marketLabel} ${open ? `${SUN} 盤中` : `${MOON} 休市`}`
+    for (const tag of [`${props.barLabel} · ${badge}`, props.barLabel, badge]) {
+      if (title.putRightIfFits(lay.pctRight, tag, DIM)) break
+    }
 
     // rows 1..6: the candles, with a price axis on the right
     const candles = candleCells(q.bars ?? [], props.market, q.prevClose, plotW, false)
@@ -1072,9 +1083,9 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     if ((q.bars?.length ?? 0) === 0) {
       rows[1 + Math.floor(CHART_PLOT_ROWS / 2)].put(lay.badgeCol + 2, '沒有 K 棒資料（報價檔未提供 bars）', DIM)
     } else {
-      rows[1].putRight(lay.pctRight, thousands(candles.hi), DIM)
-      rows[1 + Math.floor(CHART_PLOT_ROWS / 2)].putRight(lay.pctRight, thousands(q.prevClose), '#5a6370')
-      rows[CHART_PLOT_ROWS].putRight(lay.pctRight, thousands(candles.lo), DIM)
+      rows[1].putRight(lay.pctRight, thousands(candles.hi, digits), DIM)
+      rows[1 + Math.floor(CHART_PLOT_ROWS / 2)].putRight(lay.pctRight, thousands(q.prevClose, digits), '#5a6370')
+      rows[CHART_PLOT_ROWS].putRight(lay.pctRight, thousands(candles.lo, digits), DIM)
     }
 
     // row 6: the session's time axis. Row.put only appends, so the axis is
@@ -1347,6 +1358,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
         }
 
         const color = tone(props.market, q.pct)
+        const digits = q.decimals ?? 2
         const pctText = (v: number) => `${v > 0 ? '▲' : v < 0 ? '▼' : '-'} ${signed(v)}%`
         // A row turns only when its price actually moved: flapping a number
         // that did not change is noise, and a real board flaps only what
@@ -1366,8 +1378,8 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
         const was = q.was ?? q
         const left = lay.priceCol
         const stagger = turned ? 0 : STAGGER
-        flapRight(r, lay.priceRight, thousands(was.price), thousands(q.price), WHITE, turn, left, stagger)
-        flapRight(r, lay.chgRight, signed(was.change), signed(q.change), color, turn, left, stagger)
+        flapRight(r, lay.priceRight, thousands(was.price, digits), thousands(q.price, digits), WHITE, turn, left, stagger)
+        flapRight(r, lay.chgRight, signed(was.change, digits), signed(q.change, digits), color, turn, left, stagger)
         flapRight(r, lay.pctRight, pctText(was.pct), pctText(q.pct), color, turn, left, stagger)
         if (props.highlight && i === topMover) r.fillBg(ROW_HILIGHT, lay.pctRight)
       }

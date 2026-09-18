@@ -185,7 +185,19 @@ ok(q.barLabel === '5 分 K（永豐）', `chart keeps the file's bar label, no Y
 lines = boardText(q)
 show(lines)
 ok(!lines.some(l => l.includes('沒有 K 棒資料')), 'chart draws candles, not the no-bars notice')
+// SRFJ6 sorts first (bigger 今日%) and its contract name is long enough that
+// the board's fit rule drops the title tag at 100 columns, as it would for a
+// long stock name - so the tag is checked on the alias row's chart instead
+btns.find(b => b.label.startsWith('下一檔 ▶')).press()
+;({ props: q, btns } = await band.draw())
+await new Promise(r => setTimeout(r, 100))
+;({ props: q, btns } = await band.draw())
+lines = boardText(q)
+show(lines)
+ok(q.quotes[q.focus]?.code === 'TXFR1' && q.quotes[q.focus]?.bars?.length === 8, `next symbol: TXFR1 with its own file bars: ${q.quotes[q.focus]?.bars?.length}`)
 ok(lines[0].includes('5 分 K（永豐）'), `chart title carries the file's bar label: ${lines[0].trim()}`)
+ok(/47,557\b/.test(lines[0]) && !lines[0].includes('47,557.00'), 'chart title honours 0 decimals')
+ok(band.fetched.length === 0, 'still no request after moving to the second contract')
 btns.find(b => b.label === '回清單').press()
 
 // --- path 5: the same file, older than the stale window -> no-data, never demo
