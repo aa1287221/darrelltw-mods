@@ -17,7 +17,8 @@ real intraday ticks through a 永豐 brokerage account — the band runs the
 fetcher itself (`永豐 即時`). A market the feed cannot reach falls back to a
 deterministic sine walk off each symbol's previous close and the footer says
 `示範資料（未接 API）`, so the tag always tells you what you are looking at.
-See [The live feed](#the-live-feed).
+See [The live feed](#the-live-feed). **台灣期貨 (`tf`) is a third market**,
+永豐-only with no demo walk — see [Taiwan futures (tf)](#taiwan-futures-tf).
 
 **損益 shows your holdings, not just the watchlist.** It is a stop in the
 market button's own cycle (美股 → 台股 → 台股庫存, …) — landing on it opens a
@@ -77,19 +78,22 @@ claude plugin marketplace remove darrelltw-mods
 
 Run the uninstall from the same project, and match the scope you installed
 with: a `user` install needs `--scope user`. Uninstalling leaves the runtime
-files behind in `~/.claude/stock-band/<project slug>/` (quote cache,
-heartbeat, 永豐's log and pid, the SDK's own `shioaji.log`, and any holdings
-永豐 fetched) — delete that whole folder to clean those up too, using the same
-slug rule as 哪個檔放哪裡 below. The folder only exists once 永豐's fetcher has
-run; a Yahoo-only install never creates it.
+files behind in `~/.claude/stock-band/<project slug>/` (quote cache, holdings
+cache, heartbeat, 永豐's log and pid, and — with a `futures` list configured —
+`futures-quotes.json`/`futures-holdings.json` too) — delete that whole folder
+to clean those up too, using the same slug rule as 哪個檔放哪裡 below. The
+folder only exists once 永豐's fetcher has run; a Yahoo-only install never
+creates it.
 
 **哪個檔放哪裡.** `~/.claude/stock-band.json`（使用者層級，不進版控）放個人偏好——
 `twSources`、`shioaji` 的券商路徑；`<project>/.claude/stock-band.json`（可進版控）放
-觀察清單。專案檔的 key 蓋掉個人檔同名的 key，見 [Configure](#configure)。
+觀察清單，包含 `futures`。專案檔的 key 蓋掉個人檔同名的 key，見 [Configure](#configure)。
 
-**band 不會在你的 repo 裡寫任何檔。** 報價、庫存、心跳、永豐 log、永豐 pid 這五個
+**band 不會在你的 repo 裡寫任何檔。** 報價、庫存、心跳、永豐 log、永豐 pid 這幾類
 執行期檔案都寫進 `~/.claude/stock-band/<專案路徑 slug>/`，不再寫進專案的 `.claude/`
 ——`<project>/.claude/stock-band.json` 因此可以放心進版控，只有券商路徑該留在個人檔。
+有 `futures` 設定時，報價與庫存各多一份 `futures-quotes.json`／
+`futures-holdings.json`，共七個檔案，見 [Taiwan futures (tf)](#taiwan-futures-tf)。
 Shioaji SDK 自己寫的 `shioaji.log` 也在這個執行期目錄——`fetch-quotes-shioaji.py`
 會先切到這裡再匯入 shioaji，所以不會跑進你的 repo。
 
@@ -279,17 +283,18 @@ who opens it keeps their own preference — see
 
 | key | default | meaning |
 | --- | --- | --- |
-| `market` | `"auto"` | the state a session starts in: `auto` picks by the clock and keeps tracking it until the market button is pressed; `tw`/`us` opens on that market instead |
+| `market` | `"auto"` | the state a session starts in: `auto` picks by the clock and keeps tracking it until the market button is pressed; `tw`/`us`/`tf` opens on that market instead |
 | `refreshMs` | `3000` | how often the module rebuilds the snapshot (min 1000; fixed at session start — changing it needs `/reload-plugins`) |
 | `sort` | `"change"` | `change` = by change% desc, `list` = your order |
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
 | `columns` | `"auto"` | how many symbols a row draws: `auto` = 1 when the watchlist is 5 symbols or fewer, 2 for 6 or more; `1`/`2` force it (the board still falls back to 1 if the terminal is too narrow — see [What the band shows](#what-the-band-shows)) |
-| `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only |
+| `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only. `tf` is not a value here — a non-empty `futures` list feeds itself automatically whenever `feed` is not `"off"`, on top of whatever this says, since it costs no HTTP request — see [Taiwan futures (tf)](#taiwan-futures-tf) |
 | `twSources` | `["yahoo"]` | Taiwan's routes, in preference order — the band tries the first and falls through to the next for a tick that one has nothing fresh for. `yahoo` = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `shioaji` = 永豐 real-time ticks, the band runs the fetcher itself — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher). A legacy `"twSource": "x"` (a single string) still works as an alias for `["x"]`. The shipped default never includes `shioaji` — put that in your own `~/.claude/stock-band.json` |
 | `shioaji` | `{ "python": "python3", "env": "~/.sinobon.env", "interval": 10 }` | read only when `"shioaji"` is somewhere in `twSources` — the interpreter, the env file holding `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` (`~` expands to `$HOME`), and seconds between snapshots |
 | `feedMs` | `30000` | seconds between feed requests, in ms (floor 15000 — below that Yahoo answers 429; the request budget can widen it further) |
 | `pageMs` | `10000` | how long one page holds before the board turns, in ms (floor 4000; `0` turns auto-paging off and leaves `翻頁` as the only way to page). Pressing `翻頁` restarts this countdown |
 | `tw` / `us` | built-in lists | `{ code, name, prevClose }` per symbol; only `code` is required. Taiwan 上櫃 symbols need `"ex": "otc"` (e.g. 6488 環球晶) |
+| `futures` | `[]` | Taiwan futures contracts to watch, `{ code, name? }` per entry — see [Taiwan futures (tf)](#taiwan-futures-tf) |
 | `holdings` | `{ "tw": [], "us": [] }` | manual positions for the 損益 view, `{ code, qty, cost }` per holding — the recommended place to hand-write your positions; add `"holdingsSource": "config"` to make this win over a fetched `stock-holdings.json` for a market where you want your own numbers to stick — see [Holdings and the 損益 view](#holdings-and-the-損益-view) |
 
 Both built-in lists are 20 symbols, so `columns` resolves to 2 and each page
@@ -540,15 +545,23 @@ even after 永豐 starts writing its own.
 
 損益 is not its own button — it is a STOP in the market button's own cycle:
 `[ 美股 ▾ ]` → (`美股庫存`, only if US holdings are configured) → `[ 台股 ▾ ]`
-→ `[ 台股庫存 ▾ ]` → back to 美股. Pressing the market button walks the cycle
-one stop at a time; landing on a `庫存` stop swaps the table for a P&L board:
+→ `[ 台股庫存 ▾ ]` → (`台指期`, only if `futures` is non-empty) → (`期貨庫存`,
+only if a futures holdings file has a position) → back to 美股. The two `tf`
+stops gate independently — a futures-only watchlist with no positions gets
+the table and not 期貨庫存, a positions file with no watchlist gets 期貨庫存
+and not the table. See [Taiwan futures (tf)](#taiwan-futures-tf). Pressing
+the market button walks the cycle one stop at a time; landing on a `庫存`
+stop swaps the table for a P&L board:
 
 | 代號 | 名稱 | 張數 | 成本 | 現價 | 今日% | 今日損益 | 總損益 | 損益% |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 
 one row per holding, 5 on screen at a time, plus a totals row (market value,
 cost, total P&L, today's move). 張數 is `qty ÷ 1000` (股 ÷ 1000 = 張), shown
-with a decimal only when it is not a whole 張. `名稱` drops first on a narrow
+with a decimal only when it is not a whole 張 — a `tf` holding reads `口數`
+instead, `qty` shown as-is and signed (a short position is negative), and
+every P&L cell carries `× multiplier`; see
+[Taiwan futures (tf)](#taiwan-futures-tf). `名稱` drops first on a narrow
 terminal, the same way the watchlist table's own name column does.
 
 **Sortable, five ways.** 代號/今日%/今日損益/總損益/損益% each sort the list —
@@ -622,6 +635,69 @@ from `api.list_positions()` — see
 [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher). Its quotes
 fetch also covers every held code, not just the watchlist, so a holding you
 are not watching still prices correctly.
+
+## Taiwan futures (tf)
+
+台指期 is a third market, `tf`, for Taiwan futures contracts through a 永豐
+futures account — **永豐 is the only route: there is no Yahoo or MIS
+fallback**, so a stale or missing quotes file shows `無報價` rather than the
+demo walk the stock markets fall back to. It rides on the same fetcher
+process as `twSources: ["shioaji"]`; see
+[永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher) for the spawn
+contract and the heartbeat that keeps it alive through 夜盤 while another
+market is on screen — this section only covers what is `tf`-specific.
+
+**Config.** A `futures` array in `stock-band.json`, `{ code, name? }` per
+entry — see the `futures` row in [Configure](#configure). Unlike `tw`/`us`
+there is no built-in list and no 20-symbol cap (a futures market costs no
+Yahoo request), so watch as many contracts as your account can price. An
+entry with no string `code` is dropped and logged once; it does not break
+the rest of the list. `"market": "tf"` pins a session to it.
+
+**Codes: alias or month.** List a contract by its own month code (`TXFJ6`,
+`SRFJ6`) or by 永豐's continuous alias (`TXFR1` near month, `TXFR2` next
+month) — codes are passed to the fetcher verbatim, which resolves an alias
+through `api.Contracts.Futures[code]` and reports back which month it
+landed on. The 台指期 table shows that resolution in the name column
+(`台指近 (TXFJ6)` for a `TXFR1` entry named 台指近) so an alias's meaning is
+never a guess. The 期貨庫存 view names a holding by matching its position
+code (always an actual month, never an alias) against `futures`, so a
+config name only carries over to a held position when the config lists that
+same month code — an alias-only entry supplies the table's name, not a
+matching position's.
+
+**Sessions.** 日盤 08:45–13:45 and 夜盤 15:00–05:00, Taipei time, weekdays
+only; 夜盤 crosses midnight, so Friday's session runs to Saturday 05:00 and
+no session starts on a weekend. `tf`'s hours badge shows both in one line:
+`08:45-13:45 · 15:00-05:00`.
+
+**Two stops, gated independently** — see the cycle in
+[Holdings and the 損益 view](#holdings-and-the-損益-view): 台指期 (the quote
+table) shows once `futures` is non-empty; 期貨庫存 (the P&L view) shows once
+`futures-holdings.json` carries at least one position, regardless of
+whether that position's code is on the watchlist.
+
+**口, not 張.** A futures position's `qty` is 口 (contracts), signed by a
+fetcher that writes a Sell position as negative — a short position's P&L
+rises when the price falls with no separate sign lookup. P&L is `(price −
+cost) × qty × multiplier`, and `multiplier` always comes from the contract,
+never a hard-coded table: SRF's is 1000, TXF's is 200 (both measured live),
+so a small contract and an index contract are never priced by the same
+factor by accident.
+
+**Decimals follow the contract too.** Price and change columns show
+whatever the contract's own `decimal_locator` says, per contract — not a
+fixed 2 the way the stock markets use. `prevClose` is the contract's own
+`reference` (昨結), so 今日% is measured from settlement, not from a stale
+trade.
+
+**Runtime files.** The fetcher writes two more files alongside the stock
+ones, same runtime dir, same freshness and read-order rules:
+`futures-quotes.json` (`market: "tf"`, `source: "永豐"`,
+`barLabel: "5 分 K（永豐）"`) and `futures-holdings.json`
+(`source: "永豐 期貨"`). The chart view for a `tf` symbol only ever reads
+bars from `futures-quotes.json` — it never asks Yahoo, which has no futures
+mapping to ask.
 
 ## Develop
 

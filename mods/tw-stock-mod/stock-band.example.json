@@ -76,5 +76,10 @@
       "name": "Vanguard 500",
       "prevClose": 702.56
     }
+  ],
+  "_futures_comment": "Taiwan futures through a 永豐 futures account (see README's Taiwan futures (tf) section) - no built-in list and no 20-symbol cap. `code` is required; `name` is optional. Use a continuous alias (TXFR1 near month, TXFR2 next) to avoid re-editing this every settlement, or a specific month code (SRFJ6) to pin one expiry. An entry with no string code is dropped and logged.",
+  "futures": [
+    { "code": "TXFR1", "name": "台指近" },
+    { "code": "SRFJ6" }
   ]
 }

@@ -12,12 +12,14 @@ the bare username) and exits 1 on any hit; run it before every release.
 
 `assert.mjs` is a two-function helper (`ok(cond, msg)`, `done()`) that turns a
 harness's printed output into a real pass/fail: `ok` prints `ok `/`FAIL ` and
-sets `process.exitCode = 1` on a miss, `done()` prints the final tally. Only
-`feed-idle.mjs`, `chart-nav.mjs` and `rank-cross.mjs` use it - they are the
-three harnesses this exits non-zero on a real regression. `board-harness.mjs`,
-`frames.mjs`, `file-bars.mjs` and the rest still just print for a human to
-read; `run-checks.sh` below runs `file-bars.mjs` too but only as a smoke test
-(it always exits 0), not as an assertion.
+sets `process.exitCode = 1` on a miss, `done()` prints the final tally.
+`feed-idle.mjs`, `chart-nav.mjs`, `rank-cross.mjs` and the four `tf-*.mjs`
+harnesses (`tf-market`, `tf-quotes`, `tf-feed`, `tf-pnl`) use it - they are
+the harnesses this exits non-zero on a real regression, alongside `pytest`
+for the fetcher's own pure functions. `board-harness.mjs`, `frames.mjs`,
+`file-bars.mjs` and the rest still just print for a human to read;
+`run-checks.sh` below runs `file-bars.mjs` too but only as a smoke test (it
+always exits 0), not as an assertion.
 
 `run-checks.sh` is the one entry point that runs the asserting harnesses
 end-to-end against disposable fixtures (never against your real project) and
@@ -61,7 +63,7 @@ copy theirs if you add a new harness.
 | `real-click.py` | does a REAL click in a REAL Claude Code open the chart | `python3 real-click.py <proj> [x] [row] [--plugin-dir <path>]` |
 | `feed-idle.mjs` | does a closed market stop being polled, and does its snapshot still hold **(asserts)** | `node feed-idle.mjs $OUT/register.js <proj>` |
 | `feed-open-snooze.mjs` | does an open market still get polled, and does 收起 stop it | `node feed-open-snooze.mjs $OUT/register.js <proj>` |
-| `rank-cross.mjs` | when two symbols' 漲跌幅 cross in rank, does the table mark the row that changed occupant with `was.code` **(asserts, currently FAILs - PR-a target)** | `node rank-cross.mjs $OUT/board.js $OUT/register.js <proj>` |
+| `rank-cross.mjs` | when two symbols' 漲跌幅 cross in rank, does the table mark the row that changed occupant with `was.code` **(asserts; pins the PR-a fix, see below)** | `node rank-cross.mjs $OUT/board.js $OUT/register.js <proj>` |
 | `tf-market.mjs` | 台指期 sessions (日盤/夜盤 across midnight and the weekend), the auto pick, the 台指期 cycle stop, no-data rows with no quotes source, and a project without `futures` unchanged **(asserts)** | `node tf-market.mjs $OUT/register.js <proj-with-futures> <proj-without>` |
 | `tf-quotes.mjs` | does a runtime-dir `futures-quotes.json` price the 台指期 table (永豐 footer, 5 分 K（永豐）, per-row decimals, alias → resolved month), feed the chart without a Yahoo request, and go no-data once stale; does the stock override stay as it was **(asserts)** | `node tf-quotes.mjs $OUT/register.js $OUT/board.js <tf-proj> <tw-proj>` |
 | `tf-feed.mjs` | with 美股 on screen during 夜盤, is the heartbeat still written every feed tick naming `tf`; is the fetcher spawned once with both `--codes` and `--futures` (also during 台股 hours, also as `--futures ""` without a list); does a Yahoo back-off leave the heartbeat alone; does a project without `futures` write no heartbeat at night **(asserts)** | `node tf-feed.mjs $OUT/register.js <proj>` |
@@ -90,29 +92,30 @@ made against the real endpoint, not an estimate.
   it the right tool for "is the animation correct" and the wrong one for "does
   the host paint it" — `remount.mjs` and `snooze.mjs` cover the second.
 
-## PR-a: focus and was.code track a table position, not a symbol
+## PR-a: focus and was.code tracked a table position, not a symbol (fixed)
 
 `chart-nav.mjs`'s 名次交叉 section and `rank-cross.mjs` both pin down the same
-not-yet-fixed bug, from two angles:
+bug, from two angles - now fixed in `hooks/register.tsx`, so both assert
+green; this stays here as the regression guard and the reason they assert
+what they do:
 
 - `buildProps` re-sorts `quotes` by `pct` on every render when `cfg.sort ===
-  'change'` (the default), but `focus` (chart view) is a plain index into
-  that array - `props.quotes[props.focus]`. When two symbols' 漲跌幅 cross in
-  rank, the sort reorders them and the SAME `focus` index now points at a
-  different symbol. The chart view silently jumps to whichever symbol just
-  moved into that slot.
+  'change'` (the default), and `focus` (chart view) used to be a plain index
+  into that array - `props.quotes[props.focus]`. When two symbols' 漲跌幅
+  crossed in rank, the sort reordered them and the SAME `focus` index then
+  pointed at a different symbol, so the chart view silently jumped to
+  whichever symbol had just moved into that slot. `focusCode` is now tracked
+  by the symbol's own code (module state in `hooks/register.tsx`) and
+  re-resolved to a page/index every render, so a rank cross can no longer
+  move the chart out from under it.
 - The table view's flip animation is supposed to mark a row that just
   changed occupant with `was.code`/`was.name`, the same way a page turn does
-  (`pageFrom` in `buildProps`). But that assignment only fires inside
-  `setPage` - a rank cross with no accompanying page turn (the only case a
-  short, single-page watchlist can ever hit) sets no `was` at all, so the
-  code column changes with no flip and no flag.
-
-Neither harness fixes this (out of scope for that pass) - they exist so the
-bug stays caught instead of being reasoned about from a diff. Once
-`hooks/register.tsx` is fixed to track focus/flip by symbol instead of by
-position, the two `FAIL (PR-a target)` lines in `run-checks.sh`'s output
-should flip to `ok` with no other change to either harness.
+  (`pageFrom` in `buildProps`). That assignment used to fire only inside
+  `setPage`, so a rank cross with no accompanying page turn (the only case a
+  short, single-page watchlist can ever hit) set no `was` at all - the code
+  column changed with no flip and no flag. `buildProps` now also compares
+  each rendered row against `lastShown`'s row at the same position and
+  attaches `was` on a bare occupant change, independent of `setPage`.
 
 ## run-checks.sh
 
@@ -121,17 +124,21 @@ bash scripts/dev/run-checks.sh
 ```
 
 Builds `register.js`/`board.js` into `$OUT` (default
-`${TMPDIR:-/tmp}/tw-stock-mod-dev`), writes disposable fixture projects under
-a `mktemp -d` (never inside the repo, never touching your real project or
-`~/.claude`), runs `feed-idle.mjs` → `chart-nav.mjs` → `rank-cross.mjs` →
-`file-bars.mjs` → `check-personal.sh` in that order, and prints a
-`PASS`/`FAIL` line per check. Exits non-zero if any of them did.
+`${TMPDIR:-/tmp}/tw-stock-mod-dev`) with `bunx esbuild`, falling back to
+`npx -y esbuild` (same flags) on a machine without bun; writes disposable
+fixture projects under a `mktemp -d` (never inside the repo, never touching
+your real project or `~/.claude`); runs `feed-idle.mjs` → `chart-nav.mjs` →
+`rank-cross.mjs` → `file-bars.mjs` → `tf-market.mjs` → `tf-quotes.mjs` →
+`tf-feed.mjs` → `tf-pnl.mjs` → `pytest` (`scripts/tests`, via
+`~/.claude/stock-band-venv/bin/python` when present, else `python3`) →
+`check-personal.sh` in that order, and prints a `PASS`/`FAIL` line per check.
+Exits non-zero if any of them did.
 
-`chart-nav` and `rank-cross` are expected to `FAIL` right now - see PR-a
-above. `feed-idle`, `file-bars` and `check-personal` should all be green;
-`feed-idle` and `file-bars` hit the real Yahoo endpoint (see "The clock is
-yours to drive" above), so a `FAIL` on either one there is worth checking
-against the network before assuming it's a real regression.
+Every check here is expected to `PASS` - PR-a above was the one standing
+exception and is now fixed. `feed-idle` and `file-bars` hit the real Yahoo
+endpoint (see "The clock is yours to drive" above), so a `FAIL` on either one
+there is worth checking against the network before assuming it's a real
+regression.
 
 ## The stub host cannot answer everything
 

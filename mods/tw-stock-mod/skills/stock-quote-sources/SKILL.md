@@ -10,6 +10,10 @@ not carry: [`../../references/quote-sources.md`](../../references/quote-sources.
 Read it before editing config — this file only routes you to the right
 section.
 
+This covers the stock (`tw`/`us`) routes only — a `futures` watchlist (`tf`
+market) always routes through 永豐 with no alternative source, see the
+README's [Taiwan futures (tf)](../../README.md#taiwan-futures-tf) section.
+
 ## Decision table
 
 | What the user wants | Route |

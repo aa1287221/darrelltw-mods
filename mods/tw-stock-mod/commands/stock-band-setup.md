@@ -5,6 +5,9 @@ description: 引導使用者設定 tw-stock-mod 的台股／美股觀察清單
 # 設定股票觀察清單
 
 幫使用者設定 `<project>/.claude/stock-band.json`。照下面的步驟做，第 3 步的驗證不能跳過。
+這份流程只涵蓋 `tw`/`us`（股票）——`futures` 觀察清單（`tf` 市場，永豐期貨帳戶）代號不吃
+Yahoo spark 驗證、沒有 20 檔上限，設定方式見 README 的
+[Taiwan futures (tf)](../README.md#taiwan-futures-tf)。
 
 ## 0. 先確認環境
 

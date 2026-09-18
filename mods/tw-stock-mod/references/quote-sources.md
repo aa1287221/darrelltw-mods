@@ -256,6 +256,14 @@ covers the watchlist UNION every held code, so a holding that never made the
 watchlist still gets a live price there too, which the 損益 view prefers over
 the holdings file's own `price`/`prevClose`.
 
+**Futures.** The same script also prices a `futures` watchlist (`tf` market)
+off `api.Contracts.Futures[code]` — month codes or `R1`/`R2` aliases both
+resolve — and writes `futures-quotes.json`/`futures-holdings.json` the same
+way, with `multiplier`/`decimal_locator`/`reference` always read from the
+contract rather than a lookup table. This route is `tf`'s only source: there
+is no Yahoo or MIS fallback, so a stale file shows `無報價`, not a demo walk.
+See the README's [Taiwan futures (tf)](../README.md#taiwan-futures-tf).
+
 ## 4. Fugle 富果 and other keyed vendors (not wired)
 
 Fugle is not built into the module. Route 2 (the quotes-file override) is how
