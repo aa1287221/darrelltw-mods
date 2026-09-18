@@ -48,10 +48,15 @@ export type QuoteRow = {
 export type Holding = {
   code: string
   name: string
+  /** shares (tw/us) or 口 (tf); a short futures position is negative */
   qty: number
   cost: number
   price: number
   prevClose: number
+  /** points-to-money factor: 1 for stocks, the contract's own for futures */
+  multiplier: number
+  /** 成本/現價 digits when the contract says so; absent = 2, as stocks always were */
+  decimals?: number
   /**
    * what this holding said before the last update - same idea as
    * QuoteRow.was and deliberately as thin: only `price` is real old data;
@@ -528,6 +533,17 @@ function dispWidth(s: string): number {
   for (const ch of Array.from(s)) w += charWidth(ch)
   return w
 }
+/** cuts `s` to at most `width` display columns; no `…` marker, whose width is ambiguous on CJK terminals */
+function clipTo(s: string, width: number): string {
+  let out = ''
+  let w = 0
+  for (const ch of Array.from(s)) {
+    w += charWidth(ch)
+    if (w > width) break
+    out += ch
+  }
+  return out
+}
 
 type Cell = { ch: string; fg?: string; bg?: string }
 
@@ -711,9 +727,10 @@ type PnlLayout = {
 // Field-width budget, right to left (each gap is the field's own width + one
 // column of air before the next field starts): 損益% 8 ("+100.00%"), 總損益
 // 12 ("+9,999,999" plus room), 今日損益 12 (same shape as 總損益), 今日% 8,
-// 現價 9 ("99,999.00" - 成本/現價 always carry 2 decimals, see priceDecimals
-// in the pnl branch), 成本 9, 張數 6 ("999.9" - qty/1000, at most one decimal
-// - see qtyLabel), name 12 (up to ~6 CJK characters), sym 6. Without the
+// 現價 9 ("99,999.00" - 成本/現價 carry 2 decimals unless the contract says
+// otherwise, see priceDecimalsOf in the pnl branch), 成本 9, 張數 6 ("999.9"
+// - qty/1000, at most one decimal; "-12 口" for futures - see qtyLabel), name
+// 12 (up to ~6 CJK characters), sym 6. Without the
 // name column this is 77 of an 80-column band (name needs another 13, which
 // an 80-column band does not have) - `showName` drops it there the same way
 // the watchlist table's own `showName` does, rather than let it collide with
@@ -744,9 +761,12 @@ function pnlLayout(width: number): PnlLayout {
 
 /**
  * `張數`: qty/1000 with only the decimals it needs: `2`, `0.5`, and `0.01` for
- * an odd lot of 10 shares (one decimal turned 10 shares into `0.0`).
+ * an odd lot of 10 shares (one decimal turned 10 shares into `0.0`). 台指期
+ * counts 口 instead, signed: `-3 口` is a short of three, the sign being the
+ * direction (a 賣 tag would not fit the 6-column budget).
  */
-function qtyLabel(qty: number): string {
+function qtyLabel(qty: number, market: MarketId): string {
+  if (market === 'tf') return `${qty} 口`
   const lots = qty / 1000
   return Number.isInteger(lots) ? String(lots) : lots.toFixed(3).replace(/0+$/, '')
 }
@@ -922,7 +942,9 @@ function drawTwoColQuote(r: Row, half: HalfLayout, q: QuoteRow, market: MarketId
 export default function StockBandBoard(props: BoardProps | undefined, surface: ClientSurface<State>) {
   const { Box, Text } = surface.elements
 
-  if (!props || !props.quotes || props.quotes.length === 0) {
+  // the pnl view draws holdings, not the watchlist: a holdings-only futures
+  // user has no quotes at all (empty `futures`) and still gets the view
+  if (!props || !props.quotes || (props.quotes.length === 0 && props.view !== 'pnl')) {
     return <Text dimColor>stock-band: waiting for quotes</Text>
   }
 
@@ -1109,14 +1131,16 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     picker.hit = () => undefined
   } else if (props.view === 'pnl') {
     const lay = pnlLayout(surface.columns || 80)
-    // 成本/現價 reuse the table's own price formatter - `thousands()` with no
-    // decimals argument, i.e. always 2, the same call the watchlist table's
-    // price column makes regardless of market (e.g. 2,436.04). `decimals`
-    // stays market-dependent for money that is NOT a price - 今日損益/總損益
-    // and the totals row read as integer TWD, the same way the rest of the
-    // band's TWD figures do (US keeps cents throughout).
-    const priceDecimals = 2
+    // 成本/現價 reuse the table's own price formatter - `thousands()` at 2
+    // decimals, the same call the watchlist table's price column makes
+    // regardless of market (e.g. 2,436.04) - unless the row carries its
+    // contract's own `decimals` (futures). `decimals` stays market-dependent
+    // for money that is NOT a price - 今日損益/總損益 and the totals row read
+    // as integer TWD, the same way the rest of the band's TWD figures do (US
+    // keeps cents throughout).
+    const priceDecimalsOf = (row: Holding) => row.decimals ?? 2
     const decimals = props.market === 'us' ? 2 : 0
+    const futures = props.market === 'tf'
     // register.tsx has already sorted the full list by props.pnlSortKey/Dir
     // and clamped holdingsScroll to it - this only slices the window and
     // marks which header cell is active.
@@ -1132,7 +1156,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     const demoTag = props.source === 'demo' ? ' · 示範價格' : ''
     title.put(
       lay.symCol,
-      `庫存損益 · ${props.holdingsSource || '沒有庫存資料'} · ${holdings.length} 檔 · 更新 ${hhmmLocal(props.holdingsAt)}${demoTag}`,
+      `${futures ? '期貨庫存損益' : '庫存損益'} · ${props.holdingsSource || '沒有庫存資料'} · ${holdings.length} 檔 · 更新 ${hhmmLocal(props.holdingsAt)}${demoTag}`,
       DIM,
     )
 
@@ -1158,7 +1182,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     }
     putLeftSortable(lay.symCol, 'code', '代號')
     if (lay.showName) head.put(lay.nameCol, '名稱', HEAD)
-    head.putRight(lay.qtyRight, '張數', HEAD)
+    head.putRight(lay.qtyRight, futures ? '口數' : '張數', HEAD)
     head.putRight(lay.costRight, '成本', HEAD)
     head.putRight(lay.priceRight, '現價', HEAD)
     putRightSortable(lay.todayPctRight, 'today', '今日%')
@@ -1176,7 +1200,9 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     if (holdings.length === 0) {
       rows[2].put(
         lay.symCol,
-        '沒有庫存資料：寫 .claude/stock-holdings.json，或在 stock-band.json 加 holdings（見 README）',
+        futures
+          ? '沒有期貨庫存：永豐 fetcher 沒有回報任何部位'
+          : '沒有庫存資料：寫 .claude/stock-holdings.json，或在 stock-band.json 加 holdings（見 README）',
         DIM,
       )
     } else {
@@ -1196,29 +1222,38 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
         const rowStart = turned ? rowTurn - i * PAGE_ROW_STAGGER : RESTING
 
         // symbol/name cell - the same primitives drawSymbolCell (table)
-        // uses, inlined because Holding and QuoteRow share no common type
+        // uses, inlined because Holding and QuoteRow share no common type.
+        // The name is clipped short of the 張數/口數 field: a contract name
+        // from the fetcher (小型元大台灣50ETF期貨 202610) is twice the budget.
+        const nameBudget = lay.qtyRight - 7 - lay.nameCol
+        const name = clipTo(h.name, nameBudget)
         if (turned && rowStart !== RESTING) {
           const wasCode = h.was?.code ?? h.code
           const codeW = Math.max(dispWidth(h.code), dispWidth(wasCode))
           r.put(lay.symCol, flapField(padRight(wasCode, codeW), padRight(h.code, codeW), TEXT_DRUM, rowStart, 0), SYMBOL)
           if (lay.showName) {
-            const wasName = h.was?.name ?? h.name
-            const nameW = Math.max(dispWidth(h.name), dispWidth(wasName))
-            r.put(lay.nameCol, wipeField(wasName, h.name, nameW, rowStart, flapSpan(1, 0)), DIM)
+            const wasName = clipTo(h.was?.name ?? h.name, nameBudget)
+            const nameW = Math.max(dispWidth(name), dispWidth(wasName))
+            r.put(lay.nameCol, wipeField(wasName, name, nameW, rowStart, flapSpan(1, 0)), DIM)
           }
         } else {
           r.put(lay.symCol, h.code, SYMBOL)
-          if (lay.showName) r.put(lay.nameCol, h.name, DIM) // dim at rest too, as the table draws its names
+          if (lay.showName) r.put(lay.nameCol, name, DIM) // dim at rest too, as the table draws its names
         }
 
         // 張數/成本 never change intraday - drawn static, same as the
         // table's own 代號/名稱 columns on a plain price update
-        r.putRight(lay.qtyRight, qtyLabel(h.qty), WHITE)
+        const priceDecimals = priceDecimalsOf(h)
+        r.putRight(lay.qtyRight, qtyLabel(h.qty, props.market), WHITE)
         r.putRight(lay.costRight, thousands(h.cost, priceDecimals), DIM)
 
-        const todayPnl = (h.price - h.prevClose) * h.qty
-        const totalPnl = (h.price - h.cost) * h.qty
-        const totalPnlPct = h.cost ? (h.price / h.cost - 1) * 100 : 0
+        // × multiplier turns points into money (1 for stocks); qty carries the
+        // direction, so a short's P&L rises when the price falls. 損益% is the
+        // position's return (signed the same way), 今日% the contract's own move.
+        const short = h.qty < 0 ? -1 : 1
+        const todayPnl = (h.price - h.prevClose) * h.qty * h.multiplier
+        const totalPnl = (h.price - h.cost) * h.qty * h.multiplier
+        const totalPnlPct = h.cost ? (h.price / h.cost - 1) * 100 * short : 0
         const todayPct = h.prevClose ? (h.price / h.prevClose - 1) * 100 : 0
 
         const turn = h.was ? rowTurn - i * (turned ? PAGE_ROW_STAGGER : ROW_STAGGER) : RESTING
@@ -1228,9 +1263,9 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
         // quoteRow() derives `was.change`/`was.pct` from `was.price` alone
         const wasPrice = h.was?.price ?? h.price
         const wasTodayPct = h.prevClose ? (wasPrice / h.prevClose - 1) * 100 : 0
-        const wasTodayPnl = (wasPrice - h.prevClose) * h.qty
-        const wasTotalPnl = (wasPrice - h.cost) * h.qty
-        const wasTotalPnlPct = h.cost ? (wasPrice / h.cost - 1) * 100 : 0
+        const wasTodayPnl = (wasPrice - h.prevClose) * h.qty * h.multiplier
+        const wasTotalPnl = (wasPrice - h.cost) * h.qty * h.multiplier
+        const wasTotalPnlPct = h.cost ? (wasPrice / h.cost - 1) * 100 * short : 0
         // one shared left anchor for the whole row's sweep, same role
         // lay.priceCol plays for the table (flapRight's own `left` param)
         const left = lay.priceRight - 9
@@ -1246,21 +1281,26 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // row 7: portfolio totals, over every holding (not just this page) -
     // the one number on this board that has to add up whichever page you
     // are looking at.
+    // Signed sums carry the P&L (a short's exposure is negative), the |qty|
+    // sums are what 市值/成本 print - gross notional, never negative - and
+    // what 損益% is measured against. Identical for stocks, where qty > 0.
     const foot = rows[7]
-    const value = holdings.reduce((sum, h) => sum + h.price * h.qty, 0)
-    const cost = holdings.reduce((sum, h) => sum + h.cost * h.qty, 0)
+    const value = holdings.reduce((sum, row) => sum + row.price * row.qty * row.multiplier, 0)
+    const cost = holdings.reduce((sum, row) => sum + row.cost * row.qty * row.multiplier, 0)
+    const notionalValue = holdings.reduce((sum, row) => sum + row.price * Math.abs(row.qty) * row.multiplier, 0)
+    const notionalCost = holdings.reduce((sum, row) => sum + row.cost * Math.abs(row.qty) * row.multiplier, 0)
     const pnlTotal = value - cost
-    const pnlTotalPct = cost ? (pnlTotal / cost) * 100 : 0
-    const todayTotal = holdings.reduce((sum, h) => sum + (h.price - h.prevClose) * h.qty, 0)
+    const pnlTotalPct = notionalCost ? (pnlTotal / notionalCost) * 100 : 0
+    const todayTotal = holdings.reduce((sum, row) => sum + (row.price - row.prevClose) * row.qty * row.multiplier, 0)
     let col = lay.symCol
     const put = (text: string, fg?: string) => {
       foot.put(col, text, fg)
       col = foot.width()
     }
     put('市值 ', DIM)
-    put(thousands(value, decimals), WHITE)
+    put(thousands(notionalValue, decimals), WHITE)
     put('  成本 ', DIM)
-    put(thousands(cost, decimals), WHITE)
+    put(thousands(notionalCost, decimals), WHITE)
     put('  總損益 ', DIM)
     put(`${signed(pnlTotal, decimals)} (${pct(pnlTotalPct)})`, tone(props.market, pnlTotal))
     put('  今日 ', DIM)

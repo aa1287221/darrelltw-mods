@@ -2,7 +2,7 @@
 # One entry point for the scripts/dev harnesses that can fail: builds
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
-# file-bars / tf-market / tf-quotes / tf-feed against them plus check-personal.sh, and
+# file-bars / tf-market / tf-quotes / tf-feed / tf-pnl against them plus check-personal.sh, and
 # prints a PASS/FAIL line per check. Exits non-zero if any of them did.
 #
 # rank-cross and chart-nav's "名次交叉" section once pinned the PR-a bug
@@ -193,6 +193,20 @@ cat > "$FIXTURES/tf-feed/.claude/stock-band.json" <<'JSON'
   "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
   "us": [{ "code": "AAPL", "name": "Apple", "prevClose": 300 }],
   "futures": [{ "code": "TXFR1", "name": "台指近" }, { "code": "SRFJ6" }]
+# tf-pnl: the holdings-only user - a project with an EMPTY `futures` list
+# (so the 期貨庫存 stop has to come from the file alone); feed off, pinned to
+# 美股 so the cycle walk starts from a known stop. The harness writes the
+# runtime-dir futures-holdings.json / futures-quotes.json itself and reuses
+# tf-plain as the project with neither.
+mkdir -p "$FIXTURES/tf-pnl/.claude"
+cat > "$FIXTURES/tf-pnl/.claude/stock-band.json" <<'JSON'
+{
+  "market": "us",
+  "feed": "off",
+  "pageMs": 0,
+  "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
+  "us": [{ "code": "AAPL", "name": "Apple", "prevClose": 300 }],
+  "futures": []
 }
 JSON
 
@@ -216,6 +230,7 @@ run_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js"
 run_check "tf-market"      node "$SCRIPT_DIR/tf-market.mjs"   "$OUT/register.js" "$FIXTURES/tf-market" "$FIXTURES/tf-plain"
 run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-quotes" "$FIXTURES/tf-override"
 run_check "tf-feed"        node "$SCRIPT_DIR/tf-feed.mjs"     "$OUT/register.js" "$FIXTURES/tf-feed"
+run_check "tf-pnl"         node "$SCRIPT_DIR/tf-pnl.mjs"      "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-pnl" "$FIXTURES/tf-plain"
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
 echo
