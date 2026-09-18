@@ -276,6 +276,46 @@ def test_fetch_futures_rows_requests_yesterday_through_today():
     assert api.kbars_calls == [{"code": "TXFJ6", "start": "2026-09-18", "end": "2026-09-19"}]
 
 
+class FakeClock:
+    """Fake monotonic clock - fetch_futures_rows takes `now` as an injectable
+    callable so a test can move time without sleeping."""
+
+    def __init__(self, start=0.0):
+        self.t = start
+
+    def __call__(self):
+        return self.t
+
+
+def test_fetch_futures_rows_kbars_cadence_5min():
+    # two contracts (index + non-index, per the module docstring's pairing
+    # rule) so the cache is proven per-contract, not one shared timestamp
+    snaps = {
+        "TXFJ6": make_snapshot("TXFJ6", 17010.0, utc_ns(2026, 9, 19, 1, 0)),
+        "SRFJ6": make_snapshot("SRFJ6", 109.5, utc_ns(2026, 9, 19, 1, 0)),
+    }
+    api = FakeApi(snapshot_by_code=snaps)
+    contracts = {"TXFJ6": TXF_CONTRACT, "SRFJ6": SRF_CONTRACT}
+    codes = ["TXFJ6", "SRFJ6"]
+    clock = FakeClock(0.0)
+    cache: dict = {}
+
+    for t in (0.0, 60.0, 120.0):  # three ticks inside the 5-minute window
+        clock.t = t
+        fetcher.fetch_futures_rows(api, contracts, codes, "2026-09-19", kbars_cache=cache, now=clock)
+
+    calls_by_code = [c["code"] for c in api.kbars_calls]
+    assert calls_by_code.count("TXFJ6") == 1
+    assert calls_by_code.count("SRFJ6") == 1
+
+    clock.t = 300.0  # exactly +5 min from the first fetch -> must refresh
+    fetcher.fetch_futures_rows(api, contracts, codes, "2026-09-19", kbars_cache=cache, now=clock)
+
+    calls_by_code = [c["code"] for c in api.kbars_calls]
+    assert calls_by_code.count("TXFJ6") == 2
+    assert calls_by_code.count("SRFJ6") == 2
+
+
 # ---------------------------------------------------------------------------
 # path 14: position -> holding row (Sell negative qty, multiplier carried,
 # cost = price) and the SDK pnl cross-check

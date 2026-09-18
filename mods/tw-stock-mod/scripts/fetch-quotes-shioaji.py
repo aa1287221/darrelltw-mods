@@ -264,6 +264,7 @@ def build_payload(api, contracts: dict, index_contracts: list, watchlist_names: 
 
 FUTURES_BAR_MS = 5 * 60 * 1000  # bucket width for the futures chart's 5 分 K
 FUTURES_BAR_LIMIT = 40  # matches register.tsx's CHART_BARS
+FUTURES_KBARS_REFRESH_S = 5 * 60  # api.kbars() is the SDK usage-budget cost (~2100 rows/contract/call at a 10s tick) - reuse bars across ticks inside this window instead of refetching every tick
 
 
 def fix_taipei_ts(raw_ns: int) -> int:
@@ -369,13 +370,52 @@ def split_futures_codes(raw: str) -> list[str]:
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
-def fetch_futures_rows(api, contracts: dict, codes: list, today: str) -> dict:
+def refresh_futures_kbars(api, contract, code: str, start: str, today: str, kbars_cache: dict, tick_now: float) -> tuple[list, str]:
+    """(bars, cadence note for the tick log). Reuses `kbars_cache[code]`
+    when it is younger than FUTURES_KBARS_REFRESH_S, else calls api.kbars()
+    and restamps the cache. A failed fetch falls back to the cached bars (or
+    [] if there is none yet) WITHOUT restamping - a transient error should
+    not lock the chart to a stale/empty array for the rest of the window."""
+    cached = kbars_cache.get(code)
+    if cached is not None:
+        age_s = tick_now - cached["at"]
+        if age_s < FUTURES_KBARS_REFRESH_S:
+            return cached["bars"], f"（沿用 {age_s / 60:.1f} 分前）"
+    try:
+        bars = bars_5min(api.kbars(contract, start=start, end=today))
+    except Exception as err:  # noqa: BLE001 - a bad K-bar fetch keeps the quote, just with no bars
+        print(f"{code} K 棒取得失敗（沿用{'上次結果' if cached else '空陣列'}）: {type(err).__name__}: {err}", file=sys.stderr)
+        return (cached["bars"] if cached else []), "（取得失敗，未更新快取）"
+    kbars_cache[code] = {"at": tick_now, "bars": bars}
+    return bars, "（重抓）"
+
+
+def fetch_futures_rows(
+    api,
+    contracts: dict,
+    codes: list,
+    today: str,
+    kbars_cache: dict | None = None,
+    now=time.monotonic,
+) -> dict:
     """Per-tick snapshot + K-bar fetch for every already-resolved futures
     code. A failed K-bar fetch keeps the quote with empty bars rather than
-    dropping it - the price is still good."""
+    dropping it - the price is still good.
+
+    api.kbars() is the SDK usage-budget cost (measured 2026-09-18: ~25 MB/h
+    from calling it every 10s tick), so it is only reissued once every
+    FUTURES_KBARS_REFRESH_S per contract - see refresh_futures_kbars().
+    `kbars_cache` (code -> {"at", "bars"}) carries that cadence across ticks
+    and must be the SAME dict every call - a fresh {} each time (the
+    default) degrades to "always fetch", which is what a caller not passing
+    the cache still gets, matching the old behaviour. `now` is a
+    monotonic-clock callable so tests can move time without sleeping.
+    """
     live = {code: contracts[code] for code in codes if code in contracts}
     if not live:
         return {}
+    if kbars_cache is None:
+        kbars_cache = {}
     # api.kbars filters by Taipei calendar day, not trading session - a 夜盤
     # tick just after midnight would otherwise only see tonight-so-far and
     # fall well short of 40 five-minute bars, so the request always spans
@@ -383,16 +423,13 @@ def fetch_futures_rows(api, contracts: dict, codes: list, today: str) -> dict:
     start = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
     snaps = {str(field(s, "code", "")): s for s in api.snapshots(list(live.values()))}
     rows = {}
+    tick_now = now()
     for code, contract in live.items():
         snap = snaps.get(code)
         if snap is None:
             print(f"跳過期貨 {code}：這次快照沒有回應", file=sys.stderr)
             continue
-        try:
-            bars = bars_5min(api.kbars(contract, start=start, end=today))
-        except Exception as err:  # noqa: BLE001 - a bad K-bar fetch keeps the quote, just with no bars
-            print(f"{code} K 棒取得失敗（沿用空陣列）: {type(err).__name__}: {err}", file=sys.stderr)
-            bars = []
+        bars, cadence_note = refresh_futures_kbars(api, contract, code, start, today, kbars_cache, tick_now)
         row = futures_quote_row(contract, snap, bars, code)
         if row is None:
             print(f"跳過期貨 {code}：快照價格無效", file=sys.stderr)
@@ -400,7 +437,7 @@ def fetch_futures_rows(api, contracts: dict, codes: list, today: str) -> dict:
         rows[code] = row
         resolved = row.get("resolved", code)
         print(
-            f"期貨 {code} -> {resolved}  乘數={row['multiplier']}  小數位={row['decimals']}  K棒={len(row['bars'])} 根",
+            f"期貨 {code} -> {resolved}  乘數={row['multiplier']}  小數位={row['decimals']}  K棒={len(row['bars'])} 根{cadence_note}",
             file=sys.stderr,
         )
     return rows
@@ -823,6 +860,9 @@ def main() -> None:
     # lazily inside the tick loop instead, the same way a stock position
     # adds itself to `symbols` there - contracts persist across ticks either way.
     futures_contracts: dict = {}
+    # same dict every tick, so fetch_futures_rows's kbars cadence actually
+    # persists across the loop instead of resetting to "always fetch"
+    futures_kbars_cache: dict = {}
 
     def ensure_futures_contract(code: str):
         if code in futures_contracts:
@@ -927,7 +967,9 @@ def main() -> None:
 
             if work_tf:
                 try:
-                    futures_rows = fetch_futures_rows(api, futures_contracts, tick_futures_codes, date.today().isoformat())
+                    futures_rows = fetch_futures_rows(
+                        api, futures_contracts, tick_futures_codes, date.today().isoformat(), kbars_cache=futures_kbars_cache
+                    )
                 except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
                     print(f"期貨快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                     futures_rows = {}
