@@ -533,15 +533,16 @@ function dispWidth(s: string): number {
   for (const ch of Array.from(s)) w += charWidth(ch)
   return w
 }
-/** cuts `s` to at most `width` display columns, ending in `…` when it had to */
+/** cuts `s` to at most `width` display columns; no `…` marker, whose width is ambiguous on CJK terminals */
 function clipTo(s: string, width: number): string {
-  if (dispWidth(s) <= width) return s
   let out = ''
+  let w = 0
   for (const ch of Array.from(s)) {
-    if (dispWidth(out) + charWidth(ch) > width - 1) break
+    w += charWidth(ch)
+    if (w > width) break
     out += ch
   }
-  return `${out}…`
+  return out
 }
 
 type Cell = { ch: string; fg?: string; bg?: string }
