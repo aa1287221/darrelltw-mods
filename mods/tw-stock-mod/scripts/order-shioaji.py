@@ -272,7 +272,12 @@ def submit_order(api, contract, sdk_order):
 
 
 def fetch_trades(api):
-    api.update_status()
+    """update_status() with no account only refreshes ONE default account
+    (measured 2026-09-18: a futures order stayed invisible until
+    update_status(api.futopt_account) ran) - call it once per signed account."""
+    for account in (field(api, "stock_account", None), field(api, "futopt_account", None)):
+        if account is not None:
+            api.update_status(account)
     return api.list_trades()
 
 
