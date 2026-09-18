@@ -864,7 +864,7 @@ type Pixels = (string | undefined)[][]
 function blankPixels(width: number, levels: number): Pixels {
   return Array.from({ length: width }, () => Array.from({ length: levels }, () => undefined))
 }
-/** writes two pixel rows per cell over `under`, leaving unlit cells as they were */
+/** writes two pixel rows per cell into `rows`, leaving unlit cells as they were */
 function halfBlocks(px: Pixels, rows: Cell[][]): void {
   for (let c = 0; c < px.length; c++) {
     for (let r = 0; r < rows.length; r++) {
@@ -915,7 +915,7 @@ const BRAILLE_BITS = [
   [0x04, 0x20],
   [0x40, 0x80],
 ]
-/** 曲線: each close as a continuous braille line, the area to 昨結 (`refRow`) shaded */
+/** 曲線: each close as a continuous braille line, the area to 昨結 (`refRow`, -1 = none) shaded */
 function lineCells(
   win: BarWindow,
   sc: Scale,
@@ -933,8 +933,8 @@ function lineCells(
     const r = Math.floor(y / 4)
     if (c < 0 || c >= width || r < 0 || r >= plotRows) return
     bits[r * width + c] |= BRAILLE_BITS[y % 4][x % 2]
-    // the shade reaches from the line's lowest dot in this column toward 昨結
-    if (lineRow[c] < 0 || Math.abs(r - refRow) < Math.abs(lineRow[c] - refRow)) lineRow[c] = r
+    // the shade starts at the line's cell nearest 昨結 in this column
+    if (lineRow[c] < 0 || (refRow >= 0 && Math.abs(r - refRow) < Math.abs(lineRow[c] - refRow))) lineRow[c] = r
   }
   const pts = win.bars.map((bar, i) => ({ x: (win.col0 + i * win.stride) * 2 + 1, y: toPixel(sc, levels, bar[3]) }))
   for (let i = 0; i < pts.length; i++) {
@@ -952,9 +952,11 @@ function lineCells(
   for (let c = 0; c < width; c++) {
     const lr = lineRow[c]
     if (lr < 0) continue
-    const from = Math.min(lr, refRow + (lr < refRow ? 1 : 0))
-    const to = Math.max(lr, refRow - (lr > refRow ? 1 : 0))
-    for (let r = from; r <= to; r++) if (r !== refRow) rows[r][c] = { ...rows[r][c], bg: shade }
+    if (refRow >= 0) {
+      const from = Math.min(lr, refRow + (lr < refRow ? 1 : 0))
+      const to = Math.max(lr, refRow - (lr > refRow ? 1 : 0))
+      for (let r = from; r <= to; r++) if (r !== refRow) rows[r][c] = { ...rows[r][c], bg: shade }
+    }
     for (let r = 0; r < plotRows; r++) {
       const b = bits[r * width + c]
       if (b) rows[r][c] = { ch: String.fromCodePoint(0x2800 + b), fg: color, bg: rows[r][c].bg }
@@ -1301,10 +1303,10 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     } else {
       const sc = priceScale(win.bars, [q.prevClose, q.price])
       const perRow = props.chartMode === 'line' ? 4 : 2
-      const refRow = Math.floor(toPixel(sc, geom.plot * perRow, q.prevClose) / perRow)
+      const refRow = q.prevClose > 0 ? Math.floor(toPixel(sc, geom.plot * perRow, q.prevClose) / perRow) : -1
       const time = timeAxis(win, plotW, props.utcOffsetHours)
       // 昨結 and the session rules go under the bars, which overwrite them
-      if (q.prevClose > 0) for (let c = 0; c < plotW; c++) plotCells[refRow][c] = { ch: '┈', fg: REF_LINE }
+      if (refRow >= 0) for (let c = 0; c < plotW; c++) plotCells[refRow][c] = { ch: '┈', fg: REF_LINE }
       for (const c of time?.boundaries ?? []) {
         if (c < 0 || c >= plotW) continue
         for (let r = 0; r < geom.plot; r++) plotCells[r][c] = { ch: '│', fg: REF_LINE }
