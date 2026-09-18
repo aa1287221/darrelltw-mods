@@ -61,11 +61,19 @@ function runtimeDir(home: string, project: string): string {
 const DEFAULT_REFRESH_MS = 3000
 const QUOTE_STALE_MS = 120_000
 const SNOOZE_MS = 30 * 60 * 1000
-// One symbol page in single-column mode, two in two-column mode (see
-// `columns` below) - the table Client is 8 terminal rows either way, the
-// chart one 9, whatever the list holds.
-const PAGE_SIZE_1COL = 5
-const PAGE_SIZE_2COL = 10
+// The table is header + rule + quote rows + footer and the 損益 view title +
+// header + holding rows + totals, each sized off the band's `maxRows` (#13,
+// see fitBand) with the quote/holding rows capped here - the pre-#13 fixed
+// board, which a stub host with no `maxRows` still gets.
+const TABLE_QUOTE_ROWS = 5
+const TABLE_CHROME_ROWS = 3 // header, rule, footer
+const PNL_CHROME_ROWS = 3 // title, header, totals
+const MAX_COLUMNS = 4
+// what one more symbol column costs in terminal columns - board.tsx's
+// MIN_HALF_WIDTH + TWO_COL_GUTTER (35 + 6), so 77 columns fit two, 118 three
+const COLUMN_MIN_COLS = 41
+// board.tsx TICKER_CELL_W: one `代號 價格 ▲pct` cell on the ticker line
+const TICKER_CELL_COLS = 28
 // Yahoo's spark endpoint answers `Number of symbols needs to be less than or
 // equal to 20` above 20 symbols (measured 2026-09-16: 20 -> 200, 21 -> 400).
 // That is a request-batching limit, not a watchlist-length one - `fetchSpark`
@@ -145,8 +153,8 @@ type MarketMode = 'auto' | MarketId
 /** a route the Taiwan feed can try, in the order `Config.twSources` lists them */
 type TwSourceName = 'shioaji' | 'yahoo' | 'mis'
 type View = 'table' | 'chart' | 'pnl'
-/** how many symbols the table draws per row; "auto" picks off the page size, see effectiveColumns() */
-type ColumnMode = 'auto' | 1 | 2
+/** how many symbols the table draws per row; "auto" picks off the list and the band's width, see effectiveColumns() */
+type ColumnMode = 'auto' | 1 | 2 | 3 | 4
 
 type Ticker = {
   code: string
@@ -615,11 +623,12 @@ type Config = {
   sort: 'change' | 'list'
   highlight: boolean
   /**
-   * how many symbols the table draws per row. `auto` picks off the page size:
-   * 5 or fewer draws the single-column table (代號/名稱/價格/變更$/變更%), 6 or
-   * more draws two symbols a row (代號/名稱/價格/變更% only). The board itself
-   * still falls back to 1 at render time if the terminal is too narrow for a
-   * readable half.
+   * how many symbols the table draws per row. `auto` picks the fewest
+   * columns (1..4) that hold the list in the quote rows the band has, as
+   * many as the band's width allows: 5 or fewer symbols draw the
+   * single-column table (代號/名稱/價格/變更$/變更%), more draw two, three or
+   * four symbols a row (代號/名稱/價格/變更% only). The board itself still
+   * falls back to fewer at render time if the terminal is too narrow.
    */
   columns: ColumnMode
   /**
@@ -784,14 +793,76 @@ function defaultConfig(): Config {
   }
 }
 
-/** resolves `"auto"` off the watchlist length; an explicit 1/2 always wins */
-function effectiveColumns(cfg: Config, listLength: number): 1 | 2 {
-  if (cfg.columns === 1 || cfg.columns === 2) return cfg.columns
-  return listLength > PAGE_SIZE_1COL ? 2 : 1
+/** how the table view is drawn - board.tsx's BoardLayout, settled here (see fitBand) */
+type BoardLayout = 'full' | 'compact' | 'ticker'
+
+/** what one draw settled on from the host's `maxRows`/`bodyColumns` (#13); the board draws exactly this */
+type Fit = {
+  /** false on a stub host with no `maxRows`: the fixed pre-#13 sizes, so the dev harnesses stay byte-identical */
+  adaptive: boolean
+  /** rows the band may take below the button row; only read when adaptive */
+  rows: number
+  layout: BoardLayout
+  /** quote rows the table draws (1..5); the ticker draws one */
+  quoteRows: number
+  /** holding rows the 損益 view draws (1..5) */
+  pnlRows: number
+  /** the chart's height, cfg.chartRows clamped to the band, never under CHART_ROWS_MIN */
+  chartRows: number
+  /** symbol columns the width holds (1..MAX_COLUMNS) */
+  widthColumns: number
+  /** `代號 價格 ▲pct` cells one ticker line holds */
+  tickerCells: number
 }
 
-function pageSize(columns: 1 | 2): number {
-  return columns === 2 ? PAGE_SIZE_2COL : PAGE_SIZE_1COL
+/**
+ * `rows = maxRows - 1` (the button row). Table: header + rule + q + footer,
+ * q = rows - 3 capped at 5; at rows <= 4 that leaves one quote row or none,
+ * so the titles move onto the rule and the footer into the button row
+ * (q = rows - 1); rows <= 2 is the one-line ticker. 損益 needs 4 rows and the
+ * chart 8 (#12's clamp) - under that ui.render falls back to the ticker.
+ */
+function fitBand(cfg: Config, maxRows: number, cols: number): Fit {
+  // n columns need n * 35 + (n - 1) * 6 of `cols - 1` (board.tsx's half
+  // width and gutter), i.e. n * 41 <= cols + 5: 77 columns fit two, 118 three
+  const widthColumns = Math.max(1, Math.min(MAX_COLUMNS, Math.floor((cols + 5) / COLUMN_MIN_COLS)))
+  const tickerCells = Math.max(1, Math.floor((cols - 1) / TICKER_CELL_COLS))
+  if (maxRows <= 0) {
+    return {
+      adaptive: false,
+      rows: 0,
+      layout: 'full',
+      quoteRows: TABLE_QUOTE_ROWS,
+      pnlRows: TABLE_QUOTE_ROWS,
+      chartRows: cfg.chartRows,
+      widthColumns,
+      tickerCells,
+    }
+  }
+  const rows = maxRows - 1
+  const layout: BoardLayout = rows <= 2 ? 'ticker' : rows <= 4 ? 'compact' : 'full'
+  const quoteRows = layout === 'full' ? Math.min(TABLE_QUOTE_ROWS, rows - TABLE_CHROME_ROWS) : layout === 'compact' ? rows - 1 : 1
+  return {
+    adaptive: true,
+    rows,
+    layout,
+    quoteRows,
+    pnlRows: Math.max(1, Math.min(TABLE_QUOTE_ROWS, rows - PNL_CHROME_ROWS)),
+    chartRows: Math.max(CHART_ROWS_MIN, Math.min(cfg.chartRows, maxRows - 2)),
+    widthColumns,
+    tickerCells,
+  }
+}
+
+/**
+ * `"auto"` = the fewest columns that hold the list in the band's quote rows;
+ * explicit or auto, capped by the width so the page matches what the board
+ * can draw. A stub host keeps the pre-#13 rule (two columns past five symbols).
+ */
+function effectiveColumns(cfg: Config, listLength: number, fit: Fit): number {
+  if (!fit.adaptive) return cfg.columns === 'auto' ? (listLength > TABLE_QUOTE_ROWS ? 2 : 1) : cfg.columns
+  const want = cfg.columns === 'auto' ? Math.ceil(listLength / fit.quoteRows) : cfg.columns
+  return Math.max(1, Math.min(want, fit.widthColumns))
 }
 
 /**
@@ -886,7 +957,9 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
   cfg.chartRows = Math.max(CHART_ROWS_MIN, Math.floor(num(root.chartRows, cfg.chartRows)))
   if (root.sort === 'list') cfg.sort = 'list'
   if (root.highlight === false) cfg.highlight = false
-  if (root.columns === 1 || root.columns === 2 || root.columns === 'auto') cfg.columns = root.columns
+  if (root.columns === 1 || root.columns === 2 || root.columns === 3 || root.columns === 4 || root.columns === 'auto') {
+    cfg.columns = root.columns
+  }
   const feed = root.feed
   if (feed === 'off' || feed === false) cfg.feed = 'off'
   else if (feed === 'auto' || feed === 'us' || feed === 'tw' || feed === 'both') cfg.feed = feed
@@ -1437,8 +1510,14 @@ type BoardProps = {
   version: string
   highlight: boolean
   sorted: boolean
-  /** 1 = single-column table, 2 = two symbols a row; see effectiveColumns() */
-  columns: 1 | 2
+  /** symbols a table row holds (1..4, see effectiveColumns()), or cells on the ticker line */
+  columns: number
+  /** how the board draws this view - board.tsx's BoardLayout; see fitBand */
+  layout: BoardLayout
+  /** data rows the board draws in this view: quote rows (table) or holding rows (損益) */
+  quoteRows: number
+  /** rows the Client is tall in this view - what `height=` gets */
+  boardRows: number
   view: View
   focus: number
   barLabel: string
@@ -1493,8 +1572,6 @@ function futuresName(sym: Ticker, quote: FileQuote): string {
 
 /** how long after a page change the outgoing rows are still worth turning from */
 const PAGE_TURN_WINDOW_MS = 2500
-/** holdings per page in the pnl view - rows 2..6 of its 8-row board */
-const PNL_PAGE_SIZE = 5
 
 function buildProps(
   now: number,
@@ -1504,8 +1581,10 @@ function buildProps(
   view: View,
   /** which code the chart view is following; undefined or off-screen falls back to position 0 */
   focusCode: string | undefined,
-  /** the chart height the render hook settled on (cfg.chartRows clamped to the band); cfg's own when absent */
-  chartRows = cfg.chartRows,
+  /** what the render hook settled the band's size on (see fitBand); a stub host's fixed sizes when absent */
+  fit: Fit = fitBand(cfg, 0, 80),
+  /** how this view is drawn: the ticker when the view cannot fit (see ui.render), else fit's own */
+  layout: BoardLayout = view === 'table' ? fit.layout : 'full',
 ): BoardProps {
   const { market, phase } = pickMarket(now, mode, hasFutures(cfg))
   const conf = MARKETS[market]
@@ -1542,13 +1621,14 @@ function buildProps(
 
   if (cfg.sort === 'change') quotes.sort((a, b) => b.pct - a.pct)
 
-  // The single-column table shows 5 symbols a page, the two-column one 10 -
-  // effectiveColumns() picks which off the watchlist length (or the config's
-  // explicit override). Either way the table Client is always the same 8
-  // terminal rows: one page is on the board and the rest wait their turn, the
-  // way a departures board shows the next five flights rather than growing.
-  const columns = effectiveColumns(cfg, list.length)
-  const perPage = pageSize(columns)
+  // One page is `quoteRows × columns` symbols - the rows the band has (see
+  // fitBand) times the columns effectiveColumns() picks - or, on the ticker,
+  // the cells one line holds. One page is on the board and the rest wait
+  // their turn, the way a departures board shows the next five flights
+  // rather than growing.
+  const columns = layout === 'ticker' ? fit.tickerCells : effectiveColumns(cfg, list.length, fit)
+  const quoteRows = layout === 'ticker' ? 1 : fit.quoteRows
+  const perPage = quoteRows * columns
   const pages = Math.max(1, Math.ceil(quotes.length / perPage))
   lastPageCount = pages
 
@@ -1702,25 +1782,26 @@ function buildProps(
   // back to the SAME time the watchlist footer already shows for this
   // market (quotesFile's dataAt), and only to `now` when neither exists.
   const holdingsAt = rawHoldingsAt || quotesFile?.dataAt || now
-  const maxScroll = Math.max(0, priced.length - PNL_PAGE_SIZE)
+  const pnlRows = fit.pnlRows
+  const maxScroll = Math.max(0, priced.length - pnlRows)
   const holdingsScroll = Math.max(0, Math.min(maxScroll, pnlScroll))
 
   // A mount, a page move or a sort change flaps every visible row, the same
   // way a watchlist page turn does (PAGE_TURN_WINDOW_MS/pageFrom below) -
   // `pnlPageFrom` is that turn's "from" snapshot, keyed by ON-SCREEN
-  // POSITION (0..4), which is what makes a row that changed WHICH holding
+  // POSITION (0..pnlRows-1), which is what makes a row that changed WHICH holding
   // occupies it (a page/sort move) turn its symbol and name too, not just
   // its numbers - see PricedHolding.was and board.tsx's per-row flap.
   let pricedForDisplay = priced
   if (pnlPageFrom && now - pnlPageAt < PAGE_TURN_WINDOW_MS) {
     pricedForDisplay = priced.map((h, idx) => {
       const pos = idx - holdingsScroll
-      const before = pos >= 0 && pos < PNL_PAGE_SIZE ? pnlPageFrom![pos] : undefined
+      const before = pos >= 0 && pos < pnlRows ? pnlPageFrom![pos] : undefined
       if (!before) return h
       return { ...h, was: { price: before.price, code: before.code, name: before.name } }
     })
   }
-  lastPnlShown = pricedForDisplay.slice(holdingsScroll, holdingsScroll + PNL_PAGE_SIZE)
+  lastPnlShown = pricedForDisplay.slice(holdingsScroll, holdingsScroll + pnlRows)
 
   return {
     market,
@@ -1765,19 +1846,32 @@ function buildProps(
     highlight: cfg.highlight,
     sorted: cfg.sort === 'change',
     columns,
+    layout,
+    quoteRows: view === 'pnl' ? pnlRows : quoteRows,
+    // the Client's height: the board draws exactly this many rows
+    boardRows:
+      view === 'chart'
+        ? fit.chartRows
+        : view === 'pnl'
+          ? pnlRows + PNL_CHROME_ROWS
+          : layout === 'full'
+            ? quoteRows + TABLE_CHROME_ROWS
+            : layout === 'compact'
+              ? quoteRows + 1
+              : 1,
     view,
     focus: focusIdx,
     barLabel,
     sessionOpen: hhmm(session.open),
     sessionClose: hhmm(session.close),
-    chartRows,
+    chartRows: fit.chartRows,
     chartMode: chartModeBy[market],
     timeframes,
     timeframe,
     utcOffsetHours: conf.offset(now),
     now,
     // The full priced list, not just the page on screen: board.tsx slices it
-    // itself for the 5 rows it draws (holdingsScroll says where), but it
+    // itself for the rows it draws (holdingsScroll says where), but it
     // also sums the footer's totals over the whole portfolio, which a
     // pre-sliced list could not answer.
     holdings: pricedForDisplay,
@@ -1917,17 +2011,22 @@ let lastPageCount = 1
 // counter would leave the pnl view scrolled to wherever the watchlist
 // happened to be paged. It is a ROW OFFSET (0-based, first row on screen),
 // not a page index, purely so 翻頁 (the only thing that ever moves it - see
-// below) has one number to add PNL_PAGE_SIZE to and wrap.
+// below) has one number to add the page's rows to and wrap.
 //
 // Not wired to ui.scroll: tried it (0.9.0) and reverted it (0.9.1). The
 // engine only raises ui.scroll for a band whose drawn tree is taller than
 // `maxRows` - "The band's window over a tree taller than maxRows" (d.ts) -
-// and this Client is a fixed 8 rows every view, table or pnl, so it never
-// qualifies; confirmed on the real build with --debug, zero ui.scroll
-// events reached this module however the wheel was driven. If a taller-
-// than-maxRows tree ever exists here, that is the condition to satisfy
-// before re-adding a scroll hook - not a sign this one was wired wrong.
+// and this Client sizes itself to fit inside `maxRows` in every view (#13;
+// before that it was a fixed 8 rows), so it never qualifies; confirmed on
+// the real build with --debug, zero ui.scroll events reached this module
+// however the wheel was driven. If a taller-than-maxRows tree ever exists
+// here, that is the condition to satisfy before re-adding a scroll hook -
+// not a sign this one was wired wrong.
 let pnlScroll = 0
+// whether the last draw fell back to the ticker (a band too short for the
+// view - see ui.render): the ticker rotates through the list on pageMs
+// whatever view the tab row says, so autoPage reads this beside `view`
+let tickerFit = false
 // what a page/sort turn last turned FROM (keyed by on-screen position, see
 // buildProps), and when - the pnl view's own pageFrom/pageAt, same idea as
 // the watchlist's below, sharing its PAGE_TURN_WINDOW_MS
@@ -1965,7 +2064,7 @@ function autoPage(now: number) {
   // the deadline rather than just returning, so the page gets its full hold
   // from the moment it is back on screen instead of turning the instant you
   // come back from the chart or from 收起.
-  if (now < snoozedUntil || view !== 'table' || pageCount() < 2) {
+  if (now < snoozedUntil || (view !== 'table' && !tickerFit) || pageCount() < 2) {
     pageAt = now
     return
   }
@@ -2167,11 +2266,13 @@ const DIM = '#6e7681'
 const SUN = '☀'
 const MOON = '☽'
 
-// the table Client lost its title row (the button row above it draws that
-// now); the chart Client kept its own, since that title names the symbol
-// being charted rather than the market, and grows to `chartRows` (#12)
-const TABLE_BOARD_ROWS = 8
-const PNL_BOARD_ROWS = 8
+/** the footer's clock + source tag for the button row (compact/ticker boards): board.tsx's names, minus version and credit */
+function foldedFooter(props: BoardProps): string {
+  const stamp = props.phase === 'open' ? props.clock : `收盤 ${props.clock}`
+  const source =
+    props.source === 'demo' ? '示範資料' : props.sourceLabel || (props.source === 'live' ? '即時報價' : '報價檔')
+  return `${stamp} · ${source}`
+}
 
 function charWidth(ch: string): number {
   const cp = ch.codePointAt(0) ?? 0
@@ -2817,14 +2918,25 @@ export const register: Register = on => {
       )
     }
 
-    const cols = e.viewport?.columns ?? e.props.bodyColumns ?? 80
-    // maxRows - 2 (the button row plus one spare) keeps the band from scrolling;
-    // the 8-row floor wins under a tiny terminal, and a stub host has no maxRows
+    // bodyColumns is the band's own width (narrower than the viewport with a
+    // Pane docked beside the transcript); a stub host may give neither
+    const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
+    // every view sizes itself to the band (fitBand); a stub host has no maxRows
     const maxRows = typeof e.props.maxRows === 'number' && e.props.maxRows > 0 ? e.props.maxRows : 0
-    const chartRows = maxRows ? Math.max(CHART_ROWS_MIN, Math.min(config.chartRows, maxRows - 2)) : config.chartRows
+    const fit = fitBand(config, maxRows, cols)
+    // A view the band cannot fit is drawn as the table's ticker; `view` keeps
+    // the tab's choice so the chart/損益 is back once the band can hold it.
+    const ticker =
+      fit.adaptive &&
+      (fit.layout === 'ticker' ||
+        (view === 'chart' && fit.chartRows > fit.rows) ||
+        (view === 'pnl' && fit.pnlRows + PNL_CHROME_ROWS > fit.rows))
+    tickerFit = ticker
+    const drawn: View = ticker ? 'table' : view
+    const layout: BoardLayout = ticker ? 'ticker' : drawn === 'table' ? fit.layout : 'full'
     const mode = modeOverride ?? config.market
     const onScreen = pickMarket(now, mode, hasFutures(config)).market
-    const props = buildProps(now, config, quotesFor(onScreen, now), mode, view, focusCode, chartRows)
+    const props = buildProps(now, config, quotesFor(onScreen, now), mode, drawn, focusCode, fit, layout)
     // buildProps chases focusCode to whatever position it actually landed on
     // (falling back to 0 when the code is unset, paged off, or gone from the
     // list) - syncing it back here keeps that landing code, not a stale one,
@@ -2837,7 +2949,7 @@ export const register: Register = on => {
     // asks Yahoo the same way the built-in feed does - only the demo walk
     // skips this and draws demoBars instead (see the demoBars call below),
     // and feedBars itself drops a tf request: those bars are in the file.
-    if (view === 'chart' && props.source !== 'demo' && props.quotes[props.focus]) {
+    if (props.view === 'chart' && props.source !== 'demo' && props.quotes[props.focus]) {
       requestBars?.(props.market, props.quotes[props.focus].code)
     }
 
@@ -2862,7 +2974,9 @@ export const register: Register = on => {
       pnlPageAt = now
       turnSeq += 1
     }
-    const currentStop: CycleStop = { market: props.market, pnl: props.view === 'pnl' }
+    // the tab row marks the stop the person chose, even while a too-short
+    // band draws it as the ticker (props.view is then 'table')
+    const currentStop: CycleStop = { market: props.market, pnl: view === 'pnl' }
     const stops = buildCycle(
       holdingsFor('us', holdingsFiles.us, config).holdings.length > 0,
       hasFutures(config),
@@ -2937,13 +3051,15 @@ export const register: Register = on => {
     // The chart's own controls only draw once there is a chart: a row with no
     // bars shows the notice, and a timeframe or a line through nothing is noise.
     const chartControls = props.view === 'chart' && (props.quotes[props.focus]?.bars?.length ?? 0) > 0
-    // Moves the scroll offset a whole PNL_PAGE_SIZE at a time, wrapping back
-    // to 0 past the last page - "paging sets the offset to page*5".
-    const holdingsPageCount = Math.max(1, Math.ceil(props.holdings.length / PNL_PAGE_SIZE))
-    const holdingsPageNum = Math.floor(props.holdingsScroll / PNL_PAGE_SIZE) + 1
+    // Moves the scroll offset a whole page of holding rows at a time,
+    // wrapping back to 0 past the last page - "paging sets the offset to
+    // page*rows".
+    const pnlRows = Math.max(1, fit.pnlRows)
+    const holdingsPageCount = Math.max(1, Math.ceil(props.holdings.length / pnlRows))
+    const holdingsPageNum = Math.floor(props.holdingsScroll / pnlRows) + 1
     const onHoldingsPage = () => {
-      const curPage = Math.floor(props.holdingsScroll / PNL_PAGE_SIZE)
-      pnlScroll = ((curPage + 1) % holdingsPageCount) * PNL_PAGE_SIZE
+      const curPage = Math.floor(props.holdingsScroll / pnlRows)
+      pnlScroll = ((curPage + 1) % holdingsPageCount) * pnlRows
       turnPnl() // a page move flaps the new page in, same as the watchlist's 翻頁
       $.ui.invalidate('ui.render')
     }
@@ -2978,9 +3094,13 @@ export const register: Register = on => {
     const fits = (...parts: string[]) =>
       tabRowWidth(stops) + parts.reduce((w, p) => w + 1 + dispWidth(p), 0) + RIGHT_BUTTON_GROUP_COLS <= cols
     const taipei = props.taipeiNote === '' ? [] : [props.taipeiNote]
-    const showSession = table && fits(badge, props.sessionNote, ...taipei)
-    const showTaipei = table && taipei.length > 0 && fits(badge, ...taipei)
-    const showBadge = table && fits(badge)
+    // compact/ticker boards have no footer row: its clock and source tag fold
+    // in here and give way last - which prices these are outranks the hours
+    const tail = table && props.layout !== 'full' ? [foldedFooter(props)] : []
+    const showSession = table && fits(badge, props.sessionNote, ...taipei, ...tail)
+    const showTaipei = table && taipei.length > 0 && fits(badge, ...taipei, ...tail)
+    const showBadge = table && fits(badge, ...tail)
+    const showTail = tail.length > 0 && fits(...tail)
 
     // No hotkeys on any of these (2026-09-16, at the user's request: 先不加
     // 上快捷鍵). A letter hotkey only fires once one of the band's Buttons
@@ -3047,6 +3167,8 @@ export const register: Register = on => {
             {showSession ? <Text color={DIM}>{props.sessionNote}</Text> : null}
             {showTaipei ? <Text> </Text> : null}
             {showTaipei ? <Text color={DIM}>{props.taipeiNote}</Text> : null}
+            {showTail ? <Text> </Text> : null}
+            {showTail ? <Text color={DIM}>{tail[0]}</Text> : null}
           </Box>
           <Box flexDirection="row">
             {table && props.pageCount > 1 ? (
@@ -3063,7 +3185,8 @@ export const register: Register = on => {
                 onPress={onHoldingsPage}
               />
             ) : null}
-            {table ? <Button key="stock-band:trend" label="趨勢圖" onPress={onTrend} /> : null}
+            {/* no chart can fit in a band that draws the ticker */}
+            {table && props.layout !== 'ticker' ? <Button key="stock-band:trend" label="趨勢圖" onPress={onTrend} /> : null}
             {pnl ? (
               <Button
                 key="stock-band:pnl-sort"
@@ -3078,7 +3201,7 @@ export const register: Register = on => {
           key="stock-band:table"
           module="./board.tsx"
           width={cols}
-          height={props.view === 'chart' ? props.chartRows : props.view === 'pnl' ? PNL_BOARD_ROWS : TABLE_BOARD_ROWS}
+          height={props.boardRows}
           props={{ ...props }}
         />
         {await next(e)}
