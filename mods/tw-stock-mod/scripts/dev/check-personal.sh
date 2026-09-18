@@ -14,23 +14,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 # prototype/ is NOT excluded: it is real repo content and has carried a
 # leaked personal path before (render-styles.py's hardcoded jobs-tmp file).
 PERSONAL='Darrell/investment|/Users/darrellwang|darrellwang'
-# 永豐 branch+account shapes (e.g. 9A95-1234567, F0020007654321): a branch
-# code (digit+letter+2digits, or letter+6digits) directly beside 7-8 digits -
-# generic on purpose, since a real account number is otherwise just a number.
+# 永豐 branch+account shapes (e.g. 9A95-1234567): a branch code beside
+# 7-8 digits - generic on purpose, a real account number alone is just a number.
 ACCOUNT='\b([0-9][A-Z][0-9]{2}|[A-Z][0-9]{6})[-_ ]?[0-9]{7,8}\b'
 # Taiwan 身分證: one letter, 1 (male) or 2 (female), eight digits.
 TW_ID='\b[A-Z][12][0-9]{8}\b'
-# Position sizes are not greppable in general, so this watches for the one
-# real value (67 口 SRFJ6) instead of any bare number - keyed to "qty" so a
-# coincidental 67 elsewhere (a demo-walk `period`, a positional arg) never
-# matches.
+# Position sizes aren't greppable in general, so this watches for the one
+# real value (67 口 SRFJ6) keyed to "qty" so a coincidental 67 never matches.
 QTY_67='qty["'"'"']?[[:space:]]*[:=][[:space:]]*-?67\b'
 PATTERN="${PERSONAL}|${ACCOUNT}|${TW_ID}|${QTY_67}"
 
 # --self-test scans a throwaway fixture instead of the repo, to prove the
-# three identifier patterns above actually fire rather than just "no hits
-# found" (which could mean either clean or broken). Never writes a fake id
-# into the repo itself.
+# three patterns above actually fire rather than just "no hits found".
 SEARCH_ROOT="$REPO_ROOT"
 SELF_TEST=0
 if [[ "${1:-}" == "--self-test" ]]; then

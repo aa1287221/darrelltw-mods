@@ -282,9 +282,8 @@ def test_fetch_futures_rows_requests_yesterday_through_today():
 # ---------------------------------------------------------------------------
 
 class FakeAction:
-    """str(sj.Action.X) == 'Action.X' (verified 2026-09-18, see reference-
-    shioaji-api-facts.md) - a plain "Buy"/"Sell" string fixture would let a
-    `direction == "Buy"` mutation pass by accident."""
+    """str(sj.Action.X) == 'Action.X' (verified 2026-09-18) - a plain
+    "Buy"/"Sell" string fixture would let a direction mutation pass by accident."""
 
     def __init__(self, name):
         self._name = name

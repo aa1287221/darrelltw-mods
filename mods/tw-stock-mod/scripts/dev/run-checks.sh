@@ -15,8 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOD_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # The fetcher's pure-function suite (scripts/tests, path matrix rows 12-15) -
-# the venv this repo's own tooling uses if it exists, else whatever python3
-# is on PATH.
+# this repo's own venv if it exists, else whatever python3 is on PATH.
 if [[ -x "$HOME/.claude/stock-band-venv/bin/python" ]]; then
   PYTHON="$HOME/.claude/stock-band-venv/bin/python"
 else

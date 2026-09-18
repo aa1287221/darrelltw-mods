@@ -267,18 +267,14 @@ FUTURES_BAR_LIMIT = 40  # matches register.tsx's CHART_BARS
 
 
 def fix_taipei_ts(raw_ns: int) -> int:
-    """Same 8h correction as build_payload's dataAt, factored out so both the
-    kbar path and the snapshot path call it independently (see the module's
-    TAIPEI_OFFSET_MS comment)."""
+    """Same 8h correction as build_payload's dataAt, factored out so the
+    kbar and snapshot paths both call it independently."""
     return raw_ns // 1_000_000 - TAIPEI_OFFSET_MS
 
 
 def kbars_to_rows(kbars) -> list[dict]:
-    """
-    api.kbars()'s columnar KBars (parallel ts/Open/High/Low/Close/Volume
-    lists) -> one dict per 1-minute row, ts corrected here - the kbar side's
-    one call site for fix_taipei_ts.
-    """
+    """api.kbars()'s columnar lists -> one dict per 1-minute row, ts
+    corrected here (the kbar side's one call site for fix_taipei_ts)."""
     ts_list = field(kbars, "ts", []) or []
     opens = field(kbars, "Open", []) or []
     highs = field(kbars, "High", []) or []
@@ -299,11 +295,8 @@ def kbars_to_rows(kbars) -> list[dict]:
 
 
 def resample_5min(rows: list[dict]) -> list[dict]:
-    """
-    1-minute rows (ts already corrected, ms) -> ascending 5-minute OHLCV
-    buckets keyed by floor(ts / 5 min); the trailing bucket is kept even with
-    a single row - that is the live, still-forming bar.
-    """
+    """1-minute rows -> ascending 5-minute OHLCV buckets; the trailing
+    bucket is kept even with one row - that's the live, still-forming bar."""
     buckets: dict[int, dict] = {}
     for row in sorted(rows, key=lambda r: r["ts"]):
         bucket_ts = (row["ts"] // FUTURES_BAR_MS) * FUTURES_BAR_MS
@@ -333,12 +326,9 @@ def bars_5min(kbars, limit: int = FUTURES_BAR_LIMIT) -> list[list[float]]:
 
 
 def futures_quote_row(contract, snapshot, bars: list, requested_code: str) -> dict | None:
-    """
-    One futures-quotes.json entry; multiplier/decimals/prevClose always come
-    from `contract`, never a lookup table. `ts` is the corrected snapshot
-    timestamp - the snapshot side's one call site for fix_taipei_ts - and is
-    popped by build_futures_payload once folded into dataAt.
-    """
+    """One futures-quotes.json entry; multiplier/decimals/prevClose always
+    come from `contract`, never a lookup table. `ts` is popped by
+    build_futures_payload once folded into dataAt."""
     close = float(field(snapshot, "close", 0) or 0)
     if close <= 0:
         return None
@@ -374,21 +364,15 @@ def build_futures_payload(rows: dict) -> dict | None:
 
 
 def split_futures_codes(raw: str) -> list[str]:
-    """
-    --futures CLI value -> codes, blanks dropped. Empty input alone does no
-    futures work - but a signed futopt_account that holds positions still
-    drives it (T5's union in main()), so this is a lower bound, not a gate.
-    """
+    """--futures CLI value -> codes, blanks dropped. Empty input alone does
+    no futures work - a signed account's own positions can still drive it."""
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
 def fetch_futures_rows(api, contracts: dict, codes: list, today: str) -> dict:
-    """
-    Per-tick snapshot + K-bar fetch for every futures code whose contract
-    already resolved (ensure_futures_contract logged the ones that didn't).
-    A code whose K-bar fetch fails keeps its quote with an empty bars list
-    rather than being dropped - the price is still good.
-    """
+    """Per-tick snapshot + K-bar fetch for every already-resolved futures
+    code. A failed K-bar fetch keeps the quote with empty bars rather than
+    dropping it - the price is still good."""
     live = {code: contracts[code] for code in codes if code in contracts}
     if not live:
         return {}
@@ -423,14 +407,9 @@ def fetch_futures_rows(api, contracts: dict, codes: list, today: str) -> dict:
 
 
 def fetch_futures_positions(api) -> list:
-    """
-    `api.list_positions(api.futopt_account)` - a login with no futures
-    account at all has `futopt_account is None`, and an account that exists
-    but never passed 簽署中心 has `signed=False` (list_positions on it raises
-    HTTP 406). Both are normal shapes, never guessed at, so both are checked
-    here before the call rather than leaving the 406 to the caller's
-    try/except every single tick.
-    """
+    """A missing `futopt_account` and an unsigned one (`signed=False`, which
+    raises HTTP 406 on `list_positions`) are both normal, checked here so
+    neither hits the caller as an exception every tick."""
     account = getattr(api, "futopt_account", None)
     if account is None:
         print("期貨帳戶未設定（futopt_account 是 None），期貨庫存視為空", file=sys.stderr)
@@ -442,12 +421,9 @@ def fetch_futures_positions(api) -> list:
 
 
 def futures_holding_row(position, contract) -> dict | None:
-    """
-    One futures-holdings.json entry; multiplier/prevClose always come from
-    `contract`, never a lookup table. qty carries the direction sign (Sell
-    negative) the same way build_holdings_payload's stock qty does, so the
-    band's (price - cost) * qty * multiplier needs no separate sign lookup.
-    """
+    """One futures-holdings.json entry; multiplier/prevClose come from
+    `contract`. qty carries the direction sign (Sell negative), so the
+    band's P&L math needs no separate sign lookup."""
     code = str(field(position, "code", "")).strip()
     qty = float(field(position, "quantity", 0) or 0)
     if not code or qty == 0:
@@ -468,13 +444,9 @@ def futures_holding_row(position, contract) -> dict | None:
 
 
 def check_futures_pnl(position, contract) -> str | None:
-    """
-    The SDK's own `pnl` vs (last_price - price) * quantity * multiplier
-    (verified against a real SRFJ6 position) - neither side is trusted
-    silently. `abs_tol` absorbs float noise from the multiplication chain
-    (e.g. 1200.0000000000027), not a real mismatch: a genuine mismatch is
-    off by many multiples of one price tick, never a fraction of a cent.
-    """
+    """The SDK's own `pnl` vs (last_price - price) * quantity * multiplier,
+    cross-checked rather than trusted. `abs_tol=1.0` absorbs float noise
+    from the multiplication chain, not a real mismatch."""
     quantity = float(field(position, "quantity", 0) or 0)
     price = float(field(position, "price", 0) or 0)
     last_price = float(field(position, "last_price", 0) or 0)
@@ -488,12 +460,9 @@ def check_futures_pnl(position, contract) -> str | None:
 
 
 def build_futures_holdings_payload(rows: list) -> dict:
-    """
-    futures-holdings.json's shape. Unlike build_futures_payload (None when
-    there are no quotes), this always returns a payload - `holdings: []` on
-    an unsigned or missing futopt_account - written every tick so the band
-    can tell "no positions" from "fetcher dead" from asOf alone.
-    """
+    """futures-holdings.json's shape - always a payload (`holdings: []` when
+    unsigned/missing), so `asOf` alone tells "no positions" from "fetcher
+    dead"."""
     return {"asOf": int(time.time() * 1000), "market": "tf", "source": "永豐 期貨", "holdings": rows}
 
 
@@ -558,13 +527,9 @@ def claim_pidfile(pidfile: Path) -> bool:
 
 
 def parse_heartbeat(text: str, now_ms: float) -> tuple[bool, frozenset[str]]:
-    """
-    (stale, markets the band wants worked). The band writes
-    `{"ts": <ms>, "markets": ["tw"|"tf", ...]}`; a pre-T4 band wrote the bare
-    ms number, which still reads as "every market" for one release so a
-    band/fetcher version skew never kills the fetcher on its first tick.
-    Anything else is stale: exiting beats guessing what the band wants.
-    """
+    """(stale, markets the band wants worked). A bare ms number (pre-T4
+    band) reads as every market for one release; anything else unparseable
+    is stale - exiting beats guessing what the band wants."""
     text = text.strip()
     try:
         ts = float(text)
