@@ -69,7 +69,7 @@ import os
 import signal
 import sys
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 HEARTBEAT_MAX_AGE_MS = 90_000
@@ -383,6 +383,11 @@ def fetch_futures_rows(api, contracts: dict, codes: list, today: str) -> dict:
     live = {code: contracts[code] for code in codes if code in contracts}
     if not live:
         return {}
+    # api.kbars filters by Taipei calendar day, not trading session - a 夜盤
+    # tick just after midnight would otherwise only see tonight-so-far and
+    # fall well short of 40 five-minute bars, so the request always spans
+    # yesterday through today and bars_5min's own [-limit:] does the trimming.
+    start = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
     snaps = {str(field(s, "code", "")): s for s in api.snapshots(list(live.values()))}
     rows = {}
     for code, contract in live.items():
@@ -391,7 +396,7 @@ def fetch_futures_rows(api, contracts: dict, codes: list, today: str) -> dict:
             print(f"跳過期貨 {code}：這次快照沒有回應", file=sys.stderr)
             continue
         try:
-            bars = bars_5min(api.kbars(contract, start=today, end=today))
+            bars = bars_5min(api.kbars(contract, start=start, end=today))
         except Exception as err:  # noqa: BLE001 - a bad K-bar fetch keeps the quote, just with no bars
             print(f"{code} K 棒取得失敗（沿用空陣列）: {type(err).__name__}: {err}", file=sys.stderr)
             bars = []
