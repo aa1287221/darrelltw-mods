@@ -908,7 +908,7 @@ function volumePixels(win: BarWindow, market: MarketId, width: number): { px: Pi
   return { px, max }
 }
 
-// braille: 2 dot columns x 4 dot rows per cell, so 16 rows are 52 levels for the line
+// braille: 2 dot columns x 4 dot rows per cell, so 11 plot rows are 44 levels for the line
 const BRAILLE_BITS = [
   [0x01, 0x08],
   [0x02, 0x10],
