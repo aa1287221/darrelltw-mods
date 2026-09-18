@@ -20,8 +20,8 @@ deterministic sine walk off each symbol's previous close and the footer says
 See [The live feed](#the-live-feed). **台灣期貨 (`tf`) is a third market**,
 永豐-only with no demo walk — see [Taiwan futures (tf)](#taiwan-futures-tf).
 
-**損益 shows your holdings, not just the watchlist.** It is a stop in the
-market button's own cycle (美股 → 台股 → 台股庫存, …) — landing on it opens a
+**損益 shows your holdings, not just the watchlist.** It is a tab on the
+band's tab row (美股 · 台股 · 台股庫存, …) — pressing it opens a
 sortable, scrollable P&L table (張數/成本/現價/今日%/今日損益/總損益/損益% per
 position, plus a portfolio total) read from a `holdings` block in
 `stock-band.json` (the recommended spot for hand-written positions), or from
@@ -128,7 +128,7 @@ The built-in Taiwan watchlist is 20 symbols, so the two-column table is what a
 fresh install actually shows for Taiwan:
 
 ```
- 台股 ▾  ☀ 盤中 09:00-13:30                    [翻頁 1/2] [趨勢圖] [收起 30分]
+ 美股 [台股] 台股庫存  ☀ 盤中 09:00-13:30       [翻頁 1/2] [趨勢圖] [收起 30分]
  代號              價格    變更%     代號              價格    變更%
  ──────────────────────────────────────────────────────────────────
  2382   廣達      341.56  ▲ +2.57%   2891   中信金      70.06  ▲ +0.52%
@@ -143,7 +143,7 @@ The built-in US watchlist is 20 symbols too, so it draws the same two-column
 table (this one is the real board fed by Yahoo, US session closed):
 
 ```
- 美股 ▾  ☾ 休市 下次開盤 09:30 ET            [翻頁 1/2] [趨勢圖] [收起 30分]
+ [美股] 台股 台股庫存  ☾ 休市 下次開盤 09:30 ET  [翻頁 1/2] [趨勢圖] [收起 30分]
  代號                           價格     ↓變更%       代號                           價格     ↓變更%
  ────────────────────────────────────────────────────────────────────────────────────────────── 1/2
  CRWD   CrowdStrike           242.49   ▲ +3.02%       MU     Micron                927.60   ▲ +0.39%
@@ -159,7 +159,7 @@ the single-column table instead — that one keeps the 變更$ column and the
 highlighted top mover:
 
 ```
- 美股 ▾  ☾ 休市 下次開盤 09:30 ET                        [趨勢圖] [收起 30分]
+ [美股] 台股 台股庫存  ☾ 休市 下次開盤 09:30 ET              [趨勢圖] [收起 30分]
  代號                          價格      變更$   變更%
  ──────────────────────────────────────────────────
  TSLA    Tesla                366.33     +0.89 ▲ +0.24%
@@ -170,20 +170,27 @@ highlighted top mover:
  NASDAQ 26,306.53 ▼ -26.51                  收盤 16:00 Yahoo 即時 · darrell_tw_
 ```
 
-- **The title row is the market button.** `台股 ▾` / `美股 ▾` names the market
-  ON THE BAND, and nothing else — two markets, two labels. A session starts
-  on the clock's pick and keeps tracking it until you press; the press shows
-  the other market, and after that the button just toggles the two. (There is
-  no third "auto" stop on the cycle: pressing into it would redraw the same
-  board and read as a dead button, and `"market": "auto"` in the config is
-  what puts a fresh session back on the clock.) The session state (`☀ 盤中` orange /
-  `☾ 休市` blue), the hours, and — when there is room — the same hours restated
-  in Taipei time sit next to it. `翻頁` / `趨勢圖` / `收起 30 分` stay
-  right-aligned in the same row. **In the trend view the row changes**: the
-  session state and hours step aside (the chart draws its own title with both
-  on it) and `◀ 上一檔` / `下一檔 ▶ n/N` / `回清單` take that space, left-
-  aligned beside the market button — next to the symbol they move through,
-  rather than across the terminal from it. **No hotkeys**: a letter hotkey only fires
+- **The title row is a row of tabs.** One tab per view that exists right
+  now — `美股` · (`美股庫存`, with US holdings) · `台股` · `台股庫存` ·
+  (`台指期`, with a `futures` list) · (`期貨庫存`, with futures positions) —
+  and the one on the band reads `[台股]` at full strength while the others
+  sit dim. Pressing a tab lands on it directly, whatever was showing before.
+  A session starts on the clock's pick and keeps tracking it until you press;
+  after that the band stays on the tab you chose. (There is no "auto" tab:
+  pressing it would redraw the same board and read as a dead button, and
+  `"market": "auto"` in the config is what puts a fresh session back on the
+  clock.) The session state (`☀ 盤中` orange / `☾ 休市` blue), the hours, and
+  — when there is room — the same hours restated in Taipei time sit next to
+  the tabs; on a narrow terminal the hours go first, then the Taipei
+  restatement, then the session state, never a tab (with the three default
+  tabs the hours need ~82 columns; the mockups above are drawn wider than the
+  band's own table rows to show them). `翻頁` / `趨勢圖` /
+  `收起 30 分` stay right-aligned in the same row. **In the trend view the
+  row changes**: the session state and hours step aside (the chart draws its
+  own title with both on it) and `◀ 上一檔` / `下一檔 ▶ n/N` / `回清單` take
+  that space, left-aligned after the tabs — next to the symbol they move
+  through, rather than across the terminal from it; the tabs stay, so
+  another market is one press away from the chart too. **No hotkeys**: a letter hotkey only fires
   once a Button already holds the focus ring, which buys nothing over Enter,
   and a digit hotkey would eat a prompt that starts with that digit — every
   button here is a click, or focus then Enter.
@@ -226,7 +233,7 @@ highlighted top mover:
 ## The trend view (K bars)
 
 ```
- 台股 ▾  ◀ 上一檔  下一檔 ▶ 2/10  回清單                        [收起 30分]
+ 美股 [台股] 台股庫存  ◀ 上一檔  下一檔 ▶ 2/10  回清單            [收起 30分]
  2330 台積電  1,188.29 ▲ +23.29 (+2.00%)           K 棒（示範）· 台股 ☀ 盤中
  ▀▄          ▄▀▀▀▀▄          ▄▀▄▀▀          ▄▄▀▄▀▄          ▄▀▀   1,190.77
   ...candles, one per two columns, red/green by bar direction...
@@ -283,7 +290,7 @@ who opens it keeps their own preference — see
 
 | key | default | meaning |
 | --- | --- | --- |
-| `market` | `"auto"` | the state a session starts in: `auto` picks by the clock and keeps tracking it until the market button is pressed; `tw`/`us`/`tf` opens on that market instead |
+| `market` | `"auto"` | the state a session starts in: `auto` picks by the clock and keeps tracking it until a tab is pressed; `tw`/`us`/`tf` opens on that market instead |
 | `refreshMs` | `3000` | how often the module rebuilds the snapshot (min 1000; fixed at session start — changing it needs `/reload-plugins`) |
 | `sort` | `"change"` | `change` = by change% desc, `list` = your order |
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
@@ -340,7 +347,7 @@ this, key for key: see the merge order at the top of
 The module fetches quotes itself, through `$.http.fetch`, on its own clock
 (`feedMs`, default 30 s) separate from the redraw poll (`refreshMs`, 3 s).
 Under the default `feed: "auto"` only the market on the band costs a request,
-and pressing the market button fetches the market you land on straight away
+and pressing a tab fetches the market you land on straight away
 instead of leaving it on demo prices until the next tick.
 
 - **US: two requests per tick with the built-in list.** Yahoo's `spark`
@@ -543,15 +550,14 @@ then a `holdings` block in `stock-band.json`. Set `"holdingsSource":
 whichever file exists for that market, so a hand-written position sticks
 even after 永豐 starts writing its own.
 
-損益 is not its own button — it is a STOP in the market button's own cycle:
-`[ 美股 ▾ ]` → (`美股庫存`, only if US holdings are configured) → `[ 台股 ▾ ]`
-→ `[ 台股庫存 ▾ ]` → (`台指期`, only if `futures` is non-empty) → (`期貨庫存`,
-only if a futures holdings file has a position) → back to 美股. The two `tf`
-stops gate independently — a futures-only watchlist with no positions gets
-the table and not 期貨庫存, a positions file with no watchlist gets 期貨庫存
-and not the table. See [Taiwan futures (tf)](#taiwan-futures-tf). Pressing
-the market button walks the cycle one stop at a time; landing on a `庫存`
-stop swaps the table for a P&L board:
+損益 is not its own button — it is a TAB on the band's tab row: `美股` ·
+(`美股庫存`, only if US holdings are configured) · `台股` · `台股庫存` ·
+(`台指期`, only if `futures` is non-empty) · (`期貨庫存`, only if a futures
+holdings file has a position). The two `tf` tabs gate independently — a
+futures-only watchlist with no positions gets the table and not 期貨庫存, a
+positions file with no watchlist gets 期貨庫存 and not the table. See
+[Taiwan futures (tf)](#taiwan-futures-tf). Pressing a `庫存` tab swaps the
+table for a P&L board:
 
 | 代號 | 名稱 | 張數 | 成本 | 現價 | 今日% | 今日損益 | 總損益 | 損益% |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -577,7 +583,7 @@ changes height). `翻頁` jumps a whole 5 rows at a time and wraps back to the
 top; either one moves the same underlying position, so they never disagree
 about which page you are on. A dim `▲`/`▼` at the right end of the header or
 totals row says there are more rows to scroll to in that direction. Sorting
-by a different column, or cycling the market button to a different stop,
+by a different column, or pressing a different tab,
 resets the scroll position back to the top.
 
 **Where to hand-write your holdings:**

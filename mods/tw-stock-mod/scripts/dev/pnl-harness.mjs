@@ -1,10 +1,9 @@
 // Render the real board.tsx's pnl view against real props and print the 8
 // rows as text. Same stub host as board-harness.mjs, plus two extra steps:
 //
-// 1. Press the market button (key stock-band:market) through the real hook
-//    chain, same as a real click, until its label reads 台股庫存 ▾ - the pnl
-//    view is a stop in that cycle now, not a separate 損益 button. Asserts
-//    the stop is actually reached rather than looping forever.
+// 1. Press the 台股庫存 tab (key stock-band:tab:tw:pnl) through the real hook
+//    chain, same as a real click - the pnl view is a stop on the tab row,
+//    not a separate 損益 button. Asserts the stop is actually reached.
 // 2. Optionally post a `{ sortPnl: key }` message straight into ui.message
 //    (the same message a header-cell click sends - see board.tsx's picker),
 //    to prove the sort/direction toggle without a pty.
@@ -49,23 +48,19 @@ async function render() {
   return { tree, props, buttons }
 }
 
-// --- 1. cycle the market button until the 台股庫存 stop shows --------------
+// --- 1. press the 台股庫存 tab ----------------------------------------------
 let cur = await render()
-let presses = 0
-while (cur.props?.view !== 'pnl' && presses < 6) {
-  const marketButton = cur.buttons.find(b => b.key === 'stock-band:market' || b.props.label?.endsWith('▾'))
-  if (!marketButton) {
-    console.error('no market button found - buttons were:', cur.buttons.map(b => b.props.label))
-    process.exit(1)
-  }
-  marketButton.props.onPress()
-  presses += 1
-  cur = await render()
+const pnlTab = cur.buttons.find(b => b.props.key === 'stock-band:tab:tw:pnl')
+if (!pnlTab) {
+  console.error('no 台股庫存 tab found - buttons were:', cur.buttons.map(b => b.props.label))
+  process.exit(1)
 }
-const marketLabel = cur.buttons.find(b => b.props.label?.endsWith('▾'))?.props.label
-console.log(`market button pressed ${presses}x -> label "${marketLabel}", view=${cur.props?.view}`)
-if (cur.props?.view !== 'pnl' || marketLabel !== '台股庫存 ▾') {
-  console.error(`FAIL: expected the pnl stop with label "台股庫存 ▾", got view=${cur.props?.view} label="${marketLabel}"`)
+pnlTab.props.onPress()
+cur = await render()
+const marketLabel = cur.buttons.find(b => b.props.key === 'stock-band:tab:tw:pnl')?.props.label
+console.log(`台股庫存 tab pressed -> label "${marketLabel}", view=${cur.props?.view}`)
+if (cur.props?.view !== 'pnl' || marketLabel !== '[台股庫存]') {
+  console.error(`FAIL: expected the pnl stop with the tab marked "[台股庫存]", got view=${cur.props?.view} label="${marketLabel}"`)
   process.exit(1)
 }
 console.log('buttons (pnl stop):', cur.buttons.map(b => b.props.label).join('  '))

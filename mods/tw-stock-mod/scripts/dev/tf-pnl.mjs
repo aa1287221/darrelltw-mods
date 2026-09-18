@@ -1,12 +1,12 @@
 // 期貨庫存 (tf pnl) at the runtime-dir file seam: a `futures-holdings.json`
 // the 永豐 fetcher wrote (stock-holdings.json shape plus per-row multiplier,
-// qty already signed - Sell is negative) adds a 期貨庫存 stop to the market
-// button whenever it holds a position, with or without a `futures` list, and
+// qty already signed - Sell is negative) adds a 期貨庫存 tab to the tab row
+// whenever it holds a position, with or without a `futures` list, and
 // the pnl view prices every row × its own multiplier, in 口, at the contract's
 // decimals, 紅漲綠跌, sorted and paged like 台股庫存. A fresh
 // `futures-quotes.json` wins for price/prevClose/decimals; once stale the
 // holdings file's own numbers stand in. A project with neither file is the
-// guard: its cycle has no futures stop at all.
+// guard: its tab row has no futures tab at all.
 //
 // Usage: node tf-pnl.mjs $OUT/register.js $OUT/board.js <proj> <plain-proj>
 // <proj>/.claude/stock-band.json pins `market: "us"` with feed off and an
@@ -98,7 +98,7 @@ async function boot(dir, tag) {
     const btns = []; let props
     const walk = n => { if (!n || typeof n !== 'object') return
       if (n.type === 'Client') props = n.props.props
-      if (n.type === 'Button') btns.push({ label: n.props.label, press: n.props.onPress })
+      if (n.type === 'Button') btns.push({ key: n.props.key, label: n.props.label, press: n.props.onPress })
       for (const k of [...(n.kids ?? []), n.props?.children]) walk(k) }
     walk(tree)
     return { btns, props }
@@ -119,27 +119,17 @@ async function boot(dir, tag) {
   const sortPnl = async key => {
     await handlers.get('ui.message')($, { element: 'stock-band:table', module: 'hooks/board.tsx', data: { sortPnl: key } }, async () => ({ kids: [] }))
   }
-  /** presses the market button `n` times and returns the labels it landed on */
-  const walkCycle = async n => {
-    const seen = []
-    for (let i = 0; i < n; i++) {
-      const { btns } = await draw()
-      btns.find(b => b.label.endsWith('▾')).press()
-      const { btns: after } = await draw()
-      seen.push(after.find(b => b.label.endsWith('▾')).label)
-    }
-    return seen
-  }
-  /** presses the market button until it reads `label` (bounded: on unchanged code a new stop never appears) */
+  /** the tab row's bare labels in order (the selected one is drawn `[label]`) */
+  const tabs = async () => (await draw()).btns.filter(b => b.key?.startsWith('stock-band:tab:')).map(b => b.label.replace(/^\[|\]$/g, ''))
+  /** presses the tab labelled `label` (a missing one is left to the assertion after it) and redraws */
   const landOn = async label => {
-    let cur = await draw()
-    for (let i = 0; i < 7 && cur.btns.find(b => b.label.endsWith('▾'))?.label !== label; i++) {
-      cur.btns.find(b => b.label.endsWith('▾'))?.press()
-      cur = await draw()
-    }
-    return cur
+    const { btns } = await draw()
+    btns.find(b => b.key?.startsWith('stock-band:tab:') && b.label.replace(/^\[|\]$/g, '') === label)?.press()
+    return draw()
   }
-  return { draw, poll, setConfig, sortPnl, walkCycle, landOn, logs }
+  /** the selected tab's bare label */
+  const selectedTab = btns => btns.find(b => b.key?.startsWith('stock-band:tab:') && /^\[.+\]$/.test(b.label))?.label.slice(1, -1)
+  return { draw, poll, setConfig, sortPnl, tabs, landOn, selectedTab, logs }
 }
 
 // board.tsx rendered to rows of colored spans, so the tone can be asserted
@@ -183,16 +173,16 @@ const band = await boot(projDir, 'tf-pnl')
 // against the same directory starts from the documented shape
 await band.setConfig({ market: 'us', futures: [] })
 
-// --- path 10 (pnl half): 期貨庫存 stop with an empty `futures` list ----------
-const cycle = await band.walkCycle(4)
-console.log('cycle, holdings file + futures []:', ['美股 ▾', ...cycle].join(' → '))
-ok(cycle.join('|') === '台股 ▾|台股庫存 ▾|期貨庫存 ▾|美股 ▾', '美股 → 台股 → 台股庫存 → 期貨庫存 → 美股')
-ok(!cycle.includes('台指期 ▾'), 'no 台指期 table stop without a futures list')
+// --- path 10 (pnl half): 期貨庫存 tab with an empty `futures` list -----------
+const tabs = await band.tabs()
+console.log('tabs, holdings file + futures []:', tabs.join(' · '))
+ok(tabs.join('|') === '美股|台股|台股庫存|期貨庫存', '美股 · 台股 · 台股庫存 · 期貨庫存')
+ok(!tabs.includes('台指期'), 'no 台指期 table tab without a futures list')
 
-let { props: p, btns } = await band.landOn('期貨庫存 ▾')
-const label = btns.find(b => b.label.endsWith('▾'))?.label
-console.log(`landed: label "${label}" market=${p.market} view=${p.view} source=${p.holdingsSource} rows=${p.holdings.length}`)
-ok(label === '期貨庫存 ▾' && p.market === 'tf' && p.view === 'pnl', `market button reads 期貨庫存 on the tf pnl stop: "${label}" ${p.market}/${p.view}`)
+let { props: p, btns } = await band.landOn('期貨庫存')
+const label = band.selectedTab(btns)
+console.log(`landed: selected "${label}" market=${p.market} view=${p.view} source=${p.holdingsSource} rows=${p.holdings.length}`)
+ok(label === '期貨庫存' && p.market === 'tf' && p.view === 'pnl', `期貨庫存 tab is the selected one on the tf pnl stop: "${label}" ${p.market}/${p.view}`)
 ok(p.holdings.length === 7, `every position of the file is listed: ${p.holdings.length}`)
 ok(p.holdingsSource === '永豐 期貨', `holdings source is the file's: ${p.holdingsSource}`)
 ok(btns.some(b => b.label === '翻頁 1/2'), `7 rows page as 5 + 2: ${btns.map(b => b.label).join('  ')}`)
@@ -285,26 +275,26 @@ await band.poll()
 await band.setConfig({ futures: [{ code: 'SRFJ6', name: '小台50' }] })
 ;({ props: p } = await band.draw())
 ok(p.holdings.find(x => x.code === 'SRFJ6')?.name === '小台50', `config futures name wins over the file's contract name: "${p.holdings.find(x => x.code === 'SRFJ6')?.name}"`)
-await band.landOn('美股 ▾')
-const both = await band.walkCycle(5)
-console.log('cycle, file + futures list:', ['美股 ▾', ...both].join(' → '))
-ok(both.join('|') === '台股 ▾|台股庫存 ▾|台指期 ▾|期貨庫存 ▾|美股 ▾', '美股 → 台股 → 台股庫存 → 台指期 → 期貨庫存 → 美股')
+await band.landOn('美股')
+const both = await band.tabs()
+console.log('tabs, file + futures list:', both.join(' · '))
+ok(both.join('|') === '美股|台股|台股庫存|台指期|期貨庫存', '美股 · 台股 · 台股庫存 · 台指期 · 期貨庫存')
 
 // --- the file goes away: the stop goes with it, the table stop stays ----------
 await rm(`${runtime}futures-holdings.json`)
 await band.poll()
-await band.landOn('美股 ▾')
-const gone = await band.walkCycle(4)
-console.log('cycle, file removed:', ['美股 ▾', ...gone].join(' → '))
-ok(gone.join('|') === '台股 ▾|台股庫存 ▾|台指期 ▾|美股 ▾', 'no holdings file: no 期貨庫存 stop, 台指期 stays')
+await band.landOn('美股')
+const gone = await band.tabs()
+console.log('tabs, file removed:', gone.join(' · '))
+ok(gone.join('|') === '美股|台股|台股庫存|台指期', 'no holdings file: no 期貨庫存 tab, 台指期 stays')
 ok(!band.logs.some(l => /spawn|network/.test(l)), `feed off: nothing spawned or fetched: ${band.logs.join(' | ')}`)
 
 // --- guard: a project with neither futures nor a file ----------------------------
 const plain = await boot(plainDir, 'plain')
 await plain.setConfig({ market: 'us' })
-await plain.landOn('美股 ▾')
-const plainCycle = await plain.walkCycle(3)
-console.log('cycle without futures or a file:', ['美股 ▾', ...plainCycle].join(' → '))
-ok(plainCycle.join('|') === '台股 ▾|台股庫存 ▾|美股 ▾', 'no futures, no file: 美股 → 台股 → 台股庫存 → 美股')
+await plain.landOn('美股')
+const plainTabs = await plain.tabs()
+console.log('tabs without futures or a file:', plainTabs.join(' · '))
+ok(plainTabs.join('|') === '美股|台股|台股庫存', 'no futures, no file: 美股 · 台股 · 台股庫存')
 
 done()

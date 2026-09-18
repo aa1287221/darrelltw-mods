@@ -282,14 +282,14 @@ ok(
   '沒有真的翻頁卻被判定成剛翻頁，第 2 頁不該套上第 1 頁的舊股票當翻牌 (bug #1)',
 )
 
-// --- 新增：onCycle 切市場沒重設 page，落在跟直覺不符的頁碼 -------------------
-// 第二個漏洞：onCycle 換市場只呼叫 resetPnlScroll()，從沒把 page 歸零。
+// --- 新增：切市場沒重設 page，落在跟直覺不符的頁碼 -----------------------
+// 第二個漏洞：換市場（當年的 onCycle，現在的 onSelectStop）只呼叫 resetPnlScroll()，從沒把 page 歸零。
 // buildProps 用 ((page % pages) + pages) % pages 把舊 page 繞進新市場的合法
 // 範圍，不會當機，但落點完全看兩個市場頁數的餘數關係，不是使用者切市場時
 // 直覺期待的「從頭看」。這段把美股停在最後一頁、台股只有 2 頁，讓餘數落在
 // 非 0 的位置，驗證切過去該是台股第 1 頁而不是繞算出來的第 2 頁 - 修法是
-// 市場真的換了就把 page 寫回 0（見 onCycle 裡
-// `if (nextStop.market !== props.market)`）。20 檔頂到 MAX_SYMBOLS（見
+// 市場真的換了就把 page 寫回 0（見 onSelectStop 裡
+// `if (stop.market !== props.market)`）。20 檔頂到 MAX_SYMBOLS（見
 // register.tsx），5 檔一頁剛好 4 頁；7 台股 5 檔一頁是 2 頁，4 頁対 2 頁的餘
 // 數在最後一頁（index 3）時是 3 % 2 = 1 - 非 0，足以跟真正該歸零的 0 區分。
 const usCycleCodes = Array.from({ length: 20 }, (_, i) => `U${String(i + 1).padStart(2, '0')}`)
@@ -333,9 +333,9 @@ for (let guard = 0; guard < pCyc0.pageCount && pCyc0.page !== pCyc0.pageCount - 
 ok(pCyc0.page === pCyc0.pageCount - 1, `美股停在最後一頁（page=${pCyc0.pageCount - 1}），用來製造切市場後的餘數落點`)
 
 const { btns: bCyc1 } = await show('市場切換：切市場前')
-bCyc1.find(x => x.key === 'stock-band:market').press()
+bCyc1.find(x => x.key === 'stock-band:tab:tw')?.press()
 let { props: pCyc2 } = await show('市場切換：切到台股')
-ok(pCyc2.market === 'tw', '按市場循環鈕後市場真的換成台股')
+ok(pCyc2.market === 'tw', '按台股分頁後市場真的換成台股')
 ok(pCyc2.pageCount === 2, '台股 7 檔、每頁 5 檔，共 2 頁')
 ok(
   pCyc2.page === 0,

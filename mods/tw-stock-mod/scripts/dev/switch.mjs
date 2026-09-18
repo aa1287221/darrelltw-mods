@@ -20,9 +20,11 @@ const board = t => { let p; walk(t, n => { if (n.type === 'Client') p = n.props.
 let tree = await draw()
 let p = board(tree)
 console.log('before switch:', p.market, p.sourceLabel, p.quotes[0].code, p.quotes[0].price)
+// the other market's tab (the cycling button this used to press twice is gone)
+const other = p.market === 'tw' ? 'us' : 'tw'
 let press
-walk(tree, n => { if (n.type === 'Button' && n.props.key === 'stock-band:market') press = n.props.onPress })
-press(); press()
+walk(tree, n => { if (n.type === 'Button' && n.props.key === `stock-band:tab:${other}`) press = n.props.onPress })
+press()
 await new Promise(r => setTimeout(r, 2500)) // the switch asks for a tick of its own
 tree = await draw(); p = board(tree)
 console.log('after switch (before next feed tick):', p.market, p.source, p.sourceLabel)

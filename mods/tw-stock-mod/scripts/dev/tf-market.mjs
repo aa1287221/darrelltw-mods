@@ -1,6 +1,6 @@
 // 台指期 (tf) market, at the config-file seam: a project whose stock-band.json
 // carries a `futures` list gets a third market with 日盤 08:45-13:45 and 夜盤
-// 15:00-翌日 05:00, a 台指期 stop on the market button, and no-data rows
+// 15:00-翌日 05:00, a 台指期 tab on the tab row, and no-data rows
 // (never the demo walk) until a quotes source exists. A project without
 // `futures` must behave exactly as before - that guard runs last, on a fresh
 // module instance. No network: feed is "off" in both fixtures.
@@ -53,7 +53,7 @@ async function boot(dir, tag) {
     const btns = [], texts = []; let props
     const walk = n => { if (!n || typeof n !== 'object') return
       if (n.type === 'Client') props = n.props.props
-      if (n.type === 'Button') btns.push({ label: n.props.label, press: n.props.onPress })
+      if (n.type === 'Button') btns.push({ key: n.props.key, label: n.props.label, press: n.props.onPress })
       if (n.type === 'Text') texts.push((n.kids ?? []).filter(k => typeof k === 'string').join(''))
       for (const k of [...(n.kids ?? []), n.props?.children]) walk(k) }
     walk(tree)
@@ -161,21 +161,27 @@ const dropLogs = band.logs.filter(l => /futures/.test(l))
 console.log('log lines mentioning futures:', dropLogs)
 ok(dropLogs.length === 1, `invalid futures entries logged exactly once across polls: ${dropLogs.length}`)
 
-// --- path 10 (table half): 台指期 stop on the cycle -------------------------
-const walkCycle = async (band, presses) => {
+// --- path 10 (table half): 台指期 tab on the row ----------------------------
+/** the tab row's bare labels (the selected one is drawn `[label]`) */
+const tabLabels = btns => btns.filter(b => b.key?.startsWith('stock-band:tab:')).map(b => b.label.replace(/^\[|\]$/g, ''))
+/** presses every tab in row order and returns `label=market/view` per landing */
+const pressEachTab = async band => {
   const seen = []
-  for (let i = 0; i < presses; i++) {
+  for (const name of tabLabels((await band.draw()).btns)) {
     const { btns } = await band.draw()
-    btns.find(b => b.label.endsWith('▾')).press()
-    const { btns: after } = await band.draw()
-    seen.push(after.find(b => b.label.endsWith('▾')).label)
+    btns.find(b => b.key?.startsWith('stock-band:tab:') && b.label.replace(/^\[|\]$/g, '') === name)?.press()
+    const { props } = await band.draw()
+    seen.push(`${name}=${props.market}/${props.view}`)
   }
   return seen
 }
 await band.setConfig({ market: 'us' })
-const cycle = await walkCycle(band, 4)
-console.log('cycle with futures:', ['美股 ▾', ...cycle].join(' → '))
-ok(cycle.join('|') === '台股 ▾|台股庫存 ▾|台指期 ▾|美股 ▾', '美股 → 台股 → 台股庫存 → 台指期 → 美股')
+const tabs = tabLabels((await band.draw()).btns)
+console.log('tabs with futures:', tabs.join(' · '))
+ok(tabs.join('|') === '美股|台股|台股庫存|台指期', '美股 · 台股 · 台股庫存 · 台指期')
+const landed = await pressEachTab(band)
+console.log('each tab lands:', landed.join('  '))
+ok(landed.join('|') === '美股=us/table|台股=tw/table|台股庫存=tw/pnl|台指期=tf/table', 'each tab lands on its own market + view')
 ;({ props: q } = await band.draw())
 
 // --- path 1 guard: no `futures` => no tf anywhere ---------------------------
@@ -185,9 +191,11 @@ plain.at(taipei(THU, 21, 0))
 let { props: r } = await plain.draw()
 ok(r.market !== 'tf', `no futures: auto never lands on tf (got ${r.market})`)
 await plain.setConfig({ market: 'us' })
-const plainCycle = await walkCycle(plain, 3)
-console.log('cycle without futures:', ['美股 ▾', ...plainCycle].join(' → '))
-ok(plainCycle.join('|') === '台股 ▾|台股庫存 ▾|美股 ▾', 'no futures: cycle is 美股 → 台股 → 台股庫存 → 美股, no 台指期')
+const plainTabs = tabLabels((await plain.draw()).btns)
+console.log('tabs without futures:', plainTabs.join(' · '))
+ok(plainTabs.join('|') === '美股|台股|台股庫存', 'no futures: tabs are 美股 · 台股 · 台股庫存, no 台指期')
+const plainLanded = await pressEachTab(plain)
+ok(plainLanded.join('|') === '美股=us/table|台股=tw/table|台股庫存=tw/pnl', `no futures: each tab lands where the old cycle did: ${plainLanded.join('  ')}`)
 ok(!plain.logs.some(l => /futures/.test(l)), 'no futures: nothing logged about futures')
 
 done()
