@@ -243,15 +243,19 @@ def do_login(sj, api_key: str, secret_key: str, simulation: bool):
     return api
 
 
-def ensure_contracts(api) -> None:
-    """Blocks until Contracts finishes downloading - a one-shot script has no
-    later tick to retry a still-empty lookup on."""
-    api.fetch_contracts(contract_download=False, contracts_timeout=10000)
-
-
-def resolve_contract(api, code: str):
+def resolve_contract(api, code: str, retries: int = 10, delay: float = 1.0):
+    """Contracts populate in the background right after login - retry the
+    lookup a few times rather than calling fetch_contracts(), which the SDK
+    treats as an exclusive op and rejects while another session (e.g. the
+    band's own fetcher) already has one in flight (measured 2026-09-18:
+    ShioajiTimeoutError: exclusive access lost)."""
     kind = classify_code(code)
-    contract = api.Contracts.Stocks[code] if kind == "stock" else api.Contracts.Futures[code]
+    contract = None
+    for _ in range(retries):
+        contract = api.Contracts.Stocks[code] if kind == "stock" else api.Contracts.Futures[code]
+        if contract is not None:
+            break
+        time.sleep(delay)
     return kind, contract
 
 
@@ -317,7 +321,6 @@ def enter_session(args, user_cfg: dict, project_cfg: dict, action: str, extra: d
     import shioaji as sj
 
     api = do_login(sj, api_key, secret_key, simulation=(mode != "live"))
-    ensure_contracts(api)
 
     if mode == "live" and not enforce_live_ca(api, user_cfg, action, extra):
         try:
