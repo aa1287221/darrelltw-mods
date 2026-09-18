@@ -707,6 +707,36 @@ and read-order rules (the quotes file expires, the holdings file does not):
 bars from `futures-quotes.json` — it never asks Yahoo, which has no futures
 mapping to ask.
 
+## Orders
+
+`scripts/order-shioaji.py` places, checks and cancels 永豐 orders through
+`/tw-stock-mod:order`. It is a standalone script — **not part of the band or
+any hook, and the band never places orders.**
+
+**Simulation is the default.** With no `--live`, it logs in with
+`sj.Shioaji(simulation=True)` and nothing it does touches a real position.
+
+**Live needs two keys, both true, plus a CA cert.** `"order": { "live": true
+}"` in the USER-level `~/.claude/stock-band.json` — never the project file,
+so a checked-in config can never turn live trading on — **and** `--live` on
+the invocation; either alone still runs in simulation. Live additionally
+needs `"order": { "ca": "~/path.pfx", "caPasswordEnv":
+"SINOBON_CA_PASSWORD" }` in that same user-level file, pointing at a CA
+certificate and the env var holding its password. When live is requested and
+the cert is not configured, or `activate_ca` fails, the script refuses with
+`需要 CA 憑證` and does nothing else. (The seam is built; obtaining and
+testing an actual cert is out of scope for now.)
+
+**A confirmation gate guards every order.** Before `place_order` the script
+prints the contract, direction, price, quantity (with its unit — 張/股 by
+lot, 口 for futures), account id and mode (模擬/正式), then waits for the
+literal reply `確認` on stdin. `--yes` skips that prompt in simulation only —
+live always prompts, whatever `--yes` says.
+
+**Every place, status and cancel appends one JSON line** to
+`~/.claude/stock-band/orders.log` (a single runtime file, not per-project —
+never the repo).
+
 ## Develop
 
 ```sh
