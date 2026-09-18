@@ -9,6 +9,7 @@ written as UTC by stdlib datetime, independent of the production conversion.
 """
 import datetime as dt
 import importlib.util
+import queue
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -159,41 +160,47 @@ def make_entry(bars, bucket):
 
 
 def test_tick_inside_the_bucket_moves_high_low_close_not_open():
-    entry = make_entry([[100.0, 105.0, 98.0, 104.0]], BUCKET_2100)
+    # v (index 4) is left alone by a tick - see update_trailing_bar's
+    # docstring on why there is no reliable per-trade volume to add here
+    entry = make_entry([[100.0, 105.0, 98.0, 104.0, 12.0, BUCKET_2100]], BUCKET_2100)
 
     assert fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 13, 2, 10), 106.0) is True
-    assert entry["bars"] == [[100.0, 106.0, 98.0, 106.0]]
+    assert entry["bars"] == [[100.0, 106.0, 98.0, 106.0, 12.0, BUCKET_2100]]
 
     fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 13, 3, 0), 97.0)
-    assert entry["bars"] == [[100.0, 106.0, 97.0, 97.0]]
+    assert entry["bars"] == [[100.0, 106.0, 97.0, 97.0, 12.0, BUCKET_2100]]
     assert entry["bucket"] == BUCKET_2100
 
 
 def test_tick_in_a_new_bucket_opens_a_bar():
-    entry = make_entry([[100.0, 105.0, 98.0, 104.0]], BUCKET_2100)
+    entry = make_entry([[100.0, 105.0, 98.0, 104.0, 12.0, BUCKET_2100]], BUCKET_2100)
 
     fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 13, 5, 0), 104.5)
 
-    assert entry["bars"] == [[100.0, 105.0, 98.0, 104.0], [104.5, 104.5, 104.5, 104.5]]
+    # a freshly opened bar carries v=0.0 - the next kbars refresh fills the real volume
+    assert entry["bars"] == [
+        [100.0, 105.0, 98.0, 104.0, 12.0, BUCKET_2100],
+        [104.5, 104.5, 104.5, 104.5, 0.0, BUCKET_2105],
+    ]
     assert entry["bucket"] == BUCKET_2105
 
 
-def test_bar_count_is_capped_at_40():
-    bars = [[float(i), float(i), float(i), float(i)] for i in range(40)]
+def test_bar_count_is_capped_at_120():
+    bars = [[float(i), float(i), float(i), float(i), 0.0, 0] for i in range(120)]
     entry = make_entry(bars, BUCKET_2100)
 
     fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 13, 5, 0), 999.0)
 
-    assert len(entry["bars"]) == 40
-    assert entry["bars"][0] == [1.0, 1.0, 1.0, 1.0]  # the oldest fell off
-    assert entry["bars"][-1] == [999.0, 999.0, 999.0, 999.0]
+    assert len(entry["bars"]) == 120
+    assert entry["bars"][0] == [1.0, 1.0, 1.0, 1.0, 0.0, 0]  # the oldest fell off
+    assert entry["bars"][-1] == [999.0, 999.0, 999.0, 999.0, 0.0, BUCKET_2105]
 
 
 def test_tick_from_an_older_bucket_changes_nothing():
-    entry = make_entry([[100.0, 105.0, 98.0, 104.0]], BUCKET_2100)
+    entry = make_entry([[100.0, 105.0, 98.0, 104.0, 12.0, BUCKET_2100]], BUCKET_2100)
 
     assert fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 12, 59, 59), 50.0) is False
-    assert entry["bars"] == [[100.0, 105.0, 98.0, 104.0]]
+    assert entry["bars"] == [[100.0, 105.0, 98.0, 104.0, 12.0, BUCKET_2100]]
 
 
 def test_empty_bars_open_a_bar():
@@ -201,8 +208,49 @@ def test_empty_bars_open_a_bar():
 
     fetcher.update_trailing_bar(entry, utc_ms(2026, 9, 18, 13, 2, 0), 104.5)
 
-    assert entry["bars"] == [[104.5, 104.5, 104.5, 104.5]]
+    assert entry["bars"] == [[104.5, 104.5, 104.5, 104.5, 0.0, BUCKET_2100]]
     assert entry["bucket"] == BUCKET_2100
+
+
+# ---------------------------------------------------------------------------
+# update_trailing_bar at other widths, and advance_trailing_bars folding one
+# tick into every timeframe's entry at once (issue #12 path: "a 22:31 tick
+# lands in the 22:30 5-min bar, the 22:30 15-min bar, the 22:00 60-min bar,
+# and opens a new 1-min bar")
+# ---------------------------------------------------------------------------
+
+TICK_2231 = utc_ms(2026, 9, 18, 14, 31)  # Taipei 22:31 -> UTC 14:31 (no offset on tick datetimes)
+
+
+def make_by_entry() -> dict:
+    """One code's kbars_cache["by"]: each timeframe already has a bar
+    covering the bucket just before TICK_2231, so the tick's job is to
+    extend three of them and open a new one in the fourth (1-min)."""
+    return {
+        1: {"bars": [[100.0, 100.0, 100.0, 100.0, 1.0, utc_ms(2026, 9, 18, 14, 30)]], "bucket": utc_ms(2026, 9, 18, 14, 30)},
+        5: {"bars": [[100.0, 100.0, 100.0, 100.0, 5.0, utc_ms(2026, 9, 18, 14, 30)]], "bucket": utc_ms(2026, 9, 18, 14, 30)},
+        15: {"bars": [[100.0, 100.0, 100.0, 100.0, 15.0, utc_ms(2026, 9, 18, 14, 30)]], "bucket": utc_ms(2026, 9, 18, 14, 30)},
+        60: {"bars": [[100.0, 100.0, 100.0, 100.0, 60.0, utc_ms(2026, 9, 18, 14, 0)]], "bucket": utc_ms(2026, 9, 18, 14, 0)},
+    }
+
+
+def test_advance_trailing_bars_opens_new_1min_extends_the_rest():
+    entry = {"at": 0.0, "by": make_by_entry()}
+
+    fetcher.advance_trailing_bars(entry, TICK_2231, 108.0)
+
+    # 1-min: a new bucket (Taipei 22:31) was opened
+    assert entry["by"][1]["bucket"] == TICK_2231
+    assert len(entry["by"][1]["bars"]) == 2
+    assert entry["by"][1]["bars"][-1] == [108.0, 108.0, 108.0, 108.0, 0.0, TICK_2231]
+    # 5-min and 15-min: the tick is still inside the Taipei 22:30 bucket - extended, not opened
+    assert entry["by"][5]["bucket"] == utc_ms(2026, 9, 18, 14, 30)
+    assert entry["by"][5]["bars"] == [[100.0, 108.0, 100.0, 108.0, 5.0, utc_ms(2026, 9, 18, 14, 30)]]
+    assert entry["by"][15]["bucket"] == utc_ms(2026, 9, 18, 14, 30)
+    assert entry["by"][15]["bars"] == [[100.0, 108.0, 100.0, 108.0, 15.0, utc_ms(2026, 9, 18, 14, 30)]]
+    # 60-min: still inside the Taipei 22:00 bucket
+    assert entry["by"][60]["bucket"] == utc_ms(2026, 9, 18, 14, 0)
+    assert entry["by"][60]["bars"] == [[100.0, 108.0, 100.0, 108.0, 60.0, utc_ms(2026, 9, 18, 14, 0)]]
 
 
 # --- the kbars cache carries the bucket, and tick updates survive a snapshot --
@@ -240,8 +288,14 @@ def test_kbars_refresh_records_the_trailing_bucket():
 
     fetcher.refresh_futures_kbars(FakeApi(), TXF, "TXFJ6", "2026-09-17", "2026-09-18", cache, 0.0)
 
-    assert cache["TXFJ6"]["bars"] == [[100.0, 103.0, 99.0, 102.0], [110.0, 111.0, 109.0, 110.0]]
-    assert cache["TXFJ6"]["bucket"] == BUCKET_2105
+    five_min = cache["TXFJ6"]["by"][5]
+    assert five_min["bars"] == [
+        [100.0, 103.0, 99.0, 102.0, 2.0, BUCKET_2100],
+        [110.0, 111.0, 109.0, 110.0, 1.0, BUCKET_2105],
+    ]
+    assert five_min["bucket"] == BUCKET_2105
+    # timeframe 1 is the raw rows, unresampled - three rows in, three bars out
+    assert len(cache["TXFJ6"]["by"][1]["bars"]) == 3
 
 
 def test_tick_updated_bars_survive_the_next_snapshot_inside_the_kbars_window():
@@ -250,11 +304,15 @@ def test_tick_updated_bars_survive_the_next_snapshot_inside_the_kbars_window():
     clock = lambda: 60.0  # noqa: E731 - inside the 5-minute window either call
     fetcher.fetch_futures_rows(api, {"TXFJ6": TXF}, ["TXFJ6"], "2026-09-18", kbars_cache=cache, now=clock)
 
-    fetcher.update_trailing_bar(cache["TXFJ6"], utc_ms(2026, 9, 18, 13, 7, 0), 115.0)
+    fetcher.update_trailing_bar(cache["TXFJ6"]["by"][5], utc_ms(2026, 9, 18, 13, 7, 0), 115.0)
     rows = fetcher.fetch_futures_rows(api, {"TXFJ6": TXF}, ["TXFJ6"], "2026-09-18", kbars_cache=cache, now=clock)
 
     assert api.kbars_calls == 1
-    assert rows["TXFJ6"]["bars"][-1] == [110.0, 115.0, 109.0, 115.0]
+    assert rows["TXFJ6"]["bars"][-1] == [110.0, 115.0, 109.0, 115.0, 1.0, BUCKET_2105]
+    # row["bars"] IS barsBy["5"]'s cache list, not a copy - a tick that
+    # mutated one is visible through the other and through the file's payload
+    assert rows["TXFJ6"]["bars"] is rows["TXFJ6"]["barsBy"]["5"]
+    assert rows["TXFJ6"]["bars"] is cache["TXFJ6"]["by"][5]["bars"]
 
 
 # ---------------------------------------------------------------------------
@@ -334,3 +392,35 @@ def test_overlay_payload_after_ticks_advances_data_at_and_as_of():
     assert payload["dataAt"] == T0 + 7_000
     assert payload["quotes"]["TXFR1"]["price"] == 47570.0
     assert payload["market"] == "tf" and payload["source"] == "永豐"
+
+
+# ---------------------------------------------------------------------------
+# drain_ticks: the main loop's wiring from the tick queue to BOTH the
+# overlay row and every timeframe's trailing bar - untested until issue #12,
+# and the one place that would KeyError at runtime if the kbars-cache shape
+# changed but this call site didn't follow
+# ---------------------------------------------------------------------------
+
+def test_drain_ticks_advances_every_timeframe_of_the_tick_code():
+    tick_queue: queue.Queue = queue.Queue()
+    tick_queue.put(make_tick("TXFJ6", taipei(22, 31, 0), Decimal("108")))
+    overlays = {"tf": fetcher.QuotesOverlay(Path("/nonexistent/futures-quotes.json"))}
+    overlays["tf"].absorb(
+        {"asOf": 1, "dataAt": T0, "market": "tf", "source": "永豐", "quotes": {"TXFR1": {"price": 100.0, "prevClose": 99.0, "name": "n", "dataAt": T0}}},
+        now_ms=T0,
+    )
+    # kbars_cache is keyed by the REQUESTED code (TXFR1), same as changed's
+    # entries - apply_tick resolves the tick's resolved-month code (TXFJ6)
+    # to the requested codes it drives, and drain_ticks looks the cache up
+    # by those, not by the tick's own code
+    kbars_cache = {"TXFR1": {"at": 0.0, "by": make_by_entry()}}
+    stats = fetcher.new_tick_stats()
+
+    fetcher.drain_ticks(tick_queue, overlays, {"tf": CODE_MAP}, kbars_cache, stats)
+
+    assert overlays["tf"].rows["TXFR1"]["price"] == 108.0
+    by = kbars_cache["TXFR1"]["by"]
+    assert by[1]["bucket"] == TICK_2231 and len(by[1]["bars"]) == 2
+    assert by[5]["bars"][-1][:4] == [100.0, 108.0, 100.0, 108.0]
+    assert by[15]["bars"][-1][:4] == [100.0, 108.0, 100.0, 108.0]
+    assert by[60]["bars"][-1][:4] == [100.0, 108.0, 100.0, 108.0]

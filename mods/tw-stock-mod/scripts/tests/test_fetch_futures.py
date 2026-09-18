@@ -109,6 +109,81 @@ def test_resample_midnight_crossing():
 
 
 # ---------------------------------------------------------------------------
+# resample_minutes: resample_5min's general form (issue #12) - 1/15/60
+# minute timeframes over the same bucket math, proven independently per
+# timeframe so a constant standing in for one width cannot satisfy the rest
+# ---------------------------------------------------------------------------
+
+def test_resample_minutes_1_is_one_bucket_per_row():
+    # minutes=1 goes through the same bucket math as 5/15/60 here (the
+    # fetcher's own 1-minute timeframe skips this path entirely - see
+    # test_minute_buckets_1_is_the_raw_rows_unresampled below)
+    rows = [
+        {"ts": utc_ms(2026, 9, 18, 9, 0), "Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 5},
+        {"ts": utc_ms(2026, 9, 18, 9, 1), "Open": 101, "High": 103, "Low": 100, "Close": 102, "Volume": 3},
+    ]
+
+    buckets = fetcher.resample_minutes(rows, 1)
+
+    assert buckets == [
+        {"ts": utc_ms(2026, 9, 18, 9, 0), "Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 5},
+        {"ts": utc_ms(2026, 9, 18, 9, 1), "Open": 101, "High": 103, "Low": 100, "Close": 102, "Volume": 3},
+    ]
+
+
+def test_resample_minutes_15_bucket_boundaries():
+    rows = [
+        {"ts": utc_ms(2026, 9, 18, 9, 0), "Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 5},
+        {"ts": utc_ms(2026, 9, 18, 9, 7), "Open": 100, "High": 106, "Low": 95, "Close": 103, "Volume": 4},
+        {"ts": utc_ms(2026, 9, 18, 9, 14), "Open": 103, "High": 108, "Low": 102, "Close": 107, "Volume": 6},
+        # exactly on the boundary -> the NEXT 15-min bucket, not the previous one
+        {"ts": utc_ms(2026, 9, 18, 9, 15), "Open": 107, "High": 109, "Low": 106, "Close": 108, "Volume": 2},
+    ]
+
+    buckets = fetcher.resample_minutes(rows, 15)
+
+    assert len(buckets) == 2
+    assert buckets[0] == {
+        "ts": utc_ms(2026, 9, 18, 9, 0), "Open": 100, "High": 108, "Low": 95, "Close": 107, "Volume": 15,
+    }
+    assert buckets[1] == {
+        "ts": utc_ms(2026, 9, 18, 9, 15), "Open": 107, "High": 109, "Low": 106, "Close": 108, "Volume": 2,
+    }
+
+
+def test_resample_minutes_60_aligns_to_the_hour():
+    # a tick just after 22:00 and one just before 23:00 must land in the SAME
+    # bucket (22:00), and one at exactly 23:00 opens the next - 60-min bucket
+    # math has to floor to the top of the (Taipei, since epoch ms is already
+    # a whole multiple of hours apart from UTC) hour, not an arbitrary offset
+    rows = [
+        {"ts": utc_ms(2026, 9, 18, 22, 3), "Open": 200, "High": 202, "Low": 199, "Close": 201, "Volume": 1},
+        {"ts": utc_ms(2026, 9, 18, 22, 58), "Open": 201, "High": 205, "Low": 198, "Close": 204, "Volume": 2},
+        {"ts": utc_ms(2026, 9, 18, 23, 0), "Open": 204, "High": 206, "Low": 203, "Close": 205, "Volume": 3},
+    ]
+
+    buckets = fetcher.resample_minutes(rows, 60)
+
+    assert len(buckets) == 2
+    assert buckets[0] == {
+        "ts": utc_ms(2026, 9, 18, 22, 0), "Open": 200, "High": 205, "Low": 198, "Close": 204, "Volume": 3,
+    }
+    assert buckets[1] == {
+        "ts": utc_ms(2026, 9, 18, 23, 0), "Open": 204, "High": 206, "Low": 203, "Close": 205, "Volume": 3,
+    }
+
+
+def test_resample_minutes_partial_trailing_bucket_kept_for_every_width():
+    # the live, still-forming bar is kept even with one row, at every width -
+    # generalises resample_5min's own version of this test
+    rows = [{"ts": utc_ms(2026, 9, 18, 9, 0), "Open": 1, "High": 1, "Low": 1, "Close": 1, "Volume": 1}]
+    for minutes in (1, 5, 15, 60):
+        buckets = fetcher.resample_minutes(rows, minutes)
+        assert len(buckets) == 1
+        assert buckets[0]["ts"] == utc_ms(2026, 9, 18, 9, 0)
+
+
+# ---------------------------------------------------------------------------
 # path 13: 8-hour Taipei-labelled-as-UTC correction, kbar side and snapshot
 # side are two independent call sites (see mutation checks in the report)
 # ---------------------------------------------------------------------------
@@ -133,7 +208,7 @@ def test_kbars_to_rows_applies_taipei_offset():
 def test_futures_quote_row_applies_taipei_offset_to_snapshot():
     snap = make_snapshot("TXFJ6", 17010.0, utc_ns(2026, 9, 18, 14, 30))
 
-    row = fetcher.futures_quote_row(TXF_CONTRACT, snap, [], "TXFJ6")
+    row = fetcher.futures_quote_row(TXF_CONTRACT, snap, {}, "TXFJ6")
 
     assert row["ts"] == utc_ms(2026, 9, 18, 6, 30)
 
@@ -146,8 +221,8 @@ def test_futures_quote_row_multiplier_and_decimals_come_from_contract():
     snap_txf = make_snapshot("TXFJ6", 17010.0, utc_ns(2026, 9, 18, 10, 0))
     snap_srf = make_snapshot("SRFJ6", 109.5, utc_ns(2026, 9, 18, 10, 0))
 
-    txf_row = fetcher.futures_quote_row(TXF_CONTRACT, snap_txf, [], "TXFJ6")
-    srf_row = fetcher.futures_quote_row(SRF_CONTRACT, snap_srf, [], "SRFJ6")
+    txf_row = fetcher.futures_quote_row(TXF_CONTRACT, snap_txf, {}, "TXFJ6")
+    srf_row = fetcher.futures_quote_row(SRF_CONTRACT, snap_srf, {}, "SRFJ6")
 
     assert txf_row["multiplier"] == 200
     assert txf_row["decimals"] == 0
@@ -159,21 +234,49 @@ def test_futures_quote_row_multiplier_and_decimals_come_from_contract():
 
 def test_futures_quote_row_resolved_only_for_alias():
     snap = make_snapshot("TXFR1", 17010.0, utc_ns(2026, 9, 18, 10, 0))
-    alias_row = fetcher.futures_quote_row(TXF_ALIAS_CONTRACT, snap, [], "TXFR1")
+    alias_row = fetcher.futures_quote_row(TXF_ALIAS_CONTRACT, snap, {}, "TXFR1")
     assert alias_row["resolved"] == "TXFJ6"
 
     snap_month = make_snapshot("TXFJ6", 17010.0, utc_ns(2026, 9, 18, 10, 0))
-    month_row = fetcher.futures_quote_row(TXF_CONTRACT, snap_month, [], "TXFJ6")
+    month_row = fetcher.futures_quote_row(TXF_CONTRACT, snap_month, {}, "TXFJ6")
     assert "resolved" not in month_row
 
 
 def test_futures_quote_row_invalid_snapshot_is_dropped():
     snap = make_snapshot("TXFJ6", 0, utc_ns(2026, 9, 18, 10, 0))
-    assert fetcher.futures_quote_row(TXF_CONTRACT, snap, [], "TXFJ6") is None
+    assert fetcher.futures_quote_row(TXF_CONTRACT, snap, {}, "TXFJ6") is None
 
 
-def test_bars_5min_keeps_last_40():
-    n = 250  # 50 five-minute buckets
+def test_futures_quote_row_barsby_shape():
+    # issue #12 payload shape: barsBy carries every timeframe with a `ts` on
+    # every bar, capped at FUTURES_BAR_LIMIT each, and `bars` is exactly
+    # barsBy["5"] - the SAME object, not merely an equal copy (see the
+    # identity assertion in test_ticks.py for why that matters to ticks)
+    bars_by = {
+        "1": [[100.0, 101.0, 99.0, 100.5, 1.0, utc_ms(2026, 9, 18, 9, 0)]],
+        "5": [[100.0, 105.0, 98.0, 104.0, 5.0, utc_ms(2026, 9, 18, 9, 0)]],
+        "15": [[100.0, 108.0, 95.0, 107.0, 15.0, utc_ms(2026, 9, 18, 9, 0)]],
+        "60": [[100.0, 110.0, 90.0, 108.0, 60.0, utc_ms(2026, 9, 18, 9, 0)]],
+    }
+    snap = make_snapshot("TXFJ6", 17010.0, utc_ns(2026, 9, 18, 10, 0))
+
+    row = fetcher.futures_quote_row(TXF_CONTRACT, snap, bars_by, "TXFJ6")
+
+    assert set(row["barsBy"]) == {"1", "5", "15", "60"}
+    for tf, bars in row["barsBy"].items():
+        assert len(bars) <= fetcher.FUTURES_BAR_LIMIT
+        for bar in bars:
+            assert len(bar) == 6  # o, h, l, c, v, ts
+    assert row["bars"] is row["barsBy"]["5"]
+
+
+def test_bucket_to_bar_shape_is_o_h_l_c_v_ts():
+    bucket = {"ts": utc_ms(2026, 9, 18, 9, 5), "Open": 100.0, "High": 105.0, "Low": 98.0, "Close": 104.0, "Volume": 14.0}
+    assert fetcher.bucket_to_bar(bucket) == [100.0, 105.0, 98.0, 104.0, 14.0, utc_ms(2026, 9, 18, 9, 5)]
+
+
+def test_buckets_to_bars_keeps_last_120():
+    n = 750  # 150 five-minute buckets
     raw_ts = [utc_ns(2026, 9, 18, 0, 0) + i * 60_000_000_000 for i in range(n)]
     kbars = types.SimpleNamespace(
         ts=raw_ts,
@@ -181,13 +284,15 @@ def test_bars_5min_keeps_last_40():
         Low=[float(i) for i in range(n)], Close=[float(i) for i in range(n)],
         Volume=[1] * n,
     )
+    buckets = fetcher.resample_minutes(fetcher.kbars_to_rows(kbars), 5)
 
-    bars = fetcher.bars_5min(kbars)
+    bars, trailing_ts = fetcher.buckets_to_bars(buckets)
 
-    assert len(bars) == 40
-    # bucket #10 (0-indexed) is the oldest kept: rows 50..54 -> O=50,H=54,L=50,C=54
-    assert bars[0] == [50.0, 54.0, 50.0, 54.0]
-    assert bars[-1] == [245.0, 249.0, 245.0, 249.0]
+    assert len(bars) == 120
+    # bucket #30 (0-indexed) is the oldest kept: rows 150..154 -> O=150,H=154,L=150,C=154
+    assert bars[0][:4] == [150.0, 154.0, 150.0, 154.0]
+    assert bars[-1][:4] == [745.0, 749.0, 745.0, 749.0]
+    assert bars[-1][5] == trailing_ts == buckets[-1]["ts"]
 
 
 def test_build_futures_payload_shape():
@@ -226,9 +331,8 @@ def test_build_futures_payload_empty_rows_is_none():
     assert fetcher.build_futures_payload({}) is None
 
 
-def test_bars_5min_empty_kbars_is_empty_list():
-    empty = types.SimpleNamespace(ts=[], Open=[], High=[], Low=[], Close=[], Volume=[])
-    assert fetcher.bars_5min(empty) == []
+def test_buckets_to_bars_empty_is_empty_list_and_zero_trailing_ts():
+    assert fetcher.buckets_to_bars([]) == ([], 0)
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +378,50 @@ def test_fetch_futures_rows_requests_yesterday_through_today():
     fetcher.fetch_futures_rows(api, {"TXFJ6": TXF_CONTRACT}, ["TXFJ6"], "2026-09-19")
 
     assert api.kbars_calls == [{"code": "TXFJ6", "start": "2026-09-18", "end": "2026-09-19"}]
+
+
+class FakeApiWithMinutes:
+    """Like FakeApi, but kbars() answers `n` real ascending 1-minute rows so
+    the full refresh_futures_kbars -> futures_quote_row pipeline can be
+    exercised end to end (issue #12's payload-shape story)."""
+
+    def __init__(self, snapshot_by_code, n):
+        self.snapshot_by_code = snapshot_by_code
+        raw_ts = [utc_ns(2026, 9, 18, 0, 0) + i * 60_000_000_000 for i in range(n)]
+        self._kbars = types.SimpleNamespace(
+            ts=raw_ts,
+            Open=[float(i) for i in range(n)], High=[float(i) for i in range(n)],
+            Low=[float(i) for i in range(n)], Close=[float(i) for i in range(n)],
+            Volume=[1.0] * n,
+        )
+
+    def snapshots(self, contracts):
+        return [self.snapshot_by_code[c.code] for c in contracts if c.code in self.snapshot_by_code]
+
+    def kbars(self, contract, start=None, end=None):
+        return self._kbars
+
+
+def test_fetch_futures_rows_end_to_end_payload_shape():
+    snap = make_snapshot("TXFJ6", 17010.0, utc_ns(2026, 9, 18, 12, 0))
+    api = FakeApiWithMinutes(snapshot_by_code={"TXFJ6": snap}, n=750)  # > 120 for every timeframe
+
+    rows = fetcher.fetch_futures_rows(api, {"TXFJ6": TXF_CONTRACT}, ["TXFJ6"], "2026-09-18")
+
+    row = rows["TXFJ6"]
+    assert set(row["barsBy"]) == {"1", "5", "15", "60"}
+    assert row["bars"] is row["barsBy"]["5"]
+    for tf_minutes, bars in ((1, row["barsBy"]["1"]), (5, row["barsBy"]["5"]), (15, row["barsBy"]["15"]), (60, row["barsBy"]["60"])):
+        assert 0 < len(bars) <= fetcher.FUTURES_BAR_LIMIT
+        for bar in bars:
+            assert len(bar) == 6
+        # bars are ascending by their own ts (bucket start), every ts aligned to its width
+        tses = [bar[5] for bar in bars]
+        assert tses == sorted(tses)
+        for ts in tses:
+            assert ts % (tf_minutes * 60_000) == 0
+    # 1-minute timeframe is unresampled: as many bars as raw rows kept (capped at 120)
+    assert len(row["barsBy"]["1"]) == fetcher.FUTURES_BAR_LIMIT
 
 
 class FakeClock:

@@ -268,8 +268,8 @@ def build_payload(api, contracts: dict, index_contracts: list, watchlist_names: 
     return payload
 
 
-FUTURES_BAR_MS = 5 * 60 * 1000  # bucket width for the futures chart's 5 分 K
-FUTURES_BAR_LIMIT = 40  # matches register.tsx's CHART_BARS
+FUTURES_TIMEFRAMES = (1, 5, 15, 60)  # minutes; barsBy's keys - all resampled from the same cached 1-minute kbars, zero extra api.kbars() calls (issue #12)
+FUTURES_BAR_LIMIT = 120  # bars kept per timeframe - register.tsx's candleCells merges extra bars into the plot width rather than capping (read-only checked), so this is not bounded by the terminal
 FUTURES_KBARS_REFRESH_S = 5 * 60  # api.kbars() is the SDK usage-budget cost (~2100 rows/contract/call at a 10s tick) - reuse bars across ticks inside this window instead of refetching every tick
 
 
@@ -301,12 +301,22 @@ def kbars_to_rows(kbars) -> list[dict]:
     ]
 
 
-def resample_5min(rows: list[dict]) -> list[dict]:
-    """1-minute rows -> ascending 5-minute OHLCV buckets; the trailing
+def bucket_start(ts_ms: int, minutes: int) -> int:
+    """Floor `ts_ms` to the start of its `minutes`-wide bucket. Epoch ms is
+    already hour-aligned across a whole-hour offset like Taipei's UTC+8, so
+    this floors to the Taipei hour too, not just the UTC one - the single
+    site both resample_minutes and update_trailing_bar floor through, so the
+    two paths cannot drift apart."""
+    bucket_ms = minutes * 60_000
+    return (ts_ms // bucket_ms) * bucket_ms
+
+
+def resample_minutes(rows: list[dict], minutes: int) -> list[dict]:
+    """1-minute rows -> ascending `minutes`-wide OHLCV buckets; the trailing
     bucket is kept even with one row - that's the live, still-forming bar."""
     buckets: dict[int, dict] = {}
     for row in sorted(rows, key=lambda r: r["ts"]):
-        bucket_ts = (row["ts"] // FUTURES_BAR_MS) * FUTURES_BAR_MS
+        bucket_ts = bucket_start(row["ts"], minutes)
         bucket = buckets.get(bucket_ts)
         if bucket is None:
             buckets[bucket_ts] = {
@@ -325,25 +335,45 @@ def resample_5min(rows: list[dict]) -> list[dict]:
     return [buckets[key] for key in sorted(buckets)]
 
 
-def bars_5min_with_bucket(kbars, limit: int = FUTURES_BAR_LIMIT) -> tuple[list[list[float]], int]:
-    """Corrected 1-minute kbar rows -> (the most recent `limit` [o,h,l,c]
-    5-minute bars oldest first, the bucket ts the trailing bar covers - 0
-    when empty). The bucket is what lets a later tick tell "still this bar"
-    from "open a new one"."""
-    buckets = resample_5min(kbars_to_rows(kbars))
+def resample_5min(rows: list[dict]) -> list[dict]:
+    return resample_minutes(rows, 5)
+
+
+def bucket_to_bar(bucket: dict) -> list[float]:
+    """One resample_minutes bucket -> the file's bar shape, [o, h, l, c, v,
+    ts] - the ts is the bucket's own start, so the band can draw a real
+    x-axis from it (issue #12)."""
+    return [bucket["Open"], bucket["High"], bucket["Low"], bucket["Close"], bucket["Volume"], bucket["ts"]]
+
+
+def buckets_to_bars(buckets: list[dict], limit: int = FUTURES_BAR_LIMIT) -> tuple[list[list[float]], int]:
+    """Ascending buckets -> (the most recent `limit` bars oldest first, the
+    bucket ts the trailing bar covers - 0 when empty). The bucket is what
+    lets a later tick tell "still this bar" from "open a new one"."""
     trimmed = buckets[-limit:] if limit else buckets
-    bars = [[b["Open"], b["High"], b["Low"], b["Close"]] for b in trimmed]
+    bars = [bucket_to_bar(b) for b in trimmed]
     return bars, (trimmed[-1]["ts"] if trimmed else 0)
 
 
-def bars_5min(kbars, limit: int = FUTURES_BAR_LIMIT) -> list[list[float]]:
-    return bars_5min_with_bucket(kbars, limit)[0]
+def minute_buckets(rows_1min: list[dict], minutes: int) -> list[dict]:
+    """Corrected 1-minute kbar rows -> ascending buckets for one timeframe.
+    minutes=1 is the raw rows themselves, sorted but unresampled - each row
+    already IS its own 1-minute bucket, and the spec (issue #12) calls this
+    out explicitly rather than leaving it to resample_minutes(rows, 1) to
+    reconstruct the same thing at the cost of a redundant pass."""
+    if minutes == 1:
+        return sorted(rows_1min, key=lambda r: r["ts"])
+    return resample_minutes(rows_1min, minutes)
 
 
-def futures_quote_row(contract, snapshot, bars: list, requested_code: str) -> dict | None:
+def futures_quote_row(contract, snapshot, bars_by: dict, requested_code: str) -> dict | None:
     """One futures-quotes.json entry; multiplier/decimals/prevClose always
-    come from `contract`, never a lookup table. `ts` is popped by
-    build_futures_payload once folded into dataAt."""
+    come from `contract`, never a lookup table. `bars_by` is {"1"/"5"/"15"/
+    "60": bars}, already ≤ FUTURES_BAR_LIMIT each (see refresh_futures_kbars)
+    - `bars` stays the 5-minute set for backward compatibility, and is the
+    SAME list object as barsBy["5"] so a tick that mutates one is visible
+    through the other. `ts` is popped by build_futures_payload once folded
+    into dataAt."""
     close = float(field(snapshot, "close", 0) or 0)
     if close <= 0:
         return None
@@ -353,7 +383,8 @@ def futures_quote_row(contract, snapshot, bars: list, requested_code: str) -> di
         "name": field(contract, "name", None) or requested_code,
         "multiplier": field(contract, "multiplier", 1),
         "decimals": int(field(contract, "decimal_locator", 0) or 0),
-        "bars": bars,
+        "bars": bars_by.get("5", []),
+        "barsBy": bars_by,
         "ts": fix_taipei_ts(int(field(snapshot, "ts", 0) or 0)),
     }
     target_code = field(contract, "target_code", None)
@@ -411,18 +442,22 @@ def tick_ts_ms(at: datetime) -> int:
     return int(at.timestamp() * 1000)
 
 
-def update_trailing_bar(entry: dict, ts_ms: int, price: float, limit: int = FUTURES_BAR_LIMIT) -> bool:
-    """Fold one trade into a kbars-cache entry ({"bars": [[o,h,l,c]...],
-    "bucket": ts}) in place: same bucket moves h/l/c, a newer bucket opens a
-    bar (oldest dropped past `limit`), an older one is ignored. Returns
-    whether anything changed."""
+def update_trailing_bar(entry: dict, ts_ms: int, price: float, minutes: int = 5, limit: int = FUTURES_BAR_LIMIT) -> bool:
+    """Fold one trade into one timeframe's kbars-cache entry ({"bars":
+    [[o,h,l,c,v,ts]...], "bucket": ts}) in place: same bucket moves h/l/c, a
+    newer bucket opens a bar (oldest dropped past `limit`), an older one is
+    ignored. `v` is left alone either way - a TickEvent only carries
+    session-cumulative total_volume, not a per-trade delta, so there is no
+    correct number to add; a freshly opened bar starts at v=0.0 until the
+    next kbars refresh fills the real volume. Returns whether anything
+    changed."""
     bars = entry["bars"]
-    bucket = (ts_ms // FUTURES_BAR_MS) * FUTURES_BAR_MS
+    bucket = bucket_start(ts_ms, minutes)
     current = entry.get("bucket", 0)
     if bars and bucket < current:
         return False
     if not bars or bucket > current:
-        bars.append([price, price, price, price])
+        bars.append([price, price, price, price, 0.0, bucket])
         del bars[:-limit]
         entry["bucket"] = bucket
         return True
@@ -431,6 +466,19 @@ def update_trailing_bar(entry: dict, ts_ms: int, price: float, limit: int = FUTU
     bar[2] = min(bar[2], price)
     bar[3] = price
     return True
+
+
+def advance_trailing_bars(entry: dict, ts_ms: int, price: float, limit: int = FUTURES_BAR_LIMIT) -> None:
+    """Fold one tick into EVERY timeframe's trailing bar inside one code's
+    kbars-cache entry ({"at", "by": {minutes: {"bars", "bucket"}}}) - a tick
+    in a new bucket opens a bar in that timeframe only, independent of the
+    others (issue #12: a 22:31 tick opens a new 1-min bar while still
+    extending the 22:30 5-min/15-min bars and the 22:00 60-min bar)."""
+    by = entry.get("by", {})
+    for minutes in FUTURES_TIMEFRAMES:
+        tf_entry = by.get(minutes)
+        if tf_entry is not None:
+            update_trailing_bar(tf_entry, ts_ms, price, minutes=minutes, limit=limit)
 
 
 def apply_tick(rows: dict, tick: TickEvent, code_map: dict) -> list[str]:
@@ -528,7 +576,7 @@ def drain_ticks(tick_queue: queue.Queue, overlays: dict, code_maps: dict, kbars_
             for code in changed:
                 entry = kbars_cache.get(code)
                 if entry is not None:
-                    update_trailing_bar(entry, tick_ts_ms(item.at), float(item.close))
+                    advance_trailing_bars(entry, tick_ts_ms(item.at), float(item.close))
 
 
 def flush_overlays(overlays: dict, now_ms: int, stats: dict) -> None:
@@ -582,26 +630,44 @@ def split_futures_codes(raw: str) -> list[str]:
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
-def refresh_futures_kbars(api, contract, code: str, start: str, today: str, kbars_cache: dict, tick_now: float) -> tuple[list, str]:
-    """(bars, cadence note for the tick log). Reuses `kbars_cache[code]`
-    when it is younger than FUTURES_KBARS_REFRESH_S, else calls api.kbars()
-    and restamps the cache. A failed fetch falls back to the cached bars (or
-    [] if there is none yet) WITHOUT restamping - a transient error should
-    not lock the chart to a stale/empty array for the rest of the window."""
+def _bars_by(cache_entry: dict) -> dict[str, list]:
+    """One code's kbars_cache entry ({"at", "by": {minutes: {"bars",
+    "bucket"}}}) -> {"1"/"5"/"15"/"60": bars}, the SAME list objects the
+    cache holds (not copies) - the one place int-minute keys become the
+    payload's string keys, so the two keyspaces cannot drift apart."""
+    return {str(minutes): cache_entry["by"][minutes]["bars"] for minutes in FUTURES_TIMEFRAMES}
+
+
+def refresh_futures_kbars(api, contract, code: str, start: str, today: str, kbars_cache: dict, tick_now: float) -> tuple[dict, str]:
+    """(bars_by, cadence note for the tick log) - bars_by is {"1"/"5"/"15"/
+    "60": bars}. Reuses `kbars_cache[code]` when it is younger than
+    FUTURES_KBARS_REFRESH_S, else calls api.kbars() ONCE and resamples every
+    timeframe from that same 1-minute fetch (issue #12: zero extra API
+    calls per extra timeframe). A failed fetch falls back to the cached
+    bars_by (or an all-empty one if there is none yet) WITHOUT restamping -
+    a transient error should not lock the chart to a stale/empty array for
+    the rest of the window."""
     cached = kbars_cache.get(code)
     if cached is not None:
         age_s = tick_now - cached["at"]
         if age_s < FUTURES_KBARS_REFRESH_S:
-            return cached["bars"], f"（沿用 {age_s / 60:.1f} 分前）"
+            return _bars_by(cached), f"（沿用 {age_s / 60:.1f} 分前）"
     try:
-        bars, bucket = bars_5min_with_bucket(api.kbars(contract, start=start, end=today))
+        rows_1min = kbars_to_rows(api.kbars(contract, start=start, end=today))
     except Exception as err:  # noqa: BLE001 - a bad K-bar fetch keeps the quote, just with no bars
         print(f"{code} K 棒取得失敗（沿用{'上次結果' if cached else '空陣列'}）: {type(err).__name__}: {err}", file=sys.stderr)
-        return (cached["bars"] if cached else []), "（取得失敗，未更新快取）"
-    # the entry is shared with the tick overlay: update_trailing_bar mutates
-    # this same list, so ticks survive the next snapshot's cache reuse
-    kbars_cache[code] = {"at": tick_now, "bars": bars, "bucket": bucket}
-    return bars, "（重抓）"
+        if cached:
+            return _bars_by(cached), "（取得失敗，未更新快取）"
+        return {str(minutes): [] for minutes in FUTURES_TIMEFRAMES}, "（取得失敗，未更新快取）"
+    # each timeframe's entry is shared with the tick overlay: update_trailing_bar
+    # mutates the SAME "bars" list in place, so ticks survive the next
+    # snapshot's cache reuse (see advance_trailing_bars / drain_ticks)
+    by = {}
+    for minutes in FUTURES_TIMEFRAMES:
+        bars, bucket = buckets_to_bars(minute_buckets(rows_1min, minutes))
+        by[minutes] = {"bars": bars, "bucket": bucket}
+    kbars_cache[code] = {"at": tick_now, "by": by}
+    return _bars_by(kbars_cache[code]), "（重抓）"
 
 
 def fetch_futures_rows(
@@ -619,8 +685,8 @@ def fetch_futures_rows(
     api.kbars() is the SDK usage-budget cost (measured 2026-09-18: ~25 MB/h
     from calling it every 10s tick), so it is only reissued once every
     FUTURES_KBARS_REFRESH_S per contract - see refresh_futures_kbars().
-    `kbars_cache` (code -> {"at", "bars"}) carries that cadence across ticks
-    and must be the SAME dict every call - a fresh {} each time (the
+    `kbars_cache` (code -> {"at", "by": {minutes: {"bars", "bucket"}}})
+    carries that cadence across ticks and must be the SAME dict every call - a fresh {} each time (the
     default) degrades to "always fetch", which is what a caller not passing
     the cache still gets, matching the old behaviour. `now` is a
     monotonic-clock callable so tests can move time without sleeping.
@@ -632,8 +698,8 @@ def fetch_futures_rows(
         kbars_cache = {}
     # api.kbars filters by Taipei calendar day, not trading session - a 夜盤
     # tick just after midnight would otherwise only see tonight-so-far and
-    # fall well short of 40 five-minute bars, so the request always spans
-    # yesterday through today and bars_5min's own [-limit:] does the trimming.
+    # fall well short of 120 five-minute bars, so the request always spans
+    # yesterday through today and buckets_to_bars's own [-limit:] does the trimming.
     start = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
     snaps = {str(field(s, "code", "")): s for s in api.snapshots(list(live.values()))}
     rows = {}
@@ -643,15 +709,16 @@ def fetch_futures_rows(
         if snap is None:
             print(f"跳過期貨 {code}：這次快照沒有回應", file=sys.stderr)
             continue
-        bars, cadence_note = refresh_futures_kbars(api, contract, code, start, today, kbars_cache, tick_now)
-        row = futures_quote_row(contract, snap, bars, code)
+        bars_by, cadence_note = refresh_futures_kbars(api, contract, code, start, today, kbars_cache, tick_now)
+        row = futures_quote_row(contract, snap, bars_by, code)
         if row is None:
             print(f"跳過期貨 {code}：快照價格無效", file=sys.stderr)
             continue
         rows[code] = row
         resolved = row.get("resolved", code)
+        counts = " ".join(f"{m}分={len(bars_by.get(str(m), []))}" for m in FUTURES_TIMEFRAMES)
         print(
-            f"期貨 {code} -> {resolved}  乘數={row['multiplier']}  小數位={row['decimals']}  K棒={len(row['bars'])} 根{cadence_note}",
+            f"期貨 {code} -> {resolved}  乘數={row['multiplier']}  小數位={row['decimals']}  K棒 {counts} 根{cadence_note}",
             file=sys.stderr,
         )
     return rows
