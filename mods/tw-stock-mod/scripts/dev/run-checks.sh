@@ -113,6 +113,30 @@ cat > "$FIXTURES/file-bars/.claude/stock-quotes.json" <<'JSON'
 }
 JSON
 
+# tf-market: a project with a `futures` list (SRFJ6 beside an index alias,
+# plus two invalid entries the parser must drop) and one without. Feed off,
+# no quotes file: no network, and the futures rows must draw as no-data.
+mkdir -p "$FIXTURES/tf-market/.claude" "$FIXTURES/tf-plain/.claude"
+cat > "$FIXTURES/tf-market/.claude/stock-band.json" <<'JSON'
+{
+  "market": "tf",
+  "feed": "off",
+  "pageMs": 0,
+  "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
+  "us": [{ "code": "AAPL", "name": "Apple", "prevClose": 300 }],
+  "futures": [{ "code": "TXFR1" }, {}, { "code": 5 }, { "code": "SRFJ6", "name": "小台50" }]
+}
+JSON
+cat > "$FIXTURES/tf-plain/.claude/stock-band.json" <<'JSON'
+{
+  "market": "auto",
+  "feed": "off",
+  "pageMs": 0,
+  "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
+  "us": [{ "code": "AAPL", "name": "Apple", "prevClose": 300 }]
+}
+JSON
+
 # --- run -----------------------------------------------------------------
 declare -a results
 run_check() {
@@ -130,6 +154,7 @@ run_check "feed-idle"      node "$SCRIPT_DIR/feed-idle.mjs"   "$OUT/register.js"
 run_check "chart-nav"      node "$SCRIPT_DIR/chart-nav.mjs"   "$OUT/register.js" "$FIXTURES/chart-nav"
 run_check "rank-cross"     node "$SCRIPT_DIR/rank-cross.mjs"  "$OUT/board.js" "$OUT/register.js" "$FIXTURES/rank-cross"
 run_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/file-bars"
+run_check "tf-market"      node "$SCRIPT_DIR/tf-market.mjs"   "$OUT/register.js" "$FIXTURES/tf-market" "$FIXTURES/tf-plain"
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
 echo
