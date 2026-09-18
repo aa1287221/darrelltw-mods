@@ -69,6 +69,7 @@ import os
 import signal
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 HEARTBEAT_MAX_AGE_MS = 90_000
@@ -254,6 +255,162 @@ def build_payload(api, contracts: dict, index_contracts: list, watchlist_names: 
         payload["indices"] = indices
         payload["index"] = {k: v for k, v in indices[0].items() if k != "name"}
     return payload
+
+
+FUTURES_BAR_MS = 5 * 60 * 1000  # bucket width for the futures chart's 5 分 K
+FUTURES_BAR_LIMIT = 40  # matches register.tsx's CHART_BARS
+
+
+def fix_taipei_ts(raw_ns: int) -> int:
+    """Same 8h correction as build_payload's dataAt, factored out so both the
+    kbar path and the snapshot path call it independently (see the module's
+    TAIPEI_OFFSET_MS comment)."""
+    return raw_ns // 1_000_000 - TAIPEI_OFFSET_MS
+
+
+def kbars_to_rows(kbars) -> list[dict]:
+    """
+    api.kbars()'s columnar KBars (parallel ts/Open/High/Low/Close/Volume
+    lists) -> one dict per 1-minute row, ts corrected here - the kbar side's
+    one call site for fix_taipei_ts.
+    """
+    ts_list = field(kbars, "ts", []) or []
+    opens = field(kbars, "Open", []) or []
+    highs = field(kbars, "High", []) or []
+    lows = field(kbars, "Low", []) or []
+    closes = field(kbars, "Close", []) or []
+    volumes = field(kbars, "Volume", []) or []
+    return [
+        {
+            "ts": fix_taipei_ts(int(ts_list[i])),
+            "Open": float(opens[i]),
+            "High": float(highs[i]),
+            "Low": float(lows[i]),
+            "Close": float(closes[i]),
+            "Volume": float(volumes[i]),
+        }
+        for i in range(len(ts_list))
+    ]
+
+
+def resample_5min(rows: list[dict]) -> list[dict]:
+    """
+    1-minute rows (ts already corrected, ms) -> ascending 5-minute OHLCV
+    buckets keyed by floor(ts / 5 min); the trailing bucket is kept even with
+    a single row - that is the live, still-forming bar.
+    """
+    buckets: dict[int, dict] = {}
+    for row in sorted(rows, key=lambda r: r["ts"]):
+        bucket_ts = (row["ts"] // FUTURES_BAR_MS) * FUTURES_BAR_MS
+        bucket = buckets.get(bucket_ts)
+        if bucket is None:
+            buckets[bucket_ts] = {
+                "ts": bucket_ts,
+                "Open": row["Open"],
+                "High": row["High"],
+                "Low": row["Low"],
+                "Close": row["Close"],
+                "Volume": row["Volume"],
+            }
+        else:
+            bucket["High"] = max(bucket["High"], row["High"])
+            bucket["Low"] = min(bucket["Low"], row["Low"])
+            bucket["Close"] = row["Close"]
+            bucket["Volume"] += row["Volume"]
+    return [buckets[key] for key in sorted(buckets)]
+
+
+def bars_5min(kbars, limit: int = FUTURES_BAR_LIMIT) -> list[list[float]]:
+    """Corrected 1-minute kbar rows -> the most recent `limit` [o,h,l,c] 5-minute bars, oldest first."""
+    buckets = resample_5min(kbars_to_rows(kbars))
+    trimmed = buckets[-limit:] if limit else buckets
+    return [[b["Open"], b["High"], b["Low"], b["Close"]] for b in trimmed]
+
+
+def futures_quote_row(contract, snapshot, bars: list, requested_code: str) -> dict | None:
+    """
+    One futures-quotes.json entry; multiplier/decimals/prevClose always come
+    from `contract`, never a lookup table. `ts` is the corrected snapshot
+    timestamp - the snapshot side's one call site for fix_taipei_ts - and is
+    popped by build_futures_payload once folded into dataAt.
+    """
+    close = float(field(snapshot, "close", 0) or 0)
+    if close <= 0:
+        return None
+    row = {
+        "price": round(close, 4),
+        "prevClose": round(float(field(contract, "reference", 0) or 0), 4),
+        "name": field(contract, "name", None) or requested_code,
+        "multiplier": field(contract, "multiplier", 1),
+        "decimals": int(field(contract, "decimal_locator", 0) or 0),
+        "bars": bars,
+        "ts": fix_taipei_ts(int(field(snapshot, "ts", 0) or 0)),
+    }
+    target_code = field(contract, "target_code", None)
+    if target_code:
+        row["resolved"] = target_code
+    return row
+
+
+def build_futures_payload(rows: dict) -> dict | None:
+    """futures-quotes.json's shape; dataAt is the newest corrected snapshot ts across rows, like build_payload's own dataAt."""
+    if not rows:
+        return None
+    now_ms = int(time.time() * 1000)
+    data_at = max((row.pop("ts", 0) for row in rows.values()), default=0) or now_ms
+    return {
+        "asOf": now_ms,
+        "dataAt": data_at,
+        "market": "tf",
+        "source": "永豐",
+        "barLabel": "5 分 K（永豐）",
+        "quotes": rows,
+    }
+
+
+def split_futures_codes(raw: str) -> list[str]:
+    """--futures CLI value -> codes, blanks dropped; empty input does no futures work at all."""
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def fetch_futures_rows(api, contracts: dict, codes: list, today: str) -> dict:
+    """
+    Per-tick snapshot + K-bar fetch for every futures code whose contract
+    already resolved (ensure_futures_contract logged the ones that didn't).
+    A code whose K-bar fetch fails keeps its quote with an empty bars list
+    rather than being dropped - the price is still good.
+    """
+    live = {code: contracts[code] for code in codes if code in contracts}
+    if not live:
+        return {}
+    # api.kbars filters by Taipei calendar day, not trading session - a 夜盤
+    # tick just after midnight would otherwise only see tonight-so-far and
+    # fall well short of 40 five-minute bars, so the request always spans
+    # yesterday through today and bars_5min's own [-limit:] does the trimming.
+    start = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+    snaps = {str(field(s, "code", "")): s for s in api.snapshots(list(live.values()))}
+    rows = {}
+    for code, contract in live.items():
+        snap = snaps.get(code)
+        if snap is None:
+            print(f"跳過期貨 {code}：這次快照沒有回應", file=sys.stderr)
+            continue
+        try:
+            bars = bars_5min(api.kbars(contract, start=start, end=today))
+        except Exception as err:  # noqa: BLE001 - a bad K-bar fetch keeps the quote, just with no bars
+            print(f"{code} K 棒取得失敗（沿用空陣列）: {type(err).__name__}: {err}", file=sys.stderr)
+            bars = []
+        row = futures_quote_row(contract, snap, bars, code)
+        if row is None:
+            print(f"跳過期貨 {code}：快照價格無效", file=sys.stderr)
+            continue
+        rows[code] = row
+        resolved = row.get("resolved", code)
+        print(
+            f"期貨 {code} -> {resolved}  乘數={row['multiplier']}  小數位={row['decimals']}  K棒={len(row['bars'])} 根",
+            file=sys.stderr,
+        )
+    return rows
 
 
 def build_holdings_payload(positions: list, contracts: dict, quotes: dict, watchlist_names: dict) -> dict | None:
@@ -453,6 +610,7 @@ def main() -> None:
     )
     parser.add_argument("--interval", type=float, default=10, help="seconds between snapshots; 0 writes once and exits")
     parser.add_argument("--codes", default="", help="comma-separated codes, overriding the band's own watchlist")
+    parser.add_argument("--futures", default="", help="comma-separated 期貨合約代號（月合約或 R1/R2 別名，如 TXFR1,SRFJ6）；空值不做任何期貨工作")
     parser.add_argument("--heartbeat", default="", help="path the band keeps rewriting while it wants this route; missing or >90s old exits this process (empty disables the check, for a by-hand run)")
     parser.add_argument("--pidfile", default="", help="path holding this fetcher's pid; a live pid already there exits this run at once instead of double-fetching the same project")
     parser.add_argument("--check", action="store_true", help="diagnose the environment (Python version, shioaji install, env file, a real login, platform) and exit; writes nothing, needs no --codes")
@@ -501,6 +659,8 @@ def main() -> None:
 
     out_path = out_dir / "stock-quotes.json"
     holdings_path = out_dir / "stock-holdings.json"
+    futures_out_path = out_dir / "futures-quotes.json"
+    futures_codes = split_futures_codes(args.futures)
 
     pidfile = Path(args.pidfile).expanduser().resolve() if args.pidfile else None
     if pidfile and not claim_pidfile(pidfile):
@@ -541,10 +701,10 @@ def main() -> None:
     position_codes = {str(field(p, "code", "")).strip() for p in positions}
     position_codes.discard("")
 
-    if not watchlist and not position_codes:
+    if not watchlist and not position_codes and not futures_codes:
         sys.exit(
             f"ERROR: 找不到台股清單（{project}/.claude/stock-band.json 的 `tw`）也沒有庫存部位，"
-            "或用 --codes 指定"
+            "也沒有 --futures 代號，或用 --codes 指定"
         )
 
     # Whatever name the watchlist itself carries for a code - resolve_name's
@@ -583,6 +743,23 @@ def main() -> None:
         contract = getattr(api.Contracts.Indexs, exchange)[code]
         if contract is not None:
             index_contracts.append((name, contract))
+
+    # Futures codes are fixed for the process lifetime (they come only from
+    # --futures, never from positions - T5), so contracts resolve once here.
+    futures_contracts: dict = {}
+
+    def ensure_futures_contract(code: str):
+        if code in futures_contracts:
+            return futures_contracts[code]
+        contract = api.Contracts.Futures[code]
+        if contract is None:
+            print(f"跳過期貨 {code}：永豐查不到這個合約代號", file=sys.stderr)
+            return None
+        futures_contracts[code] = contract
+        return contract
+
+    for code in futures_codes:
+        ensure_futures_contract(code)
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
@@ -635,6 +812,17 @@ def main() -> None:
             if holdings_payload:
                 write_atomic(holdings_path, holdings_payload)
                 print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
+
+            if futures_codes:
+                try:
+                    futures_rows = fetch_futures_rows(api, futures_contracts, futures_codes, date.today().isoformat())
+                except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
+                    print(f"期貨快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    futures_rows = {}
+                futures_payload = build_futures_payload(futures_rows)
+                if futures_payload:
+                    write_atomic(futures_out_path, futures_payload)
+                    print(f"{len(futures_payload['quotes'])} 檔期貨 -> {futures_out_path}", file=sys.stderr)
 
             if args.interval <= 0:
                 break
