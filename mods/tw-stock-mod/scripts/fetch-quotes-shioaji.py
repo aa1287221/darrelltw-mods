@@ -73,8 +73,9 @@ import os
 import signal
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 HEARTBEAT_MAX_AGE_MS = 90_000
 HEARTBEAT_MARKETS = frozenset({"tw", "tf"})  # the markets a heartbeat can ask this fetcher to work
@@ -362,6 +363,60 @@ def build_futures_payload(rows: dict) -> dict | None:
         "barLabel": "5 分 K（永豐）",
         "quotes": rows,
     }
+
+
+# ---------------------------------------------------------------------------
+# tick overlay (issue #10): ticks fold into an in-memory copy of each quotes
+# file between snapshots; the file is rewritten at most once a second
+# ---------------------------------------------------------------------------
+
+TICK_WRITE_MIN_INTERVAL_MS = 1000
+TAIPEI_TZ = timezone(timedelta(hours=8))
+
+
+class TickEvent(NamedTuple):
+    """What a tick callback hands the main loop - the SDK object itself
+    stays on the callback thread."""
+
+    market: str  # "tw" (stock callback) or "tf" (futures callback)
+    code: str  # the resolved month code (TXFJ6 even when TXFR1 was subscribed)
+    at: datetime  # Taipei wall-clock, naive - no 8 h quirk here, unlike snapshot/kbars
+    close: object  # Decimal or str, float()-able either way
+    price_chg: object
+    pct_chg: object
+    total_volume: int
+    simtrade: bool
+
+
+def tick_ts_ms(at: datetime) -> int:
+    """Naive tick datetime -> epoch ms, pinned to Taipei whatever the machine's zone is."""
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=TAIPEI_TZ)
+    return int(at.timestamp() * 1000)
+
+
+def apply_tick(rows: dict, tick: TickEvent, code_map: dict) -> list[str]:
+    """Fold one tick into the overlay rows (requested code -> row with a
+    `dataAt`); `code_map` is resolved code -> requested codes. Returns the
+    rows it changed - empty for 試撮, a stale tick, or an unknown code."""
+    if tick.simtrade:
+        return []
+    ts_ms = tick_ts_ms(tick.at)
+    price = float(tick.close)
+    changed = []
+    for requested in code_map.get(tick.code, ()):
+        row = rows.get(requested)
+        if row is None or ts_ms < row.get("dataAt", 0):
+            continue
+        row["price"] = price
+        row["dataAt"] = ts_ms
+        changed.append(requested)
+    return changed
+
+
+def should_write(last_write_ms: int, now_ms: int, dirty: bool) -> bool:
+    """A dirty overlay is flushed at most once per second; a clean one never."""
+    return dirty and (now_ms - last_write_ms) >= TICK_WRITE_MIN_INTERVAL_MS
 
 
 def split_futures_codes(raw: str) -> list[str]:
