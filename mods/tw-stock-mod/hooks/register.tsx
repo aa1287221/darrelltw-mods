@@ -221,6 +221,8 @@ type Session = { open: number; close: number }
 
 type MarketConf = {
   label: string
+  /** the pnl stop's name on the market button: 台股庫存 / 美股庫存 / 期貨庫存 */
+  holdingsLabel: string
   list: Ticker[]
   hours: string
   indexName: string
@@ -251,6 +253,7 @@ function usEasternOffset(now: number): number {
 const MARKETS: Record<MarketId, MarketConf> = {
   tw: {
     label: '台股',
+    holdingsLabel: '台股庫存',
     list: TW_LIST,
     hours: '09:00-13:30',
     indexName: '加權指數',
@@ -262,6 +265,7 @@ const MARKETS: Record<MarketId, MarketConf> = {
   },
   us: {
     label: '美股',
+    holdingsLabel: '美股庫存',
     list: US_LIST,
     hours: '09:30-16:00 ET',
     indexName: 'NASDAQ',
@@ -275,6 +279,7 @@ const MARKETS: Record<MarketId, MarketConf> = {
   // no demo walk - every zero here keeps the index card from inventing a level.
   tf: {
     label: '台指期',
+    holdingsLabel: '期貨庫存',
     list: [],
     hours: '08:45-13:45 · 15:00-05:00',
     indexName: '台指期',
@@ -522,7 +527,17 @@ type FileQuote = {
 // A holding as the holdings file or `stock-band.json`'s `holdings` block
 // states it - `price`/`prevClose` are optional because the live feed usually
 // covers them; `pricedHolding` below fills in whatever this leaves out.
-type Holding = { code: string; name: string; qty: number; cost: number; price?: number; prevClose?: number }
+type Holding = {
+  code: string
+  name: string
+  /** shares for a stock; 口 for a futures contract, signed (the fetcher writes Sell as negative) */
+  qty: number
+  cost: number
+  price?: number
+  prevClose?: number
+  /** points-to-money factor from the contract (futures-holdings.json); absent for stocks, read as 1 */
+  multiplier?: number
+}
 // A holding once register.tsx has resolved a price for it - board.tsx (the
 // 損益 view) only formats these, it never falls back to anything itself.
 type PricedHolding = {
@@ -532,6 +547,10 @@ type PricedHolding = {
   cost: number
   price: number
   prevClose: number
+  /** 1 for stocks, so the existing P&L math is unchanged; the contract's own factor for futures */
+  multiplier: number
+  /** price/cost digits from the matching tf quote; omitted (board default 2) when there is none */
+  decimals?: number
   /**
    * what this holding said before the last update - same idea as
    * QuoteRow.was, deliberately just as thin: only `price` carries real old
@@ -568,11 +587,12 @@ function sortHoldings(list: PricedHolding[], key: PnlSortKey, dir: 'asc' | 'desc
         ? (h.price / h.prevClose - 1) * 100
         : 0
       : key === 'todayPnl'
-        ? (h.price - h.prevClose) * h.qty
+        ? (h.price - h.prevClose) * h.qty * h.multiplier
         : key === 'totalPnl'
-          ? (h.price - h.cost) * h.qty
+          ? (h.price - h.cost) * h.qty * h.multiplier
           : h.cost
-            ? (h.price / h.cost - 1) * 100
+            ? // the position's own return: a short gains when the price falls (board.tsx's 損益% column)
+              (h.price / h.cost - 1) * 100 * (h.qty < 0 ? -1 : 1)
             : 0
   const sign = dir === 'asc' ? 1 : -1
   return [...list].sort((a, b) => (key === 'code' ? sign * a.code.localeCompare(b.code) : sign * (rank(a) - rank(b))))
@@ -903,6 +923,8 @@ function parseHoldingsList(value: unknown): Holding[] {
       cost: num(entry.cost, 0),
       price: typeof entry.price === 'number' ? entry.price : undefined,
       prevClose: typeof entry.prevClose === 'number' ? entry.prevClose : undefined,
+      // `direction` is not kept: the fetcher already signs qty with it
+      multiplier: typeof entry.multiplier === 'number' && entry.multiplier > 0 ? entry.multiplier : undefined,
     })
   }
   return out
@@ -1145,7 +1167,7 @@ function holdingsFor(
  * watchlist entry with `"ex": "otc"` to price through MIS correctly.
  */
 function holdingExtras(market: MarketId, list: Ticker[], cfg: Config): Ticker[] {
-  const { holdings } = holdingsFor(market, lastHoldingsFile, cfg)
+  const { holdings } = holdingsFor(market, holdingsFiles[market], cfg)
   const have = new Set(list.map(t => t.code))
   return holdings
     .filter(h => !have.has(h.code))
@@ -1171,7 +1193,14 @@ function pricedHoldings(
     // resort - never a bare code standing in for a name when something
     // better is one lookup away.
     const configName = cfg.lists[market].find(t => t.code === h.code)?.name
-    const name = h.name !== h.code ? h.name : (configName ?? live?.name ?? h.code)
+    // tf reads config-first like the 台指期 table (futuresName): the same
+    // contract should carry the same name in both views
+    const name =
+      market === 'tf'
+        ? (configName ?? (h.name !== h.code ? h.name : (live?.name ?? h.code)))
+        : h.name !== h.code
+          ? h.name
+          : (configName ?? live?.name ?? h.code)
     // The exact same snapshot-before-last a watchlist row's own `was` reads
     // (quoteRow's `wasPrice` param) - a holding priced off the live feed
     // blinks on a real tick-to-tick price move for free, with no separate
@@ -1187,6 +1216,9 @@ function pricedHoldings(
       cost: h.cost,
       price,
       prevClose,
+      multiplier: h.multiplier ?? 1,
+      // omitted, not undefined: see quoteRow on what a Client's props may hold
+      ...(live?.decimals !== undefined ? { decimals: live.decimals } : {}),
       ...(wasPrice !== undefined && wasPrice !== price ? { was: { price: wasPrice } } : {}),
     }
   })
@@ -1595,7 +1627,7 @@ function buildProps(
   // state comment for why it is not the watchlist's `page`.
   const { holdings: rawHoldings, source: holdingsSource, asOf: rawHoldingsAt } = holdingsFor(
     market,
-    lastHoldingsFile,
+    holdingsFiles[market],
     cfg,
   )
   const priced = sortHoldings(pricedHoldings(rawHoldings, quotesFile, cfg, market), pnlSortKey, pnlSortDir)
@@ -1697,7 +1729,10 @@ let ready = false
 // by market for the same reason liveBy is: 永豐 futures under 加權指數, or a
 // stock override pricing a contract, would be worse than no price at all.
 let quotesFiles: Partial<Record<MarketId, QuotesFile>> = {}
-let lastHoldingsFile: HoldingsFile | undefined // runtime-dir or project holdings; never expired, see parseHoldingsFile
+// Holdings files per market, the same split as quotesFiles: tw/us share the
+// stock file (runtime-dir, else the project override), tf only ever the
+// fetcher's futures-holdings.json. Neither expires - see parseHoldingsFile.
+let holdingsFiles: Partial<Record<MarketId, HoldingsFile>> = {}
 // true once the 0.9-legacy-holdings-file warning has been logged this
 // session, so a file left behind at the project path is reported once
 // instead of on every poll tick (see the poll loop's use of it below)
@@ -1947,6 +1982,12 @@ function fillQuoteSlots(file: QuotesFile | undefined, allowed: MarketId[]): void
   for (const market of allowed) if (!file.market || file.market === market) quotesFiles[market] = file
 }
 
+/** the holdings twin of fillQuoteSlots: a file naming no market fills every allowed slot */
+function fillHoldingsSlots(file: HoldingsFile | undefined, allowed: MarketId[]): void {
+  if (!file) return
+  for (const market of allowed) if (!file.market || file.market === market) holdingsFiles[market] = file
+}
+
 // The quotes file wins over the feed: it is the explicit override. A market
 // with no snapshot falls back to the demo walk, which is what the footer's
 // 示範資料 tag is for.
@@ -1985,8 +2026,9 @@ function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
 // market from the same market in auto mode, which is a distinction the
 // label has no business carrying: the two draw identical boards and only
 // differ hours later, at the handover.
-function marketButtonLabel(marketLabel: string, pnl: boolean): string {
-  return `${marketLabel}${pnl ? '庫存' : ''} ▾`
+function marketButtonLabel(market: MarketId, pnl: boolean): string {
+  const conf = MARKETS[market]
+  return `${pnl ? conf.holdingsLabel : conf.label} ▾`
 }
 
 /** one stop on the market button's cycle - a market's table, or its pnl view */
@@ -1995,19 +2037,22 @@ type CycleStop = { market: MarketId; pnl: boolean }
 /**
  * The market button's cycle, in order: 美股 → (美股庫存, only when US
  * holdings are configured - file or config) → 台股 → 台股庫存 → (台指期, only
- * when the config lists `futures`) → back to 美股. 期貨庫存 (a futures
- * holdings file with positions) will follow 台指期 once T6 lands.
+ * when the config lists `futures`) → (期貨庫存, only when the fetcher's
+ * futures-holdings.json holds a position - the two tf stops are gated
+ * independently, so a holdings-only user gets the pnl view and no empty
+ * table) → back to 美股.
  * 台股庫存 is always a stop even with no holdings at all (it draws the "沒有
  * 庫存資料" hint row instead of disappearing - a stop that vanishes
  * depending on data would make the cycle's length unpredictable from press
  * to press). Rebuilt on every press since holdings can change mid-session
  * (a fresh stock-holdings.json write, or /reload-plugins).
  */
-function buildCycle(hasUsHoldings: boolean, hasTfTable: boolean): CycleStop[] {
+function buildCycle(hasUsHoldings: boolean, hasTfTable: boolean, hasTfHoldings: boolean): CycleStop[] {
   const stops: CycleStop[] = [{ market: 'us', pnl: false }]
   if (hasUsHoldings) stops.push({ market: 'us', pnl: true })
   stops.push({ market: 'tw', pnl: false }, { market: 'tw', pnl: true })
   if (hasTfTable) stops.push({ market: 'tf', pnl: false })
+  if (hasTfHoldings) stops.push({ market: 'tf', pnl: true })
   return stops
 }
 
@@ -2018,8 +2063,8 @@ function buildCycle(hasUsHoldings: boolean, hasTfTable: boolean): CycleStop[] {
  * `auto`) lands on the next stop after whatever the clock was already
  * showing, never a jump back onto the stop already on screen.
  */
-function nextCycleStop(current: CycleStop, hasUsHoldings: boolean, hasTfTable: boolean): CycleStop {
-  const cycle = buildCycle(hasUsHoldings, hasTfTable)
+function nextCycleStop(current: CycleStop, hasUsHoldings: boolean, hasTfTable: boolean, hasTfHoldings: boolean): CycleStop {
+  const cycle = buildCycle(hasUsHoldings, hasTfTable, hasTfHoldings)
   const idx = cycle.findIndex(s => s.market === current.market && s.pnl === current.pnl)
   return cycle[(idx < 0 ? 0 : idx + 1) % cycle.length]
 }
@@ -2133,6 +2178,7 @@ export const register: Register = on => {
       const futuresQuotesText = await readOptional(`${runtime}futures-quotes.json`)
       const runtimeHoldingsText = await readOptional(`${runtime}stock-holdings.json`)
       const projectHoldingsText = await readOptional(HOLDINGS_PATH)
+      const futuresHoldingsText = await readOptional(`${runtime}futures-holdings.json`)
 
       config = parseConfigRoot(mergedRoot)
       if (config.droppedFutures.length > 0 && !loggedDroppedFutures) {
@@ -2160,7 +2206,9 @@ export const register: Register = on => {
           )
         }
       }
-      lastHoldingsFile = parseHoldingsFile(runtimeHoldingsText) ?? projectHoldings
+      holdingsFiles = {}
+      fillHoldingsSlots(parseHoldingsFile(runtimeHoldingsText) ?? projectHoldings, ['tw', 'us'])
+      fillHoldingsSlots(parseHoldingsFile(futuresHoldingsText), ['tf'])
       ready = true
       autoPage(now)
       // redraw while snoozed too, so the collapsed row's countdown ticks down
@@ -2685,8 +2733,14 @@ export const register: Register = on => {
       turnSeq += 1
     }
     const onCycle = () => {
-      const hasUsHoldings = holdingsFor('us', lastHoldingsFile, config).holdings.length > 0
-      const nextStop = nextCycleStop({ market: props.market, pnl: props.view === 'pnl' }, hasUsHoldings, hasFutures(config))
+      const hasUsHoldings = holdingsFor('us', holdingsFiles.us, config).holdings.length > 0
+      const hasTfHoldings = holdingsFor('tf', holdingsFiles.tf, config).holdings.length > 0
+      const nextStop = nextCycleStop(
+        { market: props.market, pnl: props.view === 'pnl' },
+        hasUsHoldings,
+        hasFutures(config),
+        hasTfHoldings,
+      )
       // A market switch starts the table back at page 0: the two markets'
       // page counts have no relation to each other, so carrying the old
       // index over lands on whichever page the new market's remainder
@@ -2772,7 +2826,7 @@ export const register: Register = on => {
     const chart = props.view === 'chart'
     const pnl = props.view === 'pnl'
     const table = props.view === 'table'
-    const marketLabel = marketButtonLabel(props.marketLabel, pnl)
+    const marketLabel = marketButtonLabel(props.market, pnl)
     // 09:30-16:00 ET answers the wrong question in Taipei, so taipeiNote
     // restates it in local time - but only if it still fits: there is no way
     // to measure what the framework actually renders from inside the hook, so
