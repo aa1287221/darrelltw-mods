@@ -2,8 +2,9 @@
 # One entry point for the scripts/dev harnesses that can fail: builds
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
-# file-bars / tf-market / tf-quotes / tf-feed / tf-pnl against them plus check-personal.sh, and
-# prints a PASS/FAIL line per check. Exits non-zero if any of them did.
+# file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / pytest against them
+# plus check-personal.sh, and prints a PASS/FAIL line per check. Exits
+# non-zero if any of them did.
 #
 # rank-cross and chart-nav's "名次交叉" section once pinned the PR-a bug
 # (focus/was.code tracked a table position, not a symbol); that is fixed, so
@@ -12,6 +13,15 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOD_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# The fetcher's pure-function suite (scripts/tests, path matrix rows 12-15) -
+# the venv this repo's own tooling uses if it exists, else whatever python3
+# is on PATH.
+if [[ -x "$HOME/.claude/stock-band-venv/bin/python" ]]; then
+  PYTHON="$HOME/.claude/stock-band-venv/bin/python"
+else
+  PYTHON=python3
+fi
 
 OUT="${OUT:-${TMPDIR:-/tmp}/tw-stock-mod-dev}"
 mkdir -p "$OUT"
@@ -226,6 +236,10 @@ run_check() {
   fi
 }
 
+# cd first: scripts/tests loads fetch-quotes-shioaji.py by path (no
+# pytest.ini/conftest), but the documented invocation is run from here.
+run_pytest() { (cd "$MOD_DIR" && "$PYTHON" -m pytest scripts/tests -q); }
+
 run_check "feed-idle"      node "$SCRIPT_DIR/feed-idle.mjs"   "$OUT/register.js" "$FIXTURES/feed-idle"
 run_check "chart-nav"      node "$SCRIPT_DIR/chart-nav.mjs"   "$OUT/register.js" "$FIXTURES/chart-nav"
 run_check "rank-cross"     node "$SCRIPT_DIR/rank-cross.mjs"  "$OUT/board.js" "$OUT/register.js" "$FIXTURES/rank-cross"
@@ -234,6 +248,7 @@ run_check "tf-market"      node "$SCRIPT_DIR/tf-market.mjs"   "$OUT/register.js"
 run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-quotes" "$FIXTURES/tf-override"
 run_check "tf-feed"        node "$SCRIPT_DIR/tf-feed.mjs"     "$OUT/register.js" "$FIXTURES/tf-feed"
 run_check "tf-pnl"         node "$SCRIPT_DIR/tf-pnl.mjs"      "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-pnl" "$FIXTURES/tf-plain"
+run_check "pytest"         run_pytest
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
 echo
