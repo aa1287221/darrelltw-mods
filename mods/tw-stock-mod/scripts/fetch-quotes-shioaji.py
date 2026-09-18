@@ -370,7 +370,11 @@ def build_futures_payload(rows: dict) -> dict | None:
 
 
 def split_futures_codes(raw: str) -> list[str]:
-    """--futures CLI value -> codes, blanks dropped; empty input does no futures work at all."""
+    """
+    --futures CLI value -> codes, blanks dropped. Empty input alone does no
+    futures work - but a signed futopt_account that holds positions still
+    drives it (T5's union in main()), so this is a lower bound, not a gate.
+    """
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
@@ -686,7 +690,7 @@ def main() -> None:
     )
     parser.add_argument("--interval", type=float, default=10, help="seconds between snapshots; 0 writes once and exits")
     parser.add_argument("--codes", default="", help="comma-separated codes, overriding the band's own watchlist")
-    parser.add_argument("--futures", default="", help="comma-separated 期貨合約代號（月合約或 R1/R2 別名，如 TXFR1,SRFJ6）；空值不做任何期貨工作")
+    parser.add_argument("--futures", default="", help="comma-separated 期貨合約代號（月合約或 R1/R2 別名，如 TXFR1,SRFJ6）；空值本身不會啟動期貨工作，但簽署期貨帳戶若有庫存部位，仍會驅動期貨快照與庫存檔")
     parser.add_argument("--heartbeat", default="", help="path the band keeps rewriting while it wants this route; missing or >90s old exits this process (empty disables the check, for a by-hand run)")
     parser.add_argument("--pidfile", default="", help="path holding this fetcher's pid; a live pid already there exits this run at once instead of double-fetching the same project")
     parser.add_argument("--check", action="store_true", help="diagnose the environment (Python version, shioaji install, env file, a real login, platform) and exit; writes nothing, needs no --codes")
@@ -894,7 +898,7 @@ def main() -> None:
 
             try:
                 futures_positions = fetch_futures_positions(api)
-            except Exception as err:  # noqa: BLE001 - keep last tick's positions rather than crash (the unsigned-account 406 lands here)
+            except Exception as err:  # noqa: BLE001 - None/unsigned accounts return [] inside fetch_futures_positions; only a network or other SDK error reaches here, so keep last tick's positions rather than crash
                 print(f"期貨庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
                 futures_positions = last_futures_positions
             last_futures_positions = futures_positions
