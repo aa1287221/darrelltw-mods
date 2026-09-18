@@ -478,7 +478,8 @@ file (`stock-band.heartbeat`, in the runtime dir under
 anymore. The heartbeat names which markets the script should work that tick
 (`{"ts": …, "markets": ["tw", "tf"]}`): with a `futures` list in the config
 it keeps being written through 夜盤 whatever market is on screen, so the
-script serves 台指期 all evening and does no stock work while 台股 is closed.
+script serves 台指期 all evening and does no stock work while 台股 is off the
+band (美股 or 台指期 on screen).
 The script is spawned once with both the `tw` codes and the `futures` codes;
 a changed `futures` list takes effect on its next spawn, not on a running one.
 A `stock-shioaji.pid` file, same directory, keeps two Claude Code
