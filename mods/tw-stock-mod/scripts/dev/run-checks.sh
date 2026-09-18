@@ -2,7 +2,7 @@
 # One entry point for the scripts/dev harnesses that can fail: builds
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
-# file-bars / tf-market / tf-quotes / tf-feed / tf-pnl against them plus check-personal.sh, and
+# file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs against them plus check-personal.sh, and
 # prints a PASS/FAIL line per check. Exits non-zero if any of them did.
 #
 # rank-cross and chart-nav's "名次交叉" section once pinned the PR-a bug
@@ -234,6 +234,7 @@ run_check "tf-market"      node "$SCRIPT_DIR/tf-market.mjs"   "$OUT/register.js"
 run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-quotes" "$FIXTURES/tf-override"
 run_check "tf-feed"        node "$SCRIPT_DIR/tf-feed.mjs"     "$OUT/register.js" "$FIXTURES/tf-feed"
 run_check "tf-pnl"         node "$SCRIPT_DIR/tf-pnl.mjs"      "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-pnl" "$FIXTURES/tf-plain"
+run_check "tabs"           node "$SCRIPT_DIR/tabs.mjs"        "$OUT/register.js" "$FIXTURES/tf-pnl" "$FIXTURES/tf-plain"
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
 echo

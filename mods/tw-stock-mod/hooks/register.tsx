@@ -221,7 +221,7 @@ type Session = { open: number; close: number }
 
 type MarketConf = {
   label: string
-  /** the pnl stop's name on the market button: 台股庫存 / 美股庫存 / 期貨庫存 */
+  /** the pnl stop's tab label: 台股庫存 / 美股庫存 / 期貨庫存 */
   holdingsLabel: string
   list: Ticker[]
   hours: string
@@ -1559,7 +1559,7 @@ function buildProps(
     // turn both halves, not just the price side.
     let ranksCrossed = false
     // `lastShown` only means something as a rank-cross baseline when it was
-    // drawn for THIS market - onCycle can switch markets without a page turn
+    // drawn for THIS market - onSelectStop can switch markets without a page turn
     // or a pnl turn (see `lastShownMarket` above), and a stale other-market
     // `lastShown` would compare AAPL's row against 2330's row on nothing more
     // than shared position. Gated on `quotesFile` too: with no quotes file
@@ -1775,7 +1775,7 @@ let nextFeedAt = 0 // when the next request is due; the board counts down to it
 let barsInFlight = false
 // the render hook asks for the chart view's K bars; the feed owns the request
 let requestBars: ((market: MarketId, code: string) => void) | undefined
-// ...and asks for a whole tick when the market button lands on a market the
+// ...and asks for a whole tick when a tab lands on a market the
 // feed has no snapshot for, so a switch does not sit on 示範資料 until the
 // next scheduled tick comes round
 let requestFeed: (() => void) | undefined
@@ -1812,9 +1812,9 @@ let version = ''
 let page = 0
 let pageAt = 0 // when the current page arrived, so the turn has a start time
 let lastShown: QuoteRow[] = [] // the page on the board right now
-// which market `lastShown` was drawn for. onCycle can land buildProps on a
+// which market `lastShown` was drawn for. onSelectStop can land buildProps on a
 // different market without ever calling setPage or turnPnl (a table-to-table
-// or pnl-to-table stop on the cycle) - the rank-cross check below must not
+// or pnl-to-table tab press) - the rank-cross check below must not
 // compare this render's row against a DIFFERENT market's row just because
 // they share a position, or "台積電 replaced AAPL" reads as a same-market
 // rank cross and flaps a price/pct/code/name that never actually turned.
@@ -1866,7 +1866,7 @@ let pnlPageFrom: PricedHolding[] | undefined
 let pnlPageAt = 0
 let lastPnlShown: PricedHolding[] = []
 // the pnl view's sort - lives here like `view`/`focusCode`, default 總損益
-// descending. Persists across a page/scroll move and a market-cycle press
+// descending. Persists across a page/scroll move and a tab press
 // (unlike pnlScroll, changing the SORT is not "changing the stop").
 let pnlSortKey: PnlSortKey = 'totalPnl'
 let pnlSortDir: 'asc' | 'desc' = 'desc'
@@ -2032,32 +2032,50 @@ function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
   return { ...snap.file, quotes, ...(snap.prev ? { prev: snap.prev } : {}) }
 }
 
-// The market button is the title itself, and its label is just the stop ON
-// THE BAND, nothing else: 美股 ▾ / 台股 ▾ for a table stop, 美股庫存 ▾ /
-// 台股庫存 ▾ for a pnl stop. It used to append 固定 to distinguish a pinned
-// market from the same market in auto mode, which is a distinction the
-// label has no business carrying: the two draw identical boards and only
-// differ hours later, at the handover.
-function marketButtonLabel(market: MarketId, pnl: boolean): string {
-  const conf = MARKETS[market]
-  return `${pnl ? conf.holdingsLabel : conf.label} ▾`
-}
-
-/** one stop on the market button's cycle - a market's table, or its pnl view */
+/** one stop on the tab row - a market's table, or its pnl view */
 type CycleStop = { market: MarketId; pnl: boolean }
 
+// A tab's label is just the stop ON THE BAND, nothing else: 美股 / 台股 for a
+// table stop, 美股庫存 / 台股庫存 for a pnl stop. It used to append 固定 to
+// distinguish a pinned market from the same market in auto mode, which is a
+// distinction the label has no business carrying: the two draw identical
+// boards and only differ hours later, at the handover.
+function stopLabel(stop: CycleStop): string {
+  const conf = MARKETS[stop.market]
+  return stop.pnl ? conf.holdingsLabel : conf.label
+}
+
+// The tab row: one plain Button per stop; the stop on screen reads `[台指期]`
+// at full strength, every other tab is dimColor. Plain (no `[ label ]`
+// chrome) so six tabs cost ~45 columns, not ~67.
+function tabLabel(stop: CycleStop, current: CycleStop): string {
+  const label = stopLabel(stop)
+  return sameStop(stop, current) ? `[${label}]` : label
+}
+function sameStop(a: CycleStop, b: CycleStop): boolean {
+  return a.market === b.market && a.pnl === b.pnl
+}
+function tabKey(stop: CycleStop): string {
+  return `stock-band:tab:${stop.market}${stop.pnl ? ':pnl' : ''}`
+}
+/** display width of the whole tab row: labels, single-space gaps, the mark's brackets */
+function tabRowWidth(stops: CycleStop[]): number {
+  return stops.reduce((w, s) => w + dispWidth(stopLabel(s)), 0) + Math.max(0, stops.length - 1) + 2
+}
+
 /**
- * The market button's cycle, in order: 美股 → (美股庫存, only when US
- * holdings are configured - file or config) → 台股 → 台股庫存 → (台指期, only
- * when the config lists `futures`) → (期貨庫存, only when the fetcher's
+ * The tab row's stops, in order: 美股 → (美股庫存, only when US holdings are
+ * configured - file or config) → 台股 → 台股庫存 → (台指期, only when the
+ * config lists `futures`) → (期貨庫存, only when the fetcher's
  * futures-holdings.json holds a position - the two tf stops are gated
  * independently, so a holdings-only user gets the pnl view and no empty
- * table) → back to 美股.
+ * table). The single source of which stops exist: the tabs are drawn from
+ * this list, so the row and the stops can never disagree.
  * 台股庫存 is always a stop even with no holdings at all (it draws the "沒有
- * 庫存資料" hint row instead of disappearing - a stop that vanishes
- * depending on data would make the cycle's length unpredictable from press
- * to press). Rebuilt on every press since holdings can change mid-session
- * (a fresh stock-holdings.json write, or /reload-plugins).
+ * 庫存資料" hint row instead of disappearing - a tab that vanishes depending
+ * on data would shift the row under the pointer). Rebuilt on every render
+ * since holdings can change mid-session (a fresh stock-holdings.json write,
+ * or /reload-plugins).
  */
 function buildCycle(hasUsHoldings: boolean, hasTfTable: boolean, hasTfHoldings: boolean): CycleStop[] {
   const stops: CycleStop[] = [{ market: 'us', pnl: false }]
@@ -2066,19 +2084,6 @@ function buildCycle(hasUsHoldings: boolean, hasTfTable: boolean, hasTfHoldings: 
   if (hasTfTable) stops.push({ market: 'tf', pnl: false })
   if (hasTfHoldings) stops.push({ market: 'tf', pnl: true })
   return stops
-}
-
-/**
- * The stop after `current`. `current` is always whichever stop is ACTUALLY
- * on screen right now, auto-picked-by-clock or pinned - buildProps already
- * resolves `market`/`view` that way, so the very first press (still in
- * `auto`) lands on the next stop after whatever the clock was already
- * showing, never a jump back onto the stop already on screen.
- */
-function nextCycleStop(current: CycleStop, hasUsHoldings: boolean, hasTfTable: boolean, hasTfHoldings: boolean): CycleStop {
-  const cycle = buildCycle(hasUsHoldings, hasTfTable, hasTfHoldings)
-  const idx = cycle.findIndex(s => s.market === current.market && s.pnl === current.pnl)
-  return cycle[(idx < 0 ? 0 : idx + 1) % cycle.length]
 }
 
 // --- the title/button row ----------------------------------------------
@@ -2120,8 +2125,8 @@ function dispWidth(s: string): number {
 // rough width of the right-hand button group (翻頁 X/Y, 趨勢圖, 收起 30分, plus
 // the gaps a Button draws around its own label) - there is no way to measure
 // what the framework actually renders from inside the hook, so the left group
-// treats this as a fixed reservation when it decides whether 台灣 HH:MM-HH:MM
-// still fits next to the session text.
+// treats this as a fixed reservation when it decides which of the session
+// notes / badge after the tabs still fit.
 const RIGHT_BUTTON_GROUP_COLS = 40
 
 export const register: Register = on => {
@@ -2768,12 +2773,13 @@ export const register: Register = on => {
     // surface has no Button (docs/api-notes.md) - so the controls sit on their
     // own row directly above the table.
     //
-    // The market button walks the whole cycle (buildCycle/nextCycleStop),
-    // not just the markets - 美股 → (美股庫存) → 台股 → 台股庫存 → (台指期) → 美股.
-    // `market`/`view` do not change here for any stop-internal reason (the
-    // watchlist itself is unaffected by which stop is showing), so the feed
-    // gating in feedOnce (which reads modeOverride's MARKET half only) never
-    // needs to know about the pnl stops at all - see marketNeedsFeed.
+    // The tab row is one Button per stop of buildCycle - 美股 → (美股庫存) →
+    // 台股 → 台股庫存 → (台指期) → (期貨庫存) - and a press lands on that stop
+    // directly. `market`/`view` do not change here for any stop-internal
+    // reason (the watchlist itself is unaffected by which stop is showing),
+    // so the feed gating in feedOnce (which reads modeOverride's MARKET half
+    // only) never needs to know about the pnl stops at all - see
+    // marketNeedsFeed.
     // Bumps `turnSeq` and snapshots what was on screen (pnlPageFrom) - the
     // pnl view's own version of the watchlist's page-turn flap
     // (PAGE_TURN_WINDOW_MS/pageFrom), reusing the exact same turn/rowFlap
@@ -2784,15 +2790,16 @@ export const register: Register = on => {
       pnlPageAt = now
       turnSeq += 1
     }
-    const onCycle = () => {
-      const hasUsHoldings = holdingsFor('us', holdingsFiles.us, config).holdings.length > 0
-      const hasTfHoldings = holdingsFor('tf', holdingsFiles.tf, config).holdings.length > 0
-      const nextStop = nextCycleStop(
-        { market: props.market, pnl: props.view === 'pnl' },
-        hasUsHoldings,
-        hasFutures(config),
-        hasTfHoldings,
-      )
+    const currentStop: CycleStop = { market: props.market, pnl: props.view === 'pnl' }
+    const stops = buildCycle(
+      holdingsFor('us', holdingsFiles.us, config).holdings.length > 0,
+      hasFutures(config),
+      holdingsFor('tf', holdingsFiles.tf, config).holdings.length > 0,
+    )
+    const onSelectStop = (stop: CycleStop) => {
+      // the selected tab pressed again is a no-op - unless the chart is up,
+      // where the same market's tab is the way back to its table
+      if (sameStop(stop, currentStop) && view !== 'chart') return
       // A market switch starts the table back at page 0: the two markets'
       // page counts have no relation to each other, so carrying the old
       // index over lands on whichever page the new market's remainder
@@ -2804,12 +2811,12 @@ export const register: Register = on => {
       // pageFromAt flap that pairs the new market's row 0 with whatever
       // the old market last drew in that slot - the exact cross-market mix
       // `pageFromMarket` exists to keep off the board.
-      if (nextStop.market !== props.market) page = 0
-      modeOverride = nextStop.market
-      view = nextStop.pnl ? 'pnl' : 'table'
+      if (stop.market !== props.market) page = 0
+      modeOverride = stop.market
+      view = stop.pnl ? 'pnl' : 'table'
       resetPnlScroll() // "changing the stop" always resets the pnl scroll position
-      if (nextStop.pnl) turnPnl() // landing on a pnl stop flaps it in, like a mount
-      // the market the button just landed on may never have been fetched: ask
+      if (stop.pnl) turnPnl() // landing on a pnl stop flaps it in, like a mount
+      // the market the tab just landed on may never have been fetched: ask
       // for it now rather than showing demo prices until the next tick
       if (!quotesFor(pickMarket(now, modeOverride, hasFutures(config)).market, now)) requestFeed?.()
       $.ui.invalidate('ui.render')
@@ -2868,8 +2875,8 @@ export const register: Register = on => {
       $.ui.invalidate('ui.render')
     }
 
-    // The market button carries the market name ON THE BAND and nothing else:
-    // 台股 ▾ / 美股 ▾. It tracks the clock until the first press, then toggles.
+    // The tab row marks the stop ON THE BAND: it tracks the clock until the
+    // first press, then whatever tab was pressed.
     const open = props.phase === 'open'
     // Three views, three names, so every line in the button row below can
     // read forwards: `table ? 元素 : null`, `chart ? 元素 : null`, `pnl ?
@@ -2878,19 +2885,19 @@ export const register: Register = on => {
     const chart = props.view === 'chart'
     const pnl = props.view === 'pnl'
     const table = props.view === 'table'
-    const marketLabel = marketButtonLabel(props.market, pnl)
-    // 09:30-16:00 ET answers the wrong question in Taipei, so taipeiNote
-    // restates it in local time - but only if it still fits: there is no way
-    // to measure what the framework actually renders from inside the hook, so
-    // this reserves a fixed budget for the button group on the right (see
-    // RIGHT_BUTTON_GROUP_COLS) and drops the restatement first when it does not.
-    const leftCoreWidth =
-      dispWidth(marketLabel) + 1 + dispWidth(`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`) + 1 +
-      dispWidth(props.sessionNote)
-    const showTaipei =
-      table &&
-      props.taipeiNote !== '' &&
-      leftCoreWidth + 1 + dispWidth(props.taipeiNote) + RIGHT_BUTTON_GROUP_COLS <= cols
+    // The tabs never give way; what follows them does, in order: sessionNote
+    // first (09:30-16:00 ET answers the wrong question in Taipei anyway),
+    // then taipeiNote, then the session badge. There is no way to measure
+    // what the framework actually renders from inside the hook, so this
+    // reserves a fixed budget for the button group on the right (see
+    // RIGHT_BUTTON_GROUP_COLS) and drops each piece when it no longer fits.
+    const badge = `${open ? SUN : MOON} ${open ? '盤中' : '休市'}`
+    const fits = (...parts: string[]) =>
+      tabRowWidth(stops) + parts.reduce((w, p) => w + 1 + dispWidth(p), 0) + RIGHT_BUTTON_GROUP_COLS <= cols
+    const taipei = props.taipeiNote === '' ? [] : [props.taipeiNote]
+    const showSession = table && fits(badge, props.sessionNote, ...taipei)
+    const showTaipei = table && taipei.length > 0 && fits(badge, ...taipei)
+    const showBadge = table && fits(badge)
 
     // No hotkeys on any of these (2026-09-16, at the user's request: 先不加
     // 上快捷鍵). A letter hotkey only fires once one of the band's Buttons
@@ -2903,22 +2910,30 @@ export const register: Register = on => {
       <Box flexDirection="column">
         <Box flexDirection="row" justifyContent="space-between">
           <Box flexDirection="row">
-            <Button key="stock-band:market" label={marketLabel} onPress={onCycle} />
+            {stops.flatMap((stop, i) => [
+              i > 0 ? <Text key={`${tabKey(stop)}:gap`}> </Text> : null,
+              <Button
+                key={tabKey(stop)}
+                label={tabLabel(stop, currentStop)}
+                plain
+                dimColor={!sameStop(stop, currentStop)}
+                onPress={() => onSelectStop(stop)}
+              />,
+            ])}
             {/* The chart view's controls sit here, next to the symbol they move
                 through, rather than stranded on the far right where the eye is
                 not. The session state and hours give up the space because the
                 chart draws its own title row with both already on it. */}
+            {chart ? <Text> </Text> : null}
             {chart ? <Button key="stock-band:prev" label="◀ 上一檔" onPress={onPrev} /> : null}
             {chart ? (
               <Button key="stock-band:next" label={`下一檔 ▶ ${props.focus + 1}/${rowCount}`} onPress={onNext} />
             ) : null}
             {chart ? <Button key="stock-band:list" label="回清單" onPress={onList} /> : null}
-            {table ? <Text> </Text> : null}
-            {table ? (
-              <Text color={open ? ORANGE : MOON_BLUE}>{`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`}</Text>
-            ) : null}
-            {table ? <Text> </Text> : null}
-            {table ? <Text color={DIM}>{props.sessionNote}</Text> : null}
+            {showBadge ? <Text> </Text> : null}
+            {showBadge ? <Text color={open ? ORANGE : MOON_BLUE}>{badge}</Text> : null}
+            {showSession ? <Text> </Text> : null}
+            {showSession ? <Text color={DIM}>{props.sessionNote}</Text> : null}
             {showTaipei ? <Text> </Text> : null}
             {showTaipei ? <Text color={DIM}>{props.taipeiNote}</Text> : null}
           </Box>
