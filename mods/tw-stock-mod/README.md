@@ -291,7 +291,7 @@ who opens it keeps their own preference — see
 | key | default | meaning |
 | --- | --- | --- |
 | `market` | `"auto"` | the state a session starts in: `auto` picks by the clock and keeps tracking it until a tab is pressed; `tw`/`us`/`tf` opens on that market instead |
-| `refreshMs` | `3000` | how often the module rebuilds the snapshot (min 1000; fixed at session start — changing it needs `/reload-plugins`) |
+| `refreshMs` | `3000` | how often the module rebuilds the snapshot (min 1000; fixed at session start — changing it needs `/reload-plugins`). `1000` redraws every second, which is what makes the 永豐 tick overlay visible — see [Taiwan futures (tf)](#taiwan-futures-tf) |
 | `sort` | `"change"` | `change` = by change% desc, `list` = your order |
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
 | `columns` | `"auto"` | how many symbols a row draws: `auto` = 1 when the watchlist is 5 symbols or fewer, 2 for 6 or more; `1`/`2` force it (the board still falls back to 1 if the terminal is too narrow — see [What the band shows](#what-the-band-shows)) |
@@ -697,6 +697,20 @@ whatever the contract's own `decimal_locator` says, per contract — not a
 fixed 2 the way the stock markets use. `prevClose` is the contract's own
 `reference` (昨結), so 今日% is measured from settlement, not from a stale
 trade.
+
+**Tick overlay.** On top of the 10-second snapshot loop the fetcher
+subscribes to 永豐's tick stream for every code it serves (stocks while the
+band wants `tw`, futures while it wants `tf`, following the heartbeat) and
+folds each trade onto the last snapshot: the row's price and its own
+`dataAt` move within a second of a trade, and the trailing 5 分 K bar's
+high/low/close advance with it until the next K-bar refresh. A quotes file
+is rewritten at most once a second and only when something changed, so the
+band's `更新` clock (and the 損益 title's, once a stamp is under a minute
+old) shows seconds ticking. The snapshot loop stays as the floor: a thin
+contract with no ticks, or a code whose subscription failed (the fetcher
+log says which and why), still updates every 10 s. Set `refreshMs: 1000`
+in your user-level `stock-band.json` to redraw at that pace — the default
+stays 3000. 試撮 (pre-open simulated trades) never move a price or a bar.
 
 **Runtime files.** The fetcher writes two more files alongside the stock
 ones, same runtime dir, each mirroring its stock counterpart's own freshness

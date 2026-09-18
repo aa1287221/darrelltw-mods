@@ -383,6 +383,19 @@ def test_check_futures_pnl_matches_sdk_value_within_float_noise():
     assert fetcher.check_futures_pnl(pos, SRF_CONTRACT) is None
 
 
+def test_check_futures_pnl_accepts_the_sdk_rounding_to_the_dollar():
+    # seen live 2026-09-18: SDK=195950.0 vs 算出=195951.00000000017 - the SDK
+    # rounds its pnl, so a whole-dollar gap is not a mismatch
+    pos = make_position("TXFJ6", BUY, 1, 17000.0, 17979.755, 195950.0)
+    assert fetcher.check_futures_pnl(pos, TXF_CONTRACT) is None
+
+
+def test_check_futures_pnl_still_flags_999_off_at_that_magnitude():
+    # 195951 - 999: rel_tol=1e-6 is ~0.2 here, abs_tol 2.0 - neither absorbs it
+    pos = make_position("TXFJ6", BUY, 1, 17000.0, 17979.755, 194952.0)
+    assert fetcher.check_futures_pnl(pos, TXF_CONTRACT) is not None
+
+
 def test_check_futures_pnl_flags_mismatch():
     # (17050 - 17000) * 2 * 200 = 20000, not 999 - wrong on purpose
     pos = make_position("TXFJ6", BUY, 2, 17000.0, 17050.0, 999.0)
