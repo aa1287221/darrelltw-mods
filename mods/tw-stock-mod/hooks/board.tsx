@@ -771,11 +771,13 @@ function qtyLabel(qty: number, market: MarketId): string {
   return Number.isInteger(lots) ? String(lots) : lots.toFixed(3).replace(/0+$/, '')
 }
 
-function hhmmLocal(ms: number): string {
+/** `hh:mm`, or `hh:mm:ss` when the stamp is under a minute old - a tick-fed file moves every second and the title should show it */
+function hhmmLocal(ms: number, now = 0): string {
   if (!ms) return '--:--'
   const d = new Date(ms)
   const two = (n: number) => String(n).padStart(2, '0')
-  return `${two(d.getHours())}:${two(d.getMinutes())}`
+  const base = `${two(d.getHours())}:${two(d.getMinutes())}`
+  return now && now - ms < 60_000 ? `${base}:${two(d.getSeconds())}` : base
 }
 
 /** `+11.11%` / `-11.11%` / `0.00%` */
@@ -1156,7 +1158,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     const demoTag = props.source === 'demo' ? ' · 示範價格' : ''
     title.put(
       lay.symCol,
-      `${futures ? '期貨庫存損益' : '庫存損益'} · ${props.holdingsSource || '沒有庫存資料'} · ${holdings.length} 檔 · 更新 ${hhmmLocal(props.holdingsAt)}${demoTag}`,
+      `${futures ? '期貨庫存損益' : '庫存損益'} · ${props.holdingsSource || '沒有庫存資料'} · ${holdings.length} 檔 · 更新 ${hhmmLocal(props.holdingsAt, props.now)}${demoTag}`,
       DIM,
     )
 
