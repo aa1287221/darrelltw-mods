@@ -223,9 +223,9 @@ cat > "$FIXTURES/tf-pnl/.claude/stock-band.json" <<'JSON'
 }
 JSON
 
-# chart-view: a tf project like tf-quotes (the harness writes its own
-# six-element bars + barsBy into the runtime dir) and a tw project whose
-# project-level quotes file carries the old [o, h, l, c] bars, feed off.
+# chart-view: a tf project like tf-quotes and a tw project with feed off - the
+# harness writes both quotes files itself (six-element bars + barsBy into the
+# runtime dir; the old [o, h, l, c] shape into the tw project's .claude/).
 mkdir -p "$FIXTURES/chart-view/.claude" "$FIXTURES/chart-view-tw/.claude"
 cat > "$FIXTURES/chart-view/.claude/stock-band.json" <<'JSON'
 {
@@ -245,23 +245,6 @@ cat > "$FIXTURES/chart-view-tw/.claude/stock-band.json" <<'JSON'
   "pageMs": 0,
   "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
   "us": []
-}
-JSON
-cat > "$FIXTURES/chart-view-tw/.claude/stock-quotes.json" <<'JSON'
-{
-  "asOf": 0,
-  "market": "tw",
-  "quotes": {
-    "2330": {
-      "price": 1188.0, "prevClose": 1165.0, "name": "台積電",
-      "bars": [
-        [1165.0, 1172.0, 1164.0, 1170.5], [1170.5, 1176.0, 1168.0, 1174.0],
-        [1174.0, 1183.0, 1173.5, 1181.5], [1181.5, 1190.0, 1180.0, 1188.0],
-        [1188.0, 1191.0, 1184.0, 1185.0], [1185.0, 1189.5, 1183.0, 1189.0],
-        [1189.0, 1192.0, 1186.5, 1187.5], [1187.5, 1190.0, 1185.0, 1188.0]
-      ]
-    }
-  }
 }
 JSON
 

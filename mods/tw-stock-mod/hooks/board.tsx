@@ -17,8 +17,8 @@ export type MarketId = 'tw' | 'us' | 'tf'
 export type Phase = 'open' | 'closed'
 export type View = 'table' | 'chart' | 'pnl'
 
-/** [open, high, low, close] */
-export type Bar = [number, number, number, number]
+/** [open, high, low, close, volume?, bucket start ms?] - the fetcher writes six, older files four */
+export type Bar = [number, number, number, number, number?, number?]
 
 export type QuoteRow = {
   code: string
@@ -111,9 +111,18 @@ export type BoardProps = {
   focus: number
   /** what the bars are, e.g. "5 分 K" - the feed decides, so it is a string */
   barLabel: string
-  /** market-local session bounds, "HH:MM", for the chart's time axis */
+  /** market-local session bounds, "HH:MM", the chart's time axis when the bars carry no stamps */
   sessionOpen: string
   sessionClose: string
+  /** rows the chart view draws (min 8), already clamped to the band by register.tsx */
+  chartRows: number
+  /** K線 (half-block candles) or 曲線 (a braille close line over a shaded area) */
+  chartMode: 'candle' | 'line'
+  /** the timeframes the focused row offers and the one on screen - drawn as buttons by register.tsx, not here */
+  timeframes: string[]
+  timeframe: string
+  /** the market's UTC offset in hours, to print bar stamps in the market's own clock */
+  utcOffsetHours: number
   /** bumped on a new snapshot or a page change; what starts a row turn */
   turn: number
   /** which page of the watchlist this is, and how many there are */
@@ -166,7 +175,6 @@ type State = {
 const UP_GREEN = '#3fb950'
 const DOWN_RED = '#e5534b'
 const FLAT = '#9aa0a6'
-const GRAY = '#808080'
 const DIM = '#6e7681'
 const HEAD = '#a6aebb'
 const SYMBOL = '#79a8ff' // the blue ticker links in the reference screenshot
@@ -509,7 +517,7 @@ const pickers = new WeakMap<object, Picker>()
 // the header. The chart view keeps its own title row - it names the symbol
 // being charted, not the market, so it stays inside the board.
 const TABLE_ROWS = 8 // header, rule, 5 quote rows, footer
-const CHART_ROWS = 8 // title, 5 candle rows, axis, footer - the same height
+// the chart view is `props.chartRows` tall (#12): title, plot, axis, volume, footer
 const PNL_ROWS = 8 // title, header, 5 holding rows, totals - the same height
 const PNL_PAGE_SIZE = 5
 // as the table, so opening a chart no longer pushes the transcript up a line
@@ -786,24 +794,25 @@ function pct(value: number): string {
   return `${sign}${Math.abs(value).toFixed(2)}%`
 }
 
-// --- candle panel ----------------------------------------------------------
-// Real candles: a body character and a wick character, each owning a whole
-// terminal row. The first version packed both into half-block cells to buy ten
-// levels of vertical resolution instead of five - and lost the candle. A cell
-// is either "top half lit" or "bottom half lit", so a one-row body and the
-// wick above it landed in the same cell and merged into one blob; the user's
-// verdict was "看不出來那是 K 棒", and he was right. Five levels that read as
-// candles beat ten that read as noise.
-//
-// The wick shares the body's column rather than sitting beside it: with a
-// one-column body they line up exactly, which is what the user picked over
-// wider bodies ("那條線不能置中，看起來好煩" - a 2-column body puts the wick
-// on one side of it).
-const CHART_PLOT_ROWS = 5 // -> 10 pixel rows of vertical resolution. One row
-// fewer than the table's five quotes plus header and rule, so that the chart's
-// own title row (which names the symbol) fits without the band growing.
+// --- chart panel -----------------------------------------------------------
+// Half-block cells: two price levels per terminal row, so 16 rows are 22
+// levels. The first half-block attempt was rejected because a one-row body
+// and the wick above it merged into one same-colour blob; here a cell holds
+// two colours (`▀` with the top pixel as foreground and the bottom as
+// background), so the wick and the body stay distinct inside one cell.
 const AXIS_W = 10
-const BAR_STRIDE = 2 // one candle column + one gap column, so bodies stay distinct
+const BAR_STRIDE = 2 // one candle column + one gap column while they fit
+// the chart is not held to the table's 74-column cap: 120 bars one per
+// column plus the axis is what a wide terminal is for, and past that width
+// buys nothing
+const CHART_RIGHT_CAP = 134
+const VOLUME_ROWS = 2
+const VOLUME_MIN_ROWS = 12 // under this the two volume rows would starve the plot
+const REF_LINE = '#3d4450' // the 昨結 dotted line and the session-boundary rule
+const REF_LABEL = '#5a6370'
+const TAG_INK = '#0d1117' // text on the filled last-price tag
+const LABEL_W = 5 // "HH:MM"
+const TICK_GAP = 8 // columns a time label needs before the next may start
 
 function darken(hex: string): string {
   const v = hex.replace('#', '')
@@ -811,74 +820,252 @@ function darken(hex: string): string {
   return `#${parts.map(p => p.toString(16).padStart(2, '0')).join('')}`
 }
 
-type Candles = { rows: Cell[][]; hi: number; lo: number }
-
-function candleCells(bars: Bar[], market: MarketId, prevClose: number, width: number, dim: boolean): Candles {
-  const empty: Candles = { rows: Array.from({ length: CHART_PLOT_ROWS }, () => []), hi: 0, lo: 0 }
-  if (bars.length === 0 || width <= 0) return empty
-
-  // One candle every BAR_STRIDE columns, so the number of candles follows the
-  // terminal's width rather than the feed's bar count: a day of 5-minute bars
-  // is ~79 of them, and drawing 79 into 31 slots is what made the old panel a
-  // solid block. Each slot is a real OHLC merge of the bars it covers, so the
-  // highs and lows survive the aggregation.
-  const slots = Math.max(1, Math.min(bars.length, Math.floor((width + 1) / BAR_STRIDE)))
-  const merged: Bar[] = []
-  for (let i = 0; i < slots; i++) {
-    const from = Math.floor((i * bars.length) / slots)
-    const to = Math.max(from + 1, Math.floor(((i + 1) * bars.length) / slots))
-    let [o, h, l, c] = bars[from]
-    for (let j = from; j < to; j++) {
-      const [, bh, bl, bc] = bars[j]
-      if (bh > h) h = bh
-      if (bl < l) l = bl
-      c = bc
-    }
-    merged.push([o, h, l, c])
-  }
-
-  let hi = prevClose
-  let lo = prevClose
-  for (const [, h, l] of merged) {
-    if (h > hi) hi = h
-    if (l < lo) lo = l
-  }
-  const span = hi - lo || 1
-  const toRow = (price: number) =>
-    Math.min(CHART_PLOT_ROWS - 1, Math.max(0, Math.round(((hi - price) / span) * (CHART_PLOT_ROWS - 1))))
-
-  const rows: Cell[][] = Array.from({ length: CHART_PLOT_ROWS }, () =>
-    Array.from({ length: width }, () => ({ ch: ' ' }) as Cell),
-  )
-  // No reference line across the candles. The candles sit every second column,
-  // so a line drawn through them alternates with the bodies - `█┈█┈█┈` - and
-  // reads as noise rather than as a level. The previous close is already named
-  // on the price axis at the right, on its own row and in its own color.
-
-  for (let i = 0; i < merged.length; i++) {
-    const c = i * BAR_STRIDE
-    if (c >= width) break
-    const [o, h, l, cl] = merged[i]
-    const body = dim ? GRAY : cl === o ? FLAT : tone(market, cl - o)
-    const wick = darken(body)
-    for (let r = toRow(h); r <= toRow(l); r++) rows[r][c] = { ch: '│', fg: wick }
-    for (let r = toRow(Math.max(o, cl)); r <= toRow(Math.min(o, cl)); r++) rows[r][c] = { ch: '█', fg: body }
-  }
-
-  for (const row of rows) row.push({ ch: ' ' })
-  return { rows, hi, lo }
+/** the 曲線 mode's area shade for a tone - dark enough to sit behind the line */
+function shadeOf(color: string): string {
+  return color === DOWN_RED ? '#3b1d1d' : color === UP_GREEN ? '#1b2f1f' : '#262b31'
 }
 
-// halfway between two "HH:MM" strings, for the chart's middle axis tick
+/** rows of the chart view: title, plot rows, axis, volume rows (16+ rows only), footer */
+type ChartGeom = { plot: number; volume: number; axisRow: number; footRow: number }
+function chartGeom(rows: number, hasVolume: boolean): ChartGeom {
+  const volume = rows >= VOLUME_MIN_ROWS && hasVolume ? VOLUME_ROWS : 0
+  const plot = rows - 3 - volume
+  return { plot, volume, axisRow: 1 + plot, footRow: rows - 1 }
+}
+
+/** the newest bars that fit, right-aligned to the axis like a broker's intraday chart */
+type BarWindow = { bars: Bar[]; stride: number; col0: number }
+function barWindow(bars: Bar[], width: number): BarWindow {
+  const stride = bars.length * BAR_STRIDE > width ? 1 : BAR_STRIDE
+  const slots = Math.max(1, Math.min(bars.length, Math.floor((width - 1) / stride) + 1))
+  const shown = bars.slice(-slots)
+  return { bars: shown, stride, col0: width - ((shown.length - 1) * stride + 1) }
+}
+
+type Scale = { hi: number; lo: number }
+/** the plotted range: the bars plus the reference prices, so 昨結 and the last price are always on scale */
+function priceScale(bars: Bar[], anchors: number[]): Scale {
+  let hi = -Infinity
+  let lo = Infinity
+  for (const [, bh, bl] of bars) {
+    if (bh > hi) hi = bh
+    if (bl < lo) lo = bl
+  }
+  for (const a of anchors) {
+    if (!(a > 0)) continue
+    if (a > hi) hi = a
+    if (a < lo) lo = a
+  }
+  return { hi, lo }
+}
+/** price -> pixel row over `levels` pixels, 0 at the top */
+function toPixel(sc: Scale, levels: number, price: number): number {
+  const span = sc.hi - sc.lo || 1
+  return Math.min(levels - 1, Math.max(0, Math.round(((sc.hi - price) / span) * (levels - 1))))
+}
+
+/** [column][pixel row] colours; a hole is an unlit pixel */
+type Pixels = (string | undefined)[][]
+function blankPixels(width: number, levels: number): Pixels {
+  return Array.from({ length: width }, () => Array.from({ length: levels }, () => undefined))
+}
+/** writes two pixel rows per cell over `under`, leaving unlit cells as they were */
+function halfBlocks(px: Pixels, rows: Cell[][]): void {
+  for (let c = 0; c < px.length; c++) {
+    for (let r = 0; r < rows.length; r++) {
+      const top = px[c][2 * r]
+      const bot = px[c][2 * r + 1]
+      if (top && bot) rows[r][c] = top === bot ? { ch: '█', fg: top } : { ch: '▀', fg: top, bg: bot }
+      else if (top) rows[r][c] = { ch: '▀', fg: top }
+      else if (bot) rows[r][c] = { ch: '▄', fg: bot }
+    }
+  }
+}
+
+function candlePixels(win: BarWindow, market: MarketId, sc: Scale, width: number, plotRows: number): Pixels {
+  const levels = plotRows * 2
+  const px = blankPixels(width, levels)
+  for (let i = 0; i < win.bars.length; i++) {
+    const c = win.col0 + i * win.stride
+    const [o, bh, bl, cl] = win.bars[i]
+    const body = cl === o ? FLAT : tone(market, cl - o)
+    const wick = darken(body)
+    for (let p = toPixel(sc, levels, bh); p <= toPixel(sc, levels, bl); p++) px[c][p] = wick
+    for (let p = toPixel(sc, levels, Math.max(o, cl)); p <= toPixel(sc, levels, Math.min(o, cl)); p++) px[c][p] = body
+  }
+  return px
+}
+
+/** each bar's volume as a 2-row half-block histogram in the bar's tone */
+function volumePixels(win: BarWindow, market: MarketId, width: number): { px: Pixels; max: number } {
+  const levels = VOLUME_ROWS * 2
+  const px = blankPixels(width, levels)
+  let max = 0
+  for (const bar of win.bars) max = Math.max(max, bar[4] ?? 0)
+  for (let i = 0; i < win.bars.length; i++) {
+    const [o, , , cl, v] = win.bars[i]
+    if (!v || !max) continue
+    const c = win.col0 + i * win.stride
+    const color = cl === o ? FLAT : tone(market, cl - o)
+    const lit = Math.max(1, Math.round((v / max) * levels))
+    for (let p = levels - lit; p < levels; p++) px[c][p] = color
+  }
+  return { px, max }
+}
+
+// braille: 2 dot columns x 4 dot rows per cell, so 16 rows are 52 levels for the line
+const BRAILLE_BITS = [
+  [0x01, 0x08],
+  [0x02, 0x10],
+  [0x04, 0x20],
+  [0x40, 0x80],
+]
+/**
+ * The 曲線 mode: each bar's close as a continuous braille line, the area
+ * between the line and 昨結 shaded in the row's tone. `refRow` is 昨結's
+ * cell row; a cell the line runs through keeps the shade under its dots.
+ */
+function lineCells(
+  win: BarWindow,
+  sc: Scale,
+  width: number,
+  plotRows: number,
+  color: string,
+  refRow: number,
+  rows: Cell[][],
+): void {
+  const levels = plotRows * 4
+  const bits = new Uint8Array(width * plotRows)
+  const lineRow: number[] = Array.from({ length: width }, () => -1)
+  const dot = (x: number, y: number) => {
+    const c = Math.floor(x / 2)
+    const r = Math.floor(y / 4)
+    if (c < 0 || c >= width || r < 0 || r >= plotRows) return
+    bits[r * width + c] |= BRAILLE_BITS[y % 4][x % 2]
+    // the shade reaches from the line's lowest dot in this column toward 昨結
+    if (lineRow[c] < 0 || Math.abs(r - refRow) < Math.abs(lineRow[c] - refRow)) lineRow[c] = r
+  }
+  const pts = win.bars.map((bar, i) => ({ x: (win.col0 + i * win.stride) * 2 + 1, y: toPixel(sc, levels, bar[3]) }))
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i]
+    const b = pts[i + 1] ?? a
+    for (let x = a.x; x <= b.x; x++) {
+      const t0 = b.x === a.x ? 0 : (x - a.x) / (b.x - a.x)
+      const t1 = b.x === a.x ? 0 : Math.min(1, (x + 1 - a.x) / (b.x - a.x))
+      const y0 = Math.round(a.y + (b.y - a.y) * t0)
+      const y1 = x === b.x ? y0 : Math.round(a.y + (b.y - a.y) * t1)
+      for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++) dot(x, y)
+    }
+  }
+  const shade = shadeOf(color)
+  for (let c = 0; c < width; c++) {
+    const lr = lineRow[c]
+    if (lr < 0) continue
+    const from = Math.min(lr, refRow + (lr < refRow ? 1 : 0))
+    const to = Math.max(lr, refRow - (lr > refRow ? 1 : 0))
+    for (let r = from; r <= to; r++) if (r !== refRow) rows[r][c] = { ...rows[r][c], bg: shade }
+    for (let r = 0; r < plotRows; r++) {
+      const b = bits[r * width + c]
+      if (b) rows[r][c] = { ch: String.fromCodePoint(0x2800 + b), fg: color, bg: rows[r][c].bg }
+    }
+  }
+}
+
+type AxisLabel = { row: number; text: string; fg: string; bg?: string }
+/**
+ * The price axis: the last price as a filled tag, 昨結 in its own colour,
+ * then hi / lo and a label every ~4 rows between - placed only where the
+ * row is free and the text stays strictly decreasing top to bottom, so two
+ * rows can never read the same number (the 47,428-twice screenshot).
+ */
+function priceAxis(
+  sc: Scale,
+  plotRows: number,
+  perRow: number,
+  digits: number,
+  prevClose: number,
+  price: number,
+  color: string,
+): AxisLabel[] {
+  const rowOf = (p: number) => Math.floor(toPixel(sc, plotRows * perRow, p) / perRow)
+  const value = (text: string) => Number(text.replace(/,/g, ''))
+  const out: AxisLabel[] = []
+  const place = (row: number, text: string, fg: string, bg?: string) => {
+    for (const l of out) {
+      if (l.row === row || l.text === text) return
+      if (l.row < row ? value(l.text) <= value(text) : value(l.text) >= value(text)) return
+    }
+    out.push({ row, text, fg, bg })
+  }
+  if (price > 0) place(rowOf(price), thousands(price, digits), TAG_INK, color)
+  if (prevClose > 0) place(rowOf(prevClose), thousands(prevClose, digits), REF_LABEL)
+  const steps = Math.max(1, Math.round((plotRows - 1) / 4))
+  const span = sc.hi - sc.lo
+  for (let i = 0; i <= steps; i++) {
+    const row = Math.round((i * (plotRows - 1)) / steps)
+    place(row, thousands(sc.hi - (span * row) / (plotRows - 1), digits), DIM)
+  }
+  return out
+}
+
+type Tick = { col: number; label: string }
+type TimeAxis = { ticks: Tick[]; boundaries: number[] }
+/** "HH:MM" of a bucket start in the market's own clock */
+function hhmmAt(ms: number, offsetHours: number): string {
+  const d = new Date(ms + offsetHours * 3_600_000)
+  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
+}
+/**
+ * Ticks from the bars' own timestamps: the first and last bar, each session
+ * boundary (a gap longer than a bar and an hour - 夜盤→日盤, 日盤→夜盤, a
+ * day change), then round times at the coarsest step whose labels do not
+ * collide. Bars without a stamp get no axis here (the caller keeps the
+ * session axis instead).
+ */
+function timeAxis(win: BarWindow, width: number, offsetHours: number): TimeAxis | undefined {
+  const stamps = win.bars.map(b => b[5])
+  if (stamps.length === 0 || stamps.some(t => !(typeof t === 'number' && t > 0))) return undefined
+  const ts = stamps as number[]
+  let interval = Infinity
+  for (let i = 1; i < ts.length; i++) if (ts[i] > ts[i - 1]) interval = Math.min(interval, ts[i] - ts[i - 1])
+  if (!Number.isFinite(interval)) interval = 5 * 60_000
+  const colOf = (i: number) => win.col0 + i * win.stride
+  const boundaries: number[] = []
+  for (let i = 1; i < ts.length; i++) if (ts[i] - ts[i - 1] > Math.max(1.5 * interval, 3_600_000)) boundaries.push(i)
+  const step = [5, 10, 15, 30, 60, 120, 240, 480, 720, 1440].find(
+    m => m * 60_000 >= interval && (m * 60_000 * win.stride) / interval >= TICK_GAP,
+  )
+  const wanted: number[] = [0, ts.length - 1, ...boundaries]
+  if (step) {
+    for (let i = 0; i < ts.length; i++) {
+      const d = new Date(ts[i] + offsetHours * 3_600_000)
+      if ((d.getUTCHours() * 60 + d.getUTCMinutes()) % step === 0) wanted.push(i)
+    }
+  }
+  const ticks: Tick[] = []
+  for (const i of wanted) {
+    const col = Math.min(colOf(i), width - LABEL_W)
+    if (ticks.some(t => Math.abs(t.col - col) < LABEL_W + 1)) continue
+    ticks.push({ col, label: hhmmAt(ts[i], offsetHours) })
+  }
+  return { ticks, boundaries: boundaries.map(i => colOf(i) - (win.stride - 1)) }
+}
+
+// halfway between two "HH:MM" strings, for the session axis bars without stamps fall back to
 function midTime(from: string, to: string): string {
   const mins = (hm: string) => {
-    const [h, m] = hm.split(':')
-    return Number(h) * 60 + Number(m)
+    const [hh, mm] = hm.split(':')
+    return Number(hh) * 60 + Number(mm)
   }
   // a 夜盤 (15:00-05:00) runs past midnight, so its end is a day later
   const end = mins(to) <= mins(from) ? mins(to) + 1440 : mins(to)
   const mid = Math.floor((mins(from) + end) / 2) % 1440
   return `${String(Math.floor(mid / 60)).padStart(2, '0')}:${String(mid % 60).padStart(2, '0')}`
+}
+
+/** volume for the title readout and the volume axis: whole numbers, millions past that */
+function volText(v: number): string {
+  return v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : thousands(v, 0)
 }
 
 /**
@@ -1045,7 +1232,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
   const lay = layout(surface.columns || 80)
   const open = props.phase === 'open'
   const rows = Array.from(
-    { length: props.view === 'chart' ? CHART_ROWS : props.view === 'pnl' ? PNL_ROWS : TABLE_ROWS },
+    { length: props.view === 'chart' ? Math.max(8, props.chartRows) : props.view === 'pnl' ? PNL_ROWS : TABLE_ROWS },
     () => new Row(),
   )
   const quotes = props.quotes.slice(0, MAX_TABLE_QUOTES)
@@ -1083,51 +1270,104 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     const q = quotes[focus]
     const color = tone(props.market, q.pct)
     const digits = q.decimals ?? 2
-    const plotW = Math.max(10, lay.pctRight - 2 - AXIS_W)
+    const width = surface.columns || 80
+    const chartRight = Math.max(lay.pctRight, Math.min(width - 1, CHART_RIGHT_CAP))
+    const plotW = Math.max(10, chartRight - lay.badgeCol - AXIS_W)
+    const bars = q.bars ?? []
+    const hasVolume = bars.some(b => (b[4] ?? 0) > 0)
+    const geom = chartGeom(rows.length, hasVolume)
+    const win = barWindow(bars, plotW)
+    const last = bars[bars.length - 1]
 
-    // row 0: which symbol this is, its price, what the bars are
+    // row 0: which symbol this is, its price, the last bar, what the bars are
     const title = rows[0]
     title.put(lay.symCol, q.code, SYMBOL)
     title.put(title.width() + 1, q.name, DIM)
     title.put(title.width() + 2, thousands(q.price, digits), WHITE)
     const arrow = q.pct > 0 ? '▲' : q.pct < 0 ? '▼' : '-'
     title.put(title.width() + 1, `${arrow} ${signed(q.change, digits)} (${signed(q.pct)}%)`, color)
-    // a contract name plus its resolved month (台指近 (TXFJ6)) leaves no room
-    // for the whole tag at the 74-column cap, so it sheds the badge first and
-    // the bar label last - the same "least essential piece first" rule as
-    // the table footer - rather than vanish entirely
+    const readout = last
+      ? `開 ${thousands(last[0], digits)} 高 ${thousands(last[1], digits)} 低 ${thousands(last[2], digits)} 收 ${thousands(last[3], digits)}` +
+        (last[4] !== undefined ? ` 量 ${volText(last[4])}` : '')
+      : ''
+    // A contract name plus its month leaves no room for everything at 100
+    // columns, so the row sheds in order: the badge, the readout, the bar
+    // label - the least essential piece first, as the table footer does.
     const badge = `${props.marketLabel} ${open ? `${SUN} 盤中` : `${MOON} 休市`}`
-    for (const tag of [`${props.barLabel} · ${badge}`, props.barLabel, badge]) {
-      if (title.putRightIfFits(lay.pctRight, tag, DIM)) break
+    const ladder: [string, string][] = [
+      [readout, `${props.barLabel} · ${badge}`],
+      [readout, props.barLabel],
+      ['', `${props.barLabel} · ${badge}`],
+      ['', props.barLabel],
+      ['', badge],
+    ]
+    for (const [note, tag] of ladder) {
+      if (note && title.width() + 2 + dispWidth(note) + 1 + dispWidth(tag) > chartRight) continue
+      if (note) title.put(title.width() + 2, note, DIM)
+      if (title.putRightIfFits(chartRight, tag, DIM)) break
     }
 
-    // rows 1..6: the candles, with a price axis on the right
-    const candles = candleCells(q.bars ?? [], props.market, q.prevClose, plotW, false)
-    for (let j = 0; j < CHART_PLOT_ROWS; j++) rows[1 + j].putCells(lay.badgeCol, candles.rows[j])
-    if ((q.bars?.length ?? 0) === 0) {
-      rows[1 + Math.floor(CHART_PLOT_ROWS / 2)].put(lay.badgeCol + 2, '沒有 K 棒資料（報價檔未提供 bars）', DIM)
+    // rows 1..plot: the plot, with the price axis on the right
+    const plotCells: Cell[][] = Array.from({ length: geom.plot }, () =>
+      Array.from({ length: plotW }, () => ({ ch: ' ' }) as Cell),
+    )
+    const axis = rows[geom.axisRow]
+    if (bars.length === 0) {
+      rows[1 + Math.floor(geom.plot / 2)].put(lay.badgeCol + 2, '沒有 K 棒資料（報價檔未提供 bars）', DIM)
     } else {
-      rows[1].putRight(lay.pctRight, thousands(candles.hi, digits), DIM)
-      rows[1 + Math.floor(CHART_PLOT_ROWS / 2)].putRight(lay.pctRight, thousands(q.prevClose, digits), '#5a6370')
-      rows[CHART_PLOT_ROWS].putRight(lay.pctRight, thousands(candles.lo, digits), DIM)
+      const sc = priceScale(win.bars, [q.prevClose, q.price])
+      const perRow = props.chartMode === 'line' ? 4 : 2
+      const refRow = Math.floor(toPixel(sc, geom.plot * perRow, q.prevClose) / perRow)
+      const time = timeAxis(win, plotW, props.utcOffsetHours)
+      // 昨結 and the session rules go under the bars, which overwrite them
+      if (q.prevClose > 0) for (let c = 0; c < plotW; c++) plotCells[refRow][c] = { ch: '┈', fg: REF_LINE }
+      for (const c of time?.boundaries ?? []) {
+        if (c < 0 || c >= plotW) continue
+        for (let r = 0; r < geom.plot; r++) plotCells[r][c] = { ch: '│', fg: REF_LINE }
+      }
+      if (props.chartMode === 'line') lineCells(win, sc, plotW, geom.plot, color, refRow, plotCells)
+      else halfBlocks(candlePixels(win, props.market, sc, plotW, geom.plot), plotCells)
+      for (let j = 0; j < geom.plot; j++) rows[1 + j].putCells(lay.badgeCol, plotCells[j])
+      for (const l of priceAxis(sc, geom.plot, perRow, digits, q.prevClose, q.price, color)) {
+        rows[1 + l.row].putRight(chartRight, l.text, l.fg, l.bg)
+      }
+
+      // the volume rows, under the axis, sharing the bars' columns
+      if (geom.volume > 0) {
+        const vol = volumePixels(win, props.market, plotW)
+        const volCells: Cell[][] = Array.from({ length: geom.volume }, () =>
+          Array.from({ length: plotW }, () => ({ ch: ' ' }) as Cell),
+        )
+        for (const c of time?.boundaries ?? []) {
+          if (c >= 0 && c < plotW) for (let r = 0; r < geom.volume; r++) volCells[r][c] = { ch: '│', fg: REF_LINE }
+        }
+        halfBlocks(vol.px, volCells)
+        for (let j = 0; j < geom.volume; j++) rows[geom.axisRow + 1 + j].putCells(lay.badgeCol, volCells[j])
+        rows[geom.axisRow + 1].putRight(chartRight, `量 ${volText(vol.max)}`, DIM)
+      }
     }
 
-    // row 6: the session's time axis. Row.put only appends, so the axis is
-    // composed left to right rather than written at absolute columns.
-    const axis = rows[6]
-    axis.put(lay.badgeCol, props.sessionOpen, DIM)
-    axis.put(axis.width(), '─'.repeat(Math.max(1, Math.floor(plotW / 2) - 7)), RULE)
-    axis.put(axis.width(), midTime(props.sessionOpen, props.sessionClose), DIM)
-    axis.put(axis.width(), '─'.repeat(Math.max(1, lay.badgeCol + plotW - 5 - axis.width())), RULE)
-    axis.put(axis.width(), props.sessionClose, DIM)
+    // the time axis: the bars' own stamps when they carry them, else the session's bounds
+    const time = bars.length > 0 ? timeAxis(win, plotW, props.utcOffsetHours) : undefined
+    const axisCells: Cell[] = Array.from({ length: plotW }, () => ({ ch: '─', fg: RULE }) as Cell)
+    const label = (col: number, text: string) => {
+      const at = Math.max(0, Math.min(plotW - dispWidth(text), col))
+      Array.from(text).forEach((ch, i) => (axisCells[at + i] = { ch, fg: DIM }))
+    }
+    if (time) for (const t of time.ticks) label(t.col, t.label)
+    else {
+      label(0, props.sessionOpen)
+      label(Math.floor((plotW - LABEL_W) / 2), midTime(props.sessionOpen, props.sessionClose))
+      label(plotW - LABEL_W, props.sessionClose)
+    }
+    axis.putCells(lay.badgeCol, axisCells)
 
-    // row 7: where you are in the list, how to move, and the data source
-    const foot = rows[7]
+    // the last row: where you are in the list, and the data source
+    const foot = rows[geom.footRow]
     foot.put(lay.symCol, `${quotes.length} 檔中第 ${focus + 1} 檔`, DIM)
-    // The chart view's own buttons now sit in the button row above, left-
-    // aligned and named for what they do, so this line no longer has to
-    // explain that one button means three things.
-    signOff(foot, lay.pctRight)
+    // The chart view's own buttons sit in the button row above, left-aligned
+    // and named for what they do, so this line does not have to explain them.
+    signOff(foot, chartRight)
     // the table is not on screen here, so there is nothing under the pointer
     // to pick; the named buttons above the band move between symbols instead
     picker.hit = () => undefined

@@ -54,6 +54,7 @@ const TXF_60 = [
   ...walk(47400, 8, 60 * MIN, taipei(17, 15, 0), 60, 0),
 ]
 const SRF_5 = walk(109.4, 40, 5 * MIN, taipei(17, 19, 40), 0.25, 2)
+const SRF_PREV = Number((SRF_5[SRF_5.length - 1][3] + 0.3).toFixed(2)) // a down day, so it sorts behind TXFR1
 const futuresFile = asOf => ({
   asOf,
   dataAt: asOf - 5_000,
@@ -62,11 +63,11 @@ const futuresFile = asOf => ({
   barLabel: '5 分 K（永豐）',
   quotes: {
     TXFR1: {
-      price: 47557, prevClose: 47428, name: '臺股期貨 近月', multiplier: 200, decimals: 0, resolved: 'TXFJ6',
+      price: TXF_5[TXF_5.length - 1][3], prevClose: 47428, name: '臺股期貨 近月', multiplier: 200, decimals: 0, resolved: 'TXFJ6',
       bars: TXF_5,
       barsBy: { 1: TXF_1, 5: TXF_5, 15: TXF_15, 60: TXF_60 },
     },
-    SRFJ6: { price: 108.5, prevClose: 108.3, name: '小型元大台灣50ETF期貨 202610', multiplier: 1000, decimals: 2, bars: SRF_5 },
+    SRFJ6: { price: SRF_5[SRF_5.length - 1][3], prevClose: SRF_PREV, name: '小型元大台灣50ETF期貨 202610', multiplier: 1000, decimals: 2, bars: SRF_5 },
   },
 })
 const writeFutures = async (dir, asOf) => {
@@ -90,6 +91,13 @@ async function boot(dir, tag) {
     session: { cwd: async () => dir },
     plugin: { root: dir },
     process: { run: async () => { throw new Error('chart-view: no spawn expected') } },
+  }
+  // a previous run's setConfig may have left chartRows behind in a reused fixture dir
+  {
+    const cfgPath = `${dir}/.claude/stock-band.json`
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8'))
+    delete cfg.chartRows
+    await writeFile(cfgPath, JSON.stringify(cfg, null, 2))
   }
   const handlers = new Map()
   const { register } = await import(`${regPath}?${tag}`)
@@ -148,6 +156,7 @@ const render = props => {
 }
 const textOf = rows => rows.map(r => r.map(s => s.text).join(''))
 const show = lines => { for (const l of lines) console.log('|' + l + '|') }
+const grouped = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
 const CANDLE = /[▀▄█]/
 const BRAILLE = /[\u2800-\u28ff]/
 /** columns (0-based display cols, ASCII-only rows) that hold a candle glyph in any of `rows` */
@@ -198,8 +207,9 @@ ok(strictlyDecreasing(ys), `y labels strictly decreasing top to bottom: ${ys.joi
 ok(ys.slice(1, -1).every(v => v < ys[0] && v > ys[ys.length - 1]), `every middle label lies strictly between hi ${ys[0]} and lo ${ys[ys.length - 1]}`)
 ok(ys.includes(47428), '昨結 47,428 is one of the axis labels')
 ok(PLOT.some(l => l.includes('┈')), 'the 昨結 dotted line runs across the plot')
-ok(ys.includes(47557), 'the last price 47,557 is tagged on the axis')
-const tagSpan = rows.slice(1, 12).flat().find(s => s.text.includes('47,557'))
+const PRICE = TXF_5[TXF_5.length - 1][3]
+ok(ys.includes(PRICE), `the last price ${PRICE} is tagged on the axis`)
+const tagSpan = rows.slice(1, 12).flat().find(s => s.text.includes(grouped(PRICE)))
 ok(tagSpan?.bg !== undefined, `the last-price tag is drawn as a filled tag (bg set): ${JSON.stringify(tagSpan)}`)
 ok(AXIS.includes('19:40') && AXIS.includes('22:55'), `first and last bar labelled on the x axis: ${AXIS.trim()}`)
 ok(AXIS.includes('21:00') && AXIS.includes('22:00'), `round-time ticks on the x axis: ${AXIS.trim()}`)
@@ -211,7 +221,6 @@ ok(cols5.length === 40, `40 bars -> 40 candle columns: ${cols5.length}`)
 ok(cols5.every((c, i) => i === 0 || c - cols5[i - 1] === 2), 'two columns apart while they fit (stride 2)')
 ok(cols5[cols5.length - 1] === candleCols(VOL)[candleCols(VOL).length - 1], 'volume bars sit under their candles')
 const last5 = TXF_5[TXF_5.length - 1]
-const grouped = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
 const readout = `開 ${grouped(last5[0])} 高 ${grouped(last5[1])} 低 ${grouped(last5[2])} 收 ${grouped(last5[3])} 量 ${last5[4]}`
 ok((lines[0] ?? '').includes(readout), `title row reads out the last bar: "${readout}" in "${(lines[0] ?? '').trim()}"`)
 ok((lines[0] ?? '').includes('5 分 K（永豐）'), `title keeps the bar label: ${(lines[0] ?? '').trim()}`)
@@ -262,7 +271,7 @@ ok(q.chartMode === 'line', `chartMode line: ${q.chartMode}`)
 ok(btns.some(b => b.label === '[曲線]') && btns.some(b => b.label === 'K線'), '曲線 marked, K線 plain')
 ok(lines.slice(1, 12).some(l => BRAILLE.test(l)), 'the price line is drawn with braille cells')
 ok(!lines.slice(1, 12).some(l => CANDLE.test(l)), 'no candle glyphs in 曲線 mode')
-ok(rows.slice(1, 12).flat().some(s => s.bg !== undefined && !s.text.includes('47,')), 'the area to 昨結 is shaded (bg on plot cells)')
+ok(rows.slice(1, 12).flat().some(s => s.bg !== undefined && !/\d/.test(s.text)), 'the area to 昨結 is shaded (bg on plot cells)')
 ok(lines.slice(1, 12).some(l => l.includes('┈')), '昨結 dotted line still there in 曲線 mode')
 ok(lines.slice(13, 15).some(l => CANDLE.test(l)), 'volume rows still drawn in 曲線 mode')
 ys = axisNumbers(lines.slice(1, 12))
@@ -294,10 +303,10 @@ btns.find(b => b.label.startsWith('下一檔 ▶')).press()
 ;({ props: q, btns } = await band.draw())
 lines = textOf(render(q))
 ok(q.quotes[q.focus]?.code === 'SRFJ6', `next symbol is SRFJ6: ${q.quotes[q.focus]?.code}`)
-ok(!btns.some(b => /分\]?$/.test(b.label)), `no timeframe buttons for a row without barsBy: ${btns.map(b => b.label).join(' ')}`)
+ok(!btns.some(b => /^\[?\d+分\]?$/.test(b.label)), `no timeframe buttons for a row without barsBy: ${btns.map(b => b.label).join(' ')}`)
 ok(q.quotes[q.focus]?.bars?.length === 40 && q.barLabel === '5 分 K（永豐）', 'SRFJ6 draws its own 5 分 bars')
 ys = axisNumbers(lines.slice(1, 12))
-ok(ys.includes(108.3) && new Set(ys).size === ys.length && strictlyDecreasing(ys), `2-decimal axis, unique and decreasing: ${ys.join(' > ')}`)
+ok(ys.includes(SRF_PREV) && new Set(ys).size === ys.length && strictlyDecreasing(ys), `2-decimal axis with 昨結 ${SRF_PREV}, unique and decreasing: ${ys.join(' > ')}`)
 btns.find(b => b.label === '◀ 上一檔').press()
 
 // --- height: the maxRows clamp and chartRows config ---------------------------------
@@ -333,12 +342,15 @@ ok(lines.length === 11 && (lines[9] ?? '').includes('19:40') && !CANDLE.test(lin
 
 // ============================================================================
 // --- the stock side: 4-element bars, no ts, no barsBy -------------------------------
-{
-  const quotesPath = `${twDir}/.claude/stock-quotes.json`
-  const raw = JSON.parse(await readFile(quotesPath, 'utf8'))
-  raw.asOf = CLOCK - 10_000
-  await writeFile(quotesPath, JSON.stringify(raw, null, 2))
-}
+// the old [o, h, l, c] shape, written here so a rerun starts from the same file
+const TSMC_BARS = [
+  [1165.0, 1172.0, 1164.0, 1170.5], [1170.5, 1176.0, 1168.0, 1174.0], [1174.0, 1183.0, 1173.5, 1181.5], [1181.5, 1190.0, 1180.0, 1188.0],
+  [1188.0, 1191.0, 1184.0, 1185.0], [1185.0, 1189.5, 1183.0, 1189.0], [1189.0, 1192.0, 1186.5, 1187.5], [1187.5, 1190.0, 1185.0, 1188.0],
+]
+const twQuotesPath = `${twDir}/.claude/stock-quotes.json`
+const writeTw = bars =>
+  writeFile(twQuotesPath, JSON.stringify({ asOf: CLOCK - 10_000, market: 'tw', quotes: { 2330: { price: 1188.0, prevClose: 1165.0, name: '台積電', ...(bars ? { bars } : {}) } } }, null, 2))
+await writeTw(TSMC_BARS)
 const tw = await boot(twDir, 'tw')
 ;({ props: q, btns } = await tw.draw())
 btns.find(b => b.label === '趨勢圖').press()
@@ -348,7 +360,7 @@ console.log(`tw chart: focus=${q.quotes[q.focus]?.code} bars=${q.quotes[q.focus]
 console.log('buttons:', btns.map(b => `[${b.label}]`).join(' '))
 show(lines)
 ok(q.market === 'tw' && q.quotes[q.focus]?.bars?.length === 8, `2330 has its 8 file bars: ${q.quotes[q.focus]?.bars?.length}`)
-ok(!btns.some(b => /分\]?$/.test(b.label)), 'a stock row shows no timeframe buttons')
+ok(!btns.some(b => /^\[?\d+分\]?$/.test(b.label)), 'a stock row shows no timeframe buttons')
 ok(btns.some(b => b.label === '[K線]'), 'the K線 / 曲線 pair is still there for a stock')
 ok(lines.length === 16, `16 rows for a stock too: ${lines.length}`)
 ok((lines[14] ?? '').includes('09:00') && (lines[14] ?? '').includes('13:30'), `bars without ts fall back to the session axis: ${(lines[14] ?? '').trim()}`)
@@ -359,18 +371,13 @@ ok(undefinedPaths(q).length === 0, 'no undefined in the stock chart props')
 
 // no bars at all: the control row is exactly what it was before #12
 const before = btns.map(b => b.label)
-{
-  const quotesPath = `${twDir}/.claude/stock-quotes.json`
-  const raw = JSON.parse(await readFile(quotesPath, 'utf8'))
-  delete raw.quotes['2330'].bars
-  await writeFile(quotesPath, JSON.stringify(raw, null, 2))
-}
+await writeTw(undefined)
 await tw.poll()
 ;({ props: q, btns } = await tw.draw())
 lines = textOf(render(q))
 console.log('buttons (no bars):', btns.map(b => `[${b.label}]`).join(' '))
 ok((q.quotes[q.focus]?.bars?.length ?? 0) === 0 && lines.some(l => l.includes('沒有 K 棒資料')), 'no bars: the notice is drawn')
-const legacy = before.filter(l => !/分\]?$/.test(l) && l !== '[K線]' && l !== '曲線' && l !== 'K線' && l !== '[曲線]')
+const legacy = before.filter(l => !/^\[?\d+分\]?$/.test(l) && l !== '[K線]' && l !== '曲線' && l !== 'K線' && l !== '[曲線]')
 ok(JSON.stringify(btns.map(b => b.label)) === JSON.stringify(legacy), `no bars -> no chart controls, the control row is the pre-#12 one: ${btns.map(b => b.label).join(' ')}`)
 
 done()
