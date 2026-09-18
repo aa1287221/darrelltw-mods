@@ -195,25 +195,46 @@ highlighted top mover:
   once a Button already holds the focus ring, which buys nothing over Enter,
   and a digit hotkey would eat a prompt that starts with that digit — every
   button here is a click, or focus then Enter.
-- **8 rows below that** in the table (header, rule, five quote rows, footer);
-  the chart view is `chartRows` tall (default 16) with its own title row,
-  since that title names the symbol being charted rather than the market. **Price gets the widest,
-  brightest column** in the single-column table, with its own breathing room;
-  change$ and change% are right-anchored after it, capped at column 74. Under
-  ~46 columns the name goes too.
-- **Two columns once the watchlist holds more than five symbols** — `columns` in
-  the config controls it (see [Configure](#configure)). Each half only carries
-  代號/名稱/價格/變更% (變更$ has no room next to a second symbol), filled
-  column-major off the current sort: the left half is ranks 1–5 on the page,
-  the right half ranks 6–10, so the biggest gainers head the left column and
-  the biggest fallers end the right one under the default change% sort. A
-  6-column gutter separates the halves so 變更% and the next 代號 do not read
+- **8 rows below that** in the table (header, rule, five quote rows, footer)
+  when the band has room for them; the chart view is `chartRows` tall
+  (default 16) with its own title row, since that title names the symbol
+  being charted rather than the market. **Price gets the widest, brightest
+  column** in the single-column table, with its own breathing room; change$
+  and change% are right-anchored after it, capped at column 74. Under ~46
+  columns the name goes too.
+- **小終端機 — a short band fits itself.** The host says how many rows the
+  band may take (`maxRows`: the terminal's height, or what the bottom slot
+  has left in fullscreen), and every view sizes itself to it instead of
+  being windowed with a `↓ n more` row. Below the button row the table keeps
+  header + rule + quotes + footer, with the quote rows shrinking from 5 down
+  to 2 (a 7-row terminal shows 3); at 5 and 4 rows the column titles move
+  onto the rule and the footer's clock and source tag fold into the button
+  row, so a 5-row band still shows 3 quotes and a 4-row one 2; at 3 rows the
+  table becomes a **one-line ticker** of `代號 價格 ▲pct` cells (as many as
+  fit, 28 columns each) that rotates through the list every `pageMs` with the
+  same page-turn flap, `翻頁` still there and `趨勢圖` gone. `翻頁 n/m` follows
+  the smaller page throughout. 損益 shrinks the same way down to one holding
+  (title, header, holding, totals) and the chart to 8 rows; a band too short
+  for either draws the ticker instead, and the view comes back the moment
+  the band can hold it. A very wide terminal spends its width instead of its
+  height — see the next point.
+- **Two, three or four columns once the watchlist outgrows the quote rows** —
+  `columns` in the config controls it (see [Configure](#configure)): `auto`
+  picks the fewest columns that hold the list in the rows the band has, as
+  many as the width allows, so the 20-symbol lists draw two columns on a
+  ~100-column terminal, three from 118 and four from 159 — where all 20 fit
+  in 5 rows with no paging. Each column only carries 代號/名稱/價格/變更%
+  (變更$ has no room next to a second symbol), filled column-major off the
+  current sort: the first column is the top ranks on the page and the last
+  the bottom ones, so the biggest gainers head the first column and the
+  biggest fallers end the last one under the default change% sort. A
+  6-column gutter separates the columns so 變更% and the next 代號 do not read
   as one run of digits, and the two-column table caps at 104 columns (the
   single-column one caps at 74). **Below 77 columns it falls back to the
-  single-column table instead of squeezing** — a half needs at least 35
+  single-column table instead of squeezing** — a column needs at least 35
   columns (代號 + a name + 價格 + 變更%; see `MIN_HALF_WIDTH` in
   `hooks/board.tsx`), and two of those plus the gutter is 76 out of
-  `width - 1`.
+  `width - 1`; each further column costs another 41.
 - **Rows are sorted by change%** (hence `↓變更%` in the header); the biggest
   mover gets the highlighted row in the single-column table. Two-column mode
   drops the highlight — a row there can hold two unrelated symbols, so there
@@ -379,7 +400,7 @@ who opens it keeps their own preference — see
 | `chartRows` | `16` | how tall the trend view is, in rows (min 8; clamped to the band's `maxRows − 2` at render so it never scrolls). `8` is the old one-screen layout; under 12 the volume rows go — see [The trend view](#the-trend-view-k-bars) |
 | `sort` | `"change"` | `change` = by change% desc, `list` = your order |
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
-| `columns` | `"auto"` | how many symbols a row draws: `auto` = 1 when the watchlist is 5 symbols or fewer, 2 for 6 or more; `1`/`2` force it (the board still falls back to 1 if the terminal is too narrow — see [What the band shows](#what-the-band-shows)) |
+| `columns` | `"auto"` | how many symbols a row draws: `auto` = the fewest of 1–4 that hold the watchlist in the band's quote rows, as many as the terminal's width allows (1 when the list is 5 symbols or fewer; 2 from 77 columns, 3 from 118, 4 from 159); `1`/`2`/`3`/`4` force it, capped by the same width rule (a 74-column terminal draws one column whatever this says) — see [What the band shows](#what-the-band-shows) |
 | `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only. `tf` is not a value here — a non-empty `futures` list feeds itself automatically whenever `feed` is not `"off"`, on top of whatever this says, since it costs no HTTP request — see [Taiwan futures (tf)](#taiwan-futures-tf) |
 | `twSources` | `["yahoo"]` | Taiwan's routes, in preference order — the band tries the first and falls through to the next for a tick that one has nothing fresh for. `yahoo` = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `shioaji` = 永豐 real-time ticks, the band runs the fetcher itself — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher). A legacy `"twSource": "x"` (a single string) still works as an alias for `["x"]`. The shipped default never includes `shioaji` — put that in your own `~/.claude/stock-band.json` |
 | `shioaji` | `{ "python": "python3", "env": "~/.sinobon.env", "interval": 10 }` | read only when `"shioaji"` is somewhere in `twSources` — the interpreter, the env file holding `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` (`~` expands to `$HOME`), and seconds between snapshots |
@@ -389,9 +410,12 @@ who opens it keeps their own preference — see
 | `futures` | `[]` | Taiwan futures contracts to watch, `{ code, name? }` per entry — see [Taiwan futures (tf)](#taiwan-futures-tf) |
 | `holdings` | `{ "tw": [], "us": [] }` | manual positions for the 損益 view, `{ code, qty, cost }` per holding — the recommended place to hand-write your positions; add `"holdingsSource": "config"` to make this win over a fetched `stock-holdings.json` for a market where you want your own numbers to stick — see [Holdings and the 損益 view](#holdings-and-the-損益-view) |
 
-Both built-in lists are 20 symbols, so `columns` resolves to 2 and each page
-holds 10 (a single-column page holds 5). Past that the watchlist pages, and
-`翻頁` / the rule's page tag only show up once there is a second page.
+Both built-in lists are 20 symbols, so `columns` resolves to 2 on a
+~100-column terminal and each page holds 10 (a single-column page holds 5;
+three columns hold 15, four all 20). Past that the watchlist pages, and
+`翻頁` / the rule's page tag only show up once there is a second page. A
+short terminal has fewer quote rows and so smaller pages — see 小終端機 under
+[What the band shows](#what-the-band-shows).
 
 **Pressing `翻頁` restarts the auto-page countdown.** The page clock is a
 deadline measured from when the current page arrived, not an interval ticking
