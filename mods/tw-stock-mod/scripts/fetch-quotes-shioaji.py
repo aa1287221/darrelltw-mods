@@ -482,15 +482,16 @@ def futures_holding_row(position, contract) -> dict | None:
 
 def check_futures_pnl(position, contract) -> str | None:
     """The SDK's own `pnl` vs (last_price - price) * quantity * multiplier,
-    cross-checked rather than trusted. `abs_tol=1.0` absorbs float noise
-    from the multiplication chain, not a real mismatch."""
+    cross-checked rather than trusted. The SDK rounds its pnl to the dollar
+    (seen live: 195950.0 vs 195951.00000000017), so the tolerance is a
+    couple of dollars plus a hair of relative slack, not a real mismatch."""
     quantity = float(field(position, "quantity", 0) or 0)
     price = float(field(position, "price", 0) or 0)
     last_price = float(field(position, "last_price", 0) or 0)
     multiplier = float(field(contract, "multiplier", 1) or 1)
     expected = (last_price - price) * quantity * multiplier
     sdk_pnl = float(field(position, "pnl", 0) or 0)
-    if math.isclose(expected, sdk_pnl, rel_tol=0, abs_tol=1.0):
+    if math.isclose(expected, sdk_pnl, rel_tol=1e-6, abs_tol=2.0):
         return None
     code = field(position, "code", "?")
     return f"{code} pnl 不符：SDK={sdk_pnl}，算出={expected}"
