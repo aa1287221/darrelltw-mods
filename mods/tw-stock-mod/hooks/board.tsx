@@ -795,16 +795,11 @@ function pct(value: number): string {
 }
 
 // --- chart panel -----------------------------------------------------------
-// Half-block cells: two price levels per terminal row, so 16 rows are 22
-// levels. The first half-block attempt was rejected because a one-row body
-// and the wick above it merged into one same-colour blob; here a cell holds
-// two colours (`▀` with the top pixel as foreground and the bottom as
-// background), so the wick and the body stay distinct inside one cell.
+// Half-block cells, two levels per row. The first half-block attempt merged body
+// and wick into one blob; a two-colour cell (`▀`, fg top / bg bottom) keeps them apart.
 const AXIS_W = 10
 const BAR_STRIDE = 2 // one candle column + one gap column while they fit
-// the chart is not held to the table's 74-column cap: 120 bars one per
-// column plus the axis is what a wide terminal is for, and past that width
-// buys nothing
+// past 120 bars one per column plus the axis, more width buys nothing
 const CHART_RIGHT_CAP = 134
 const VOLUME_ROWS = 2
 const VOLUME_MIN_ROWS = 12 // under this the two volume rows would starve the plot
@@ -920,11 +915,7 @@ const BRAILLE_BITS = [
   [0x04, 0x20],
   [0x40, 0x80],
 ]
-/**
- * The 曲線 mode: each bar's close as a continuous braille line, the area
- * between the line and 昨結 shaded in the row's tone. `refRow` is 昨結's
- * cell row; a cell the line runs through keeps the shade under its dots.
- */
+/** 曲線: each close as a continuous braille line, the area to 昨結 (`refRow`) shaded */
 function lineCells(
   win: BarWindow,
   sc: Scale,
@@ -973,10 +964,8 @@ function lineCells(
 
 type AxisLabel = { row: number; text: string; fg: string; bg?: string }
 /**
- * The price axis: the last price as a filled tag, 昨結 in its own colour,
- * then hi / lo and a label every ~4 rows between - placed only where the
- * row is free and the text stays strictly decreasing top to bottom, so two
- * rows can never read the same number (the 47,428-twice screenshot).
+ * Price axis: last-price tag, 昨結, then hi / lo and a label every ~4 rows -
+ * one per row and strictly decreasing as text, so no two rows read the same (the 47,428-twice screenshot).
  */
 function priceAxis(
   sc: Scale,
@@ -1016,11 +1005,8 @@ function hhmmAt(ms: number, offsetHours: number): string {
   return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
 }
 /**
- * Ticks from the bars' own timestamps: the first and last bar, each session
- * boundary (a gap longer than a bar and an hour - 夜盤→日盤, 日盤→夜盤, a
- * day change), then round times at the coarsest step whose labels do not
- * collide. Bars without a stamp get no axis here (the caller keeps the
- * session axis instead).
+ * Ticks from the bars' own stamps: first and last bar, each session boundary (a gap
+ * over a bar and an hour), then round times at the finest step whose labels do not collide.
  */
 function timeAxis(win: BarWindow, width: number, offsetHours: number): TimeAxis | undefined {
   const stamps = win.bars.map(b => b[5])
@@ -1051,7 +1037,7 @@ function timeAxis(win: BarWindow, width: number, offsetHours: number): TimeAxis 
   return { ticks, boundaries: boundaries.map(i => colOf(i) - (win.stride - 1)) }
 }
 
-// halfway between two "HH:MM" strings, for the session axis bars without stamps fall back to
+// halfway between two "HH:MM" strings, for the session axis (bars without stamps)
 function midTime(from: string, to: string): string {
   const mins = (hm: string) => {
     const [hh, mm] = hm.split(':')
@@ -1290,9 +1276,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
       ? `開 ${thousands(last[0], digits)} 高 ${thousands(last[1], digits)} 低 ${thousands(last[2], digits)} 收 ${thousands(last[3], digits)}` +
         (last[4] !== undefined ? ` 量 ${volText(last[4])}` : '')
       : ''
-    // A contract name plus its month leaves no room for everything at 100
-    // columns, so the row sheds in order: the badge, the readout, the bar
-    // label - the least essential piece first, as the table footer does.
+    // sheds the badge, then the readout, then the bar label - least essential first
     const badge = `${props.marketLabel} ${open ? `${SUN} 盤中` : `${MOON} 休市`}`
     const ladder: [string, string][] = [
       [readout, `${props.barLabel} · ${badge}`],
@@ -1365,8 +1349,6 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // the last row: where you are in the list, and the data source
     const foot = rows[geom.footRow]
     foot.put(lay.symCol, `${quotes.length} 檔中第 ${focus + 1} 檔`, DIM)
-    // The chart view's own buttons sit in the button row above, left-aligned
-    // and named for what they do, so this line does not have to explain them.
     signOff(foot, chartRight)
     // the table is not on screen here, so there is nothing under the pointer
     // to pick; the named buttons above the band move between symbols instead

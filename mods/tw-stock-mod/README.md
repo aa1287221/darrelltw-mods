@@ -285,7 +285,7 @@ decimals would round two rows to the same text; `chart-view.mjs` pins both.
 **Time axis.** Labels come from the bars' own timestamps (each bar carries
 its bucket start — see the file shape below), so 19:40–23:00 of bars reads
 `19:40 … 22:55` rather than the session's 15:00 / 05:00: first and last bar
-always, round times at the coarsest step whose labels do not collide (every
+always, round times at the finest step whose labels do not collide (every
 30 minutes for 5 分 K two columns apart, every hour one column apart), and
 a dim vertical rule wherever the bars jump a session (夜盤 → 日盤, a day
 change on the 60 分 chart), with that bar's time on the axis. Bars without

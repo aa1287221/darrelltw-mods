@@ -1003,10 +1003,8 @@ type QuotesFile = {
   barLabel?: string
 }
 
-// a bar is [open, high, low, close, volume?, ts?] or { o, h, l, c, v?, ts? } -
-// accept both, since which one a feed hands over is not worth a conversion
-// step in the fetcher. A 4- or 5-element bar is still a bar: without `ts` the
-// board keeps the session axis, without `v` it draws no volume rows.
+// [o, h, l, c, v?, ts?] or { o, h, l, c, v?, ts? }: which one a feed hands over
+// is not worth a conversion step; a 4- or 5-element bar is still a bar.
 function parseBars(value: unknown): Bar[] | undefined {
   if (!Array.isArray(value)) return undefined
   const out: Bar[] = []
@@ -1860,8 +1858,7 @@ let view: View = 'table'
 // position 0 in buildProps (see `focusIdx`), and ui.render syncs this back
 // to whatever code buildProps actually landed on after every render.
 let focusCode: string | undefined
-// the chart's bar width; one for the session, since a stock row (no barsBy)
-// ignores it and falls back to its 5 分 bars whatever it says
+// the chart's bar width, one for the session; a row without barsBy ignores it
 let timeframe: Timeframe = '5'
 // K線 / 曲線, remembered per market for the session
 const chartModeBy: Record<MarketId, ChartMode> = { tw: 'candle', us: 'candle', tf: 'candle' }
@@ -2821,9 +2818,8 @@ export const register: Register = on => {
     }
 
     const cols = e.viewport?.columns ?? e.props.bodyColumns ?? 80
-    // The chart never scrolls the band: its rows stop at maxRows - 2 (the
-    // button row above it plus one spare), but not under the 8-row floor the
-    // layout needs. A stub host without maxRows leaves the config's own value.
+    // maxRows - 2 (the button row plus one spare) keeps the band from scrolling;
+    // the 8-row floor wins under a tiny terminal, and a stub host has no maxRows
     const maxRows = typeof e.props.maxRows === 'number' && e.props.maxRows > 0 ? e.props.maxRows : 0
     const chartRows = maxRows ? Math.max(CHART_ROWS_MIN, Math.min(config.chartRows, maxRows - 2)) : config.chartRows
     const mode = modeOverride ?? config.market
