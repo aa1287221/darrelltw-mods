@@ -2,8 +2,8 @@
 # One entry point for the scripts/dev harnesses that can fail: builds
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
-# file-bars against them plus check-personal.sh, and prints a PASS/FAIL line
-# per check. Exits non-zero if any of them did.
+# file-bars / tf-market / tf-quotes against them plus check-personal.sh, and
+# prints a PASS/FAIL line per check. Exits non-zero if any of them did.
 #
 # rank-cross and chart-nav's "名次交叉" section once pinned the PR-a bug
 # (focus/was.code tracked a table position, not a symbol); that is fixed, so
@@ -137,6 +137,47 @@ cat > "$FIXTURES/tf-plain/.claude/stock-band.json" <<'JSON'
 }
 JSON
 
+# tf-quotes: a tf-pinned project with feed "auto" (feedBars must be live so
+# only the tf short-circuit keeps Yahoo out; feedMarkets is then ['tf'], which
+# costs no request), and a tw project with an override quotes file that also
+# names a futures code - which must never price the tf table. The harness
+# writes the runtime-dir futures-quotes.json itself, stamped off its clock.
+mkdir -p "$FIXTURES/tf-quotes/.claude" "$FIXTURES/tf-override/.claude"
+cat > "$FIXTURES/tf-quotes/.claude/stock-band.json" <<'JSON'
+{
+  "market": "tf",
+  "feed": "auto",
+  "twSources": ["yahoo"],
+  "pageMs": 0,
+  "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
+  "us": [],
+  "futures": [{ "code": "TXFR1", "name": "台指近" }, { "code": "SRFJ6" }]
+}
+JSON
+cat > "$FIXTURES/tf-override/.claude/stock-band.json" <<'JSON'
+{
+  "market": "tw",
+  "feed": "off",
+  "pageMs": 0,
+  "tw": [
+    { "code": "1111", "name": "甲", "prevClose": 100 },
+    { "code": "2222", "name": "乙", "prevClose": 100 }
+  ],
+  "us": [],
+  "futures": [{ "code": "SRFJ6" }]
+}
+JSON
+cat > "$FIXTURES/tf-override/.claude/stock-quotes.json" <<'JSON'
+{
+  "asOf": 0,
+  "quotes": {
+    "1111": { "price": 105, "prevClose": 100, "name": "甲" },
+    "2222": { "price": 102, "prevClose": 100, "name": "乙" },
+    "SRFJ6": { "price": 999, "prevClose": 100 }
+  }
+}
+JSON
+
 # --- run -----------------------------------------------------------------
 declare -a results
 run_check() {
@@ -155,6 +196,7 @@ run_check "chart-nav"      node "$SCRIPT_DIR/chart-nav.mjs"   "$OUT/register.js"
 run_check "rank-cross"     node "$SCRIPT_DIR/rank-cross.mjs"  "$OUT/board.js" "$OUT/register.js" "$FIXTURES/rank-cross"
 run_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/file-bars"
 run_check "tf-market"      node "$SCRIPT_DIR/tf-market.mjs"   "$OUT/register.js" "$FIXTURES/tf-market" "$FIXTURES/tf-plain"
+run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-quotes" "$FIXTURES/tf-override"
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
 echo
