@@ -2,7 +2,8 @@
 # One entry point for the scripts/dev harnesses that can fail: builds
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
-# file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / pytest against them
+# file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view / pytest
+# against them
 # plus check-personal.sh, and prints a PASS/FAIL line per check. Exits
 # non-zero if any of them did.
 #
@@ -222,6 +223,31 @@ cat > "$FIXTURES/tf-pnl/.claude/stock-band.json" <<'JSON'
 }
 JSON
 
+# chart-view: a tf project like tf-quotes and a tw project with feed off - the
+# harness writes both quotes files itself (six-element bars + barsBy into the
+# runtime dir; the old [o, h, l, c] shape into the tw project's .claude/).
+mkdir -p "$FIXTURES/chart-view/.claude" "$FIXTURES/chart-view-tw/.claude"
+cat > "$FIXTURES/chart-view/.claude/stock-band.json" <<'JSON'
+{
+  "market": "tf",
+  "feed": "auto",
+  "twSources": ["yahoo"],
+  "pageMs": 0,
+  "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
+  "us": [],
+  "futures": [{ "code": "TXFR1", "name": "台指近" }, { "code": "MXFR1", "name": "小台近" }, { "code": "SRFJ6" }]
+}
+JSON
+cat > "$FIXTURES/chart-view-tw/.claude/stock-band.json" <<'JSON'
+{
+  "market": "tw",
+  "feed": "off",
+  "pageMs": 0,
+  "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
+  "us": []
+}
+JSON
+
 # --- run -----------------------------------------------------------------
 declare -a results
 run_check() {
@@ -248,6 +274,7 @@ run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js"
 run_check "tf-feed"        node "$SCRIPT_DIR/tf-feed.mjs"     "$OUT/register.js" "$FIXTURES/tf-feed"
 run_check "tf-pnl"         node "$SCRIPT_DIR/tf-pnl.mjs"      "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-pnl" "$FIXTURES/tf-plain"
 run_check "tabs"           node "$SCRIPT_DIR/tabs.mjs"        "$OUT/register.js" "$FIXTURES/tf-pnl" "$FIXTURES/tf-plain"
+run_check "chart-view"     node "$SCRIPT_DIR/chart-view.mjs"  "$OUT/register.js" "$OUT/board.js" "$FIXTURES/chart-view" "$FIXTURES/chart-view-tw"
 run_check "pytest"         run_pytest
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 

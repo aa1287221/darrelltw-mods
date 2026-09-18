@@ -14,8 +14,8 @@ the bare username) and exits 1 on any hit; run it before every release.
 harness's printed output into a real pass/fail: `ok` prints `ok `/`FAIL ` and
 sets `process.exitCode = 1` on a miss, `done()` prints the final tally.
 `feed-idle.mjs`, `chart-nav.mjs`, `rank-cross.mjs`, the four `tf-*.mjs`
-harnesses (`tf-market`, `tf-quotes`, `tf-feed`, `tf-pnl`) and `tabs.mjs` use
-it - they are the harnesses this exits non-zero on a real regression,
+harnesses (`tf-market`, `tf-quotes`, `tf-feed`, `tf-pnl`), `tabs.mjs` and
+`chart-view.mjs` use it - they are the harnesses this exits non-zero on a real regression,
 alongside `pytest` for the fetcher's own pure functions. `board-harness.mjs`,
 `frames.mjs`, `file-bars.mjs` and the rest still just print for a human to
 read; `run-checks.sh` below runs `file-bars.mjs` too but only as a smoke test
@@ -52,7 +52,7 @@ copy theirs if you add a new harness.
 | script | question | usage |
 | --- | --- | --- |
 | `harness.mjs` | what props does the feed actually build? prices, indices, source tag, K bars | `node harness.mjs $OUT/register.js <config.json> [ticks]` |
-| `board-harness.mjs` | what do the nine rows look like, as text | `node board-harness.mjs $OUT/board.js $OUT/register.js <proj>` |
+| `board-harness.mjs` | what do the rows look like, as text | `node board-harness.mjs $OUT/board.js $OUT/register.js <proj>` |
 | `frames.mjs` | does the animation play, and what does each frame look like | `node frames.mjs $OUT/board.js $OUT/register.js <proj> <seconds>` |
 | `remount.mjs` | does a remounted board install its own frame clock | `node remount.mjs $OUT/board.js <props.json>` |
 | `snooze.mjs` | does 收起 30分 then 展開 leave the band without a frame clock | `node snooze.mjs $OUT/board.js $OUT/register.js <proj>` |
@@ -68,6 +68,7 @@ copy theirs if you add a new harness.
 | `tf-quotes.mjs` | does a runtime-dir `futures-quotes.json` price the 台指期 table (永豐 footer, 5 分 K（永豐）, per-row decimals, alias → resolved month), feed the chart without a Yahoo request, and go no-data once stale; does the stock override stay as it was **(asserts)** | `node tf-quotes.mjs $OUT/register.js $OUT/board.js <tf-proj> <tw-proj>` |
 | `tf-feed.mjs` | with 美股 on screen during 夜盤, is the heartbeat still written every feed tick naming `tf`; is the fetcher spawned once with both `--codes` and `--futures` (also during 台股 hours, also as `--futures ""` without a list); does a Yahoo back-off leave the heartbeat alone; does a project without `futures` write no heartbeat at night **(asserts)** | `node tf-feed.mjs $OUT/register.js <proj>` |
 | `tf-pnl.mjs` | does a runtime-dir `futures-holdings.json` add the 期貨庫存 stop (with an empty `futures` list too), price each position × its multiplier in 口 at the contract's decimals with 紅漲綠跌, prefer a fresh `futures-quotes.json` over the file's own prices, sort by every key and page like 台股庫存; does the stop go with the file, and a project with neither stay as it was **(asserts)** | `node tf-pnl.mjs $OUT/register.js $OUT/board.js <holdings-proj> <plain-proj>` |
+| `chart-view.mjs` | the chart view (#12): 16 rows by default, `chartRows` config and the `maxRows − 2` clamp (the harness passes `maxRows` as the AbovePrompt props, which every other stub leaves `{}`), y labels unique and strictly decreasing with the 昨結 dotted line + label and the filled last-price tag (a 2-point range at 0 decimals pins the rounded-duplicate case), x labels from bar timestamps (no 15:00/05:00 for 19:40–23:00 bars; first/last/round ticks; 60 分 bars across two sessions draw the boundary rules), stride 2 → 1 at 120 bars, volume rows at 16 and none at 8, `1分 5分 15分 60分` switching bars + label, `曲線` braille + shade remembered per market, the title readout, a row without `barsBy` and a stock row with old `[o, h, l, c]` bars (session axis, no timeframe buttons), and the control row unchanged with no bars **(asserts)**. Writes both quotes files itself (six-element bars + `barsBy` into the tf runtime dir, four-element into the tw project) | `node chart-view.mjs $OUT/register.js $OUT/board.js <tf-proj> <tw-proj>` |
 | `tabs.mjs` | the market tab row (#9): three tabs without futures/US holdings, five with a futures list + tf positions, six with US holdings too (keys `stock-band:tab:<market>[:pnl]`, plain, the selected one `[label]` and the rest dim); does each tab land on its own market + view in one press, does the mark move with it, does the tab row stay in chart view and a tab leave the chart; a 130→60 column sweep showing sessionNote → taipeiNote → badge give way before any tab **(asserts)** | `node tabs.mjs $OUT/register.js <holdings-proj> <plain-proj>` |
 
 ## The clock is yours to drive
@@ -130,7 +131,7 @@ Builds `register.js`/`board.js` into `$OUT` (default
 fixture projects under a `mktemp -d` (never inside the repo, never touching
 your real project or `~/.claude`); runs `feed-idle.mjs` → `chart-nav.mjs` →
 `rank-cross.mjs` → `file-bars.mjs` → `tf-market.mjs` → `tf-quotes.mjs` →
-`tf-feed.mjs` → `tf-pnl.mjs` → `tabs.mjs` → `pytest` (`scripts/tests`, via
+`tf-feed.mjs` → `tf-pnl.mjs` → `tabs.mjs` → `chart-view.mjs` → `pytest` (`scripts/tests`, via
 `~/.claude/stock-band-venv/bin/python` when present, else `python3`) →
 `check-personal.sh` in that order, and prints a `PASS`/`FAIL` line per check.
 Exits non-zero if any of them did.

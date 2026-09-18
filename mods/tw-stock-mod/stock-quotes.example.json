@@ -1,6 +1,6 @@
 {
   "_comment": "The API seam. fetch-quotes-shioaji.py writes this shape into ~/.claude/stock-band/<project-slug>/stock-quotes.json (the runtime dir - see the README), which wins while fresh; hand-writing <project>/.claude/stock-quotes.json in this same shape is the manual override seam for any other fetcher. Older than 120s and it is ignored (the band falls back to demo prices). `market` and `asOf` are informational - the band still picks the market off the clock.",
-  "_comment_series": "`series` = recent closes, oldest first, for the row's sparkline (20 points is plenty). `bars` = K bars, oldest first, as [open, high, low, close] or {o,h,l,c}, for the trend view; ~31 of them fit an 80-column band. With bars but no series, the sparkline uses the bars' closes. `barLabel` is what the title calls them, since only the feed knows the interval.",
+  "_comment_series": "`series` = recent closes, oldest first, for the row's sparkline (20 points is plenty). `bars` = K bars, oldest first, as [open, high, low, close, volume?, ts?] (ts = bucket start in ms; without it the chart keeps the session axis) or {o,h,l,c,v?,ts?}, for the trend view; up to 120 are kept and the newest that fit are drawn. A futures file may add `barsBy: {\"1\": [...], \"5\": [...], \"15\": [...], \"60\": [...]}` for the timeframe buttons. With bars but no series, the sparkline uses the bars' closes. `barLabel` is what the title calls them, since only the feed knows the interval.",
   "asOf": 1757900000000,
   "market": "tw",
   "barLabel": "5 分 K",

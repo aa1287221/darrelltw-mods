@@ -79,7 +79,9 @@ const PAGE_MS_MIN = 4000
 // A budget, not an interval: `feedMs` alone cannot keep the host inside the
 // limit once one tick costs more than one request. See feedInterval().
 const REQUESTS_PER_HOUR = 300
-const CHART_BARS = 40 // K bars the chart view asks for (it draws what fits)
+const CHART_BARS = 120 // K bars the chart view asks for (it draws the newest that fit)
+const DEFAULT_CHART_ROWS = 16
+const CHART_ROWS_MIN = 8 // title, 5 plot rows, axis, footer - the pre-#12 layout
 const DEMO_BAR_MS = 3000 // demo time per fake bar; a real feed sets its own
 
 // --- live feed --------------------------------------------------------------
@@ -433,7 +435,12 @@ function pickMarket(now: number, mode: MarketMode, hasFutures: boolean): { marke
 }
 
 // --- quotes ----------------------------------------------------------------
-type Bar = [number, number, number, number] // open, high, low, close
+/** open, high, low, close, then optional volume and bucket-start ms (#12: the fetcher writes six) */
+type Bar = [number, number, number, number, number?, number?]
+/** the bar widths a futures file's `barsBy` block may carry, in minutes */
+type Timeframe = '1' | '5' | '15' | '60'
+const TIMEFRAMES: Timeframe[] = ['1', '5', '15', '60']
+type ChartMode = 'candle' | 'line'
 type IndexRow = { name: string; value: number; change: number; pct: number }
 
 type QuoteRow = {
@@ -518,6 +525,8 @@ type FileQuote = {
   prevClose?: number
   name?: string
   bars?: Bar[]
+  /** futures only: the same bars resampled per timeframe; `bars` stays the 5 分 set for older readers */
+  barsBy?: Partial<Record<Timeframe, Bar[]>>
   /** futures only (futures-quotes.json): points-to-money factor, display digits, and the month an alias resolved to */
   multiplier?: number
   decimals?: number
@@ -601,6 +610,8 @@ function sortHoldings(list: PricedHolding[], key: PnlSortKey, dir: 'asc' | 'desc
 type Config = {
   market: MarketMode
   refreshMs: number
+  /** the chart view's height in rows (min 8); the render hook clamps it to the band's `maxRows - 2` */
+  chartRows: number
   sort: 'change' | 'list'
   highlight: boolean
   /**
@@ -754,6 +765,7 @@ function defaultConfig(): Config {
   return {
     market: 'auto',
     refreshMs: DEFAULT_REFRESH_MS,
+    chartRows: DEFAULT_CHART_ROWS,
     sort: 'change',
     highlight: true,
     columns: 'auto',
@@ -871,6 +883,7 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
   const market = str(root.market, 'auto')
   if (market === 'tw' || market === 'us' || market === 'tf' || market === 'auto') cfg.market = market
   cfg.refreshMs = Math.max(1000, num(root.refreshMs, cfg.refreshMs))
+  cfg.chartRows = Math.max(CHART_ROWS_MIN, Math.floor(num(root.chartRows, cfg.chartRows)))
   if (root.sort === 'list') cfg.sort = 'list'
   if (root.highlight === false) cfg.highlight = false
   if (root.columns === 1 || root.columns === 2 || root.columns === 'auto') cfg.columns = root.columns
@@ -990,26 +1003,43 @@ type QuotesFile = {
   barLabel?: string
 }
 
-// a bar is [open, high, low, close] or { o, h, l, c } - accept both, since
-// which one a feed hands over is not worth a conversion step in the fetcher
+// [o, h, l, c, v?, ts?] or { o, h, l, c, v?, ts? }: which one a feed hands over
+// is not worth a conversion step; a 4- or 5-element bar is still a bar.
 function parseBars(value: unknown): Bar[] | undefined {
   if (!Array.isArray(value)) return undefined
   const out: Bar[] = []
+  const push = (legs: unknown[], v: unknown, ts: unknown) => {
+    if (legs.length !== 4 || !legs.every(x => typeof x === 'number' && Number.isFinite(x))) return
+    const bar = legs as [number, number, number, number]
+    const vol = num(v, NaN)
+    const at = num(ts, NaN)
+    // a Client's props must not hold undefined, so the tuple is cut short instead
+    if (at > 0) out.push([...bar, vol >= 0 ? vol : 0, at])
+    else if (vol >= 0) out.push([...bar, vol])
+    else out.push(bar)
+  }
   for (const raw of value) {
     if (Array.isArray(raw)) {
-      const four = raw.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
-      if (four.length >= 4) out.push([four[0], four[1], four[2], four[3]])
+      push(raw.slice(0, 4), raw[4], raw[5])
       continue
     }
     const obj = asRecord(raw)
     if (!obj) continue
-    const o = num(obj.o ?? obj.open, NaN)
-    const h = num(obj.h ?? obj.high, NaN)
-    const l = num(obj.l ?? obj.low, NaN)
-    const c = num(obj.c ?? obj.close, NaN)
-    if ([o, h, l, c].every(Number.isFinite)) out.push([o, h, l, c])
+    push([obj.o ?? obj.open, obj.h ?? obj.high, obj.l ?? obj.low, obj.c ?? obj.close], obj.v ?? obj.volume, obj.ts ?? obj.t)
   }
   return out.length > 0 ? out : undefined
+}
+
+/** a futures file's `barsBy` block: one bar set per timeframe it names, unknown keys ignored */
+function parseBarsBy(value: unknown): Partial<Record<Timeframe, Bar[]>> | undefined {
+  const obj = asRecord(value)
+  if (!obj) return undefined
+  const out: Partial<Record<Timeframe, Bar[]>> = {}
+  for (const tf of TIMEFRAMES) {
+    const bars = parseBars(obj[tf])
+    if (bars) out[tf] = bars
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 // Parses a `stock-quotes.json` file's text, whichever of the two locations
@@ -1045,6 +1075,7 @@ function parseQuotes(text: string | undefined, now: number): QuotesFile | undefi
       prevClose: typeof entry.prevClose === 'number' ? entry.prevClose : undefined,
       name: typeof entry.name === 'string' ? entry.name : undefined,
       bars: parseBars(entry.bars),
+      barsBy: parseBarsBy(entry.barsBy),
       multiplier: typeof entry.multiplier === 'number' && entry.multiplier > 0 ? entry.multiplier : undefined,
       decimals: Number.isInteger(decimals) && decimals >= 0 && decimals <= 8 ? decimals : undefined,
       resolved: typeof entry.resolved === 'string' && entry.resolved ? entry.resolved : undefined,
@@ -1353,7 +1384,7 @@ function parseSpark(text: string): { quotes: Record<string, FileQuote>; tradedAt
   return { quotes: out, tradedAt }
 }
 
-/** one symbol's 5-minute K bars; a bar with a null leg is dropped, not patched */
+/** one symbol's 5-minute K bars with volume and bucket start; a bar with a null leg is dropped, not patched */
 function parseChartBars(text: string): Bar[] | undefined {
   let root: Record<string, unknown> | undefined
   try {
@@ -1370,11 +1401,17 @@ function parseChartBars(text: string): Bar[] | undefined {
   const lo = quote.low
   const c = quote.close
   if (!Array.isArray(o) || !Array.isArray(hi) || !Array.isArray(lo) || !Array.isArray(c)) return undefined
+  const vol = Array.isArray(quote.volume) ? (quote.volume as unknown[]) : []
+  const stamps = Array.isArray(result?.timestamp) ? (result.timestamp as unknown[]) : []
   const bars: Bar[] = []
   for (let i = 0; i < c.length; i++) {
     const leg = [o[i], hi[i], lo[i], c[i]]
     if (leg.every(v => typeof v === 'number' && Number.isFinite(v))) {
-      bars.push([leg[0] as number, leg[1] as number, leg[2] as number, leg[3] as number])
+      const bar: Bar = [leg[0] as number, leg[1] as number, leg[2] as number, leg[3] as number]
+      // Yahoo answers seconds; a bar with no stamp is still a bar (the board falls back to the session axis)
+      const at = num(stamps[i], 0) * 1000
+      if (at > 0) bar.push(Math.max(0, num(vol[i], 0)), at)
+      bars.push(bar)
     }
   }
   return bars.length > 0 ? bars.slice(-CHART_BARS) : undefined
@@ -1407,6 +1444,14 @@ type BoardProps = {
   barLabel: string
   sessionOpen: string
   sessionClose: string
+  /** rows the chart view draws, already clamped to the band (see ui.render) */
+  chartRows: number
+  chartMode: ChartMode
+  /** the timeframes the focused row's file offers; empty hides the buttons (stocks, 4-element bars) */
+  timeframes: Timeframe[]
+  timeframe: Timeframe
+  /** the market's UTC offset in hours, so the board can print bar timestamps market-local */
+  utcOffsetHours: number
   /** snapshot counter; the board's live dot flips on it (0 while faking prices) */
   seq: number
   /**
@@ -1459,6 +1504,8 @@ function buildProps(
   view: View,
   /** which code the chart view is following; undefined or off-screen falls back to position 0 */
   focusCode: string | undefined,
+  /** the chart height the render hook settled on (cfg.chartRows clamped to the band); cfg's own when absent */
+  chartRows = cfg.chartRows,
 ): BoardProps {
   const { market, phase } = pickMarket(now, mode, hasFutures(cfg))
   const conf = MARKETS[market]
@@ -1615,11 +1662,24 @@ function buildProps(
   // here means focusCode is unset or the code was removed from the list
   // entirely - either way this falls back to position 0 via `Math.max`.
   const focusIdx = Math.max(0, shown.findIndex(q => q.code === focusCode))
+  let barLabel = quotesFile?.barLabel ?? (usedFile ? 'K 棒' : 'K 棒（示範）')
+  let timeframes: Timeframe[] = []
   if (view === 'chart' && shown.length > 0) {
     const q = shown[focusIdx]
     if (!usedFile && market !== 'tf' && (q.bars?.length ?? 0) < CHART_BARS) {
       const sym = list.find(t => t.code === q.code)
       if (sym) q.bars = demoBars(sym, now, CHART_BARS)
+    }
+    // The file's barsBy never crosses into the board - only the one set the
+    // timeframe picks does, the way only the focused row carries bars at all.
+    const byTf = quotesFile?.quotes[q.code]?.barsBy
+    if (byTf) {
+      timeframes = TIMEFRAMES.filter(tf => byTf[tf])
+      const picked = byTf[timeframe]
+      if (picked) {
+        q.bars = picked
+        barLabel = /^\d+ 分 K/.test(barLabel) ? barLabel.replace(/^\d+ 分 K/, `${timeframe} 分 K`) : `${timeframe} 分 K`
+      }
     }
   }
 
@@ -1707,9 +1767,14 @@ function buildProps(
     columns,
     view,
     focus: focusIdx,
-    barLabel: quotesFile?.barLabel ?? (usedFile ? 'K 棒' : 'K 棒（示範）'),
+    barLabel,
     sessionOpen: hhmm(session.open),
     sessionClose: hhmm(session.close),
+    chartRows,
+    chartMode: chartModeBy[market],
+    timeframes,
+    timeframe,
+    utcOffsetHours: conf.offset(now),
     now,
     // The full priced list, not just the page on screen: board.tsx slices it
     // itself for the 5 rows it draws (holdingsScroll says where), but it
@@ -1793,6 +1858,10 @@ let view: View = 'table'
 // position 0 in buildProps (see `focusIdx`), and ui.render syncs this back
 // to whatever code buildProps actually landed on after every render.
 let focusCode: string | undefined
+// the chart's bar width, one for the session; a row without barsBy ignores it
+let timeframe: Timeframe = '5'
+// K線 / 曲線, remembered per market for the session
+const chartModeBy: Record<MarketId, ChartMode> = { tw: 'candle', us: 'candle', tf: 'candle' }
 // how many quotes the last drawn board held, so a posted row index can be
 // checked against something real: a Client's post is code's word, not the
 // engine's, and a pick is resolved against `lastShown`, not trusted as-is.
@@ -2100,9 +2169,8 @@ const MOON = '☽'
 
 // the table Client lost its title row (the button row above it draws that
 // now); the chart Client kept its own, since that title names the symbol
-// being charted rather than the market
+// being charted rather than the market, and grows to `chartRows` (#12)
 const TABLE_BOARD_ROWS = 8
-const CHART_BOARD_ROWS = 8
 const PNL_BOARD_ROWS = 8
 
 function charWidth(ch: string): number {
@@ -2750,9 +2818,13 @@ export const register: Register = on => {
     }
 
     const cols = e.viewport?.columns ?? e.props.bodyColumns ?? 80
+    // maxRows - 2 (the button row plus one spare) keeps the band from scrolling;
+    // the 8-row floor wins under a tiny terminal, and a stub host has no maxRows
+    const maxRows = typeof e.props.maxRows === 'number' && e.props.maxRows > 0 ? e.props.maxRows : 0
+    const chartRows = maxRows ? Math.max(CHART_ROWS_MIN, Math.min(config.chartRows, maxRows - 2)) : config.chartRows
     const mode = modeOverride ?? config.market
     const onScreen = pickMarket(now, mode, hasFutures(config)).market
-    const props = buildProps(now, config, quotesFor(onScreen, now), mode, view, focusCode)
+    const props = buildProps(now, config, quotesFor(onScreen, now), mode, view, focusCode, chartRows)
     // buildProps chases focusCode to whatever position it actually landed on
     // (falling back to 0 when the code is unset, paged off, or gone from the
     // list) - syncing it back here keeps that landing code, not a stale one,
@@ -2854,6 +2926,17 @@ export const register: Register = on => {
       focusCode = props.quotes[0]?.code
       $.ui.invalidate('ui.render')
     }
+    const onTimeframe = (tf: Timeframe) => () => {
+      timeframe = tf
+      $.ui.invalidate('ui.render')
+    }
+    const onChartMode = (m: ChartMode) => () => {
+      chartModeBy[props.market] = m
+      $.ui.invalidate('ui.render')
+    }
+    // The chart's own controls only draw once there is a chart: a row with no
+    // bars shows the notice, and a timeframe or a line through nothing is noise.
+    const chartControls = props.view === 'chart' && (props.quotes[props.focus]?.bars?.length ?? 0) > 0
     // Moves the scroll offset a whole PNL_PAGE_SIZE at a time, wrapping back
     // to 0 past the last page - "paging sets the offset to page*5".
     const holdingsPageCount = Math.max(1, Math.ceil(props.holdings.length / PNL_PAGE_SIZE))
@@ -2930,6 +3013,34 @@ export const register: Register = on => {
               <Button key="stock-band:next" label={`下一檔 ▶ ${props.focus + 1}/${rowCount}`} onPress={onNext} />
             ) : null}
             {chart ? <Button key="stock-band:list" label="回清單" onPress={onList} /> : null}
+            {/* the timeframe and K線/曲線 pairs read like the tab row: plain,
+                the active one bracketed, the rest dim */}
+            {chartControls && props.timeframes.length > 0 ? <Text> </Text> : null}
+            {chartControls
+              ? props.timeframes.flatMap((tf, i) => [
+                  i > 0 ? <Text key={`stock-band:tf:${tf}:gap`}> </Text> : null,
+                  <Button
+                    key={`stock-band:tf:${tf}`}
+                    label={tf === props.timeframe ? `[${tf}分]` : `${tf}分`}
+                    plain
+                    dimColor={tf !== props.timeframe}
+                    onPress={onTimeframe(tf)}
+                  />,
+                ])
+              : null}
+            {chartControls ? <Text> </Text> : null}
+            {chartControls
+              ? (['candle', 'line'] as ChartMode[]).flatMap((m, i) => [
+                  i > 0 ? <Text key={`stock-band:mode:${m}:gap`}> </Text> : null,
+                  <Button
+                    key={`stock-band:mode:${m}`}
+                    label={m === props.chartMode ? `[${m === 'candle' ? 'K線' : '曲線'}]` : m === 'candle' ? 'K線' : '曲線'}
+                    plain
+                    dimColor={m !== props.chartMode}
+                    onPress={onChartMode(m)}
+                  />,
+                ])
+              : null}
             {showBadge ? <Text> </Text> : null}
             {showBadge ? <Text color={open ? ORANGE : MOON_BLUE}>{badge}</Text> : null}
             {showSession ? <Text> </Text> : null}
@@ -2967,7 +3078,7 @@ export const register: Register = on => {
           key="stock-band:table"
           module="./board.tsx"
           width={cols}
-          height={props.view === 'chart' ? CHART_BOARD_ROWS : props.view === 'pnl' ? PNL_BOARD_ROWS : TABLE_BOARD_ROWS}
+          height={props.view === 'chart' ? props.chartRows : props.view === 'pnl' ? PNL_BOARD_ROWS : TABLE_BOARD_ROWS}
           props={{ ...props }}
         />
         {await next(e)}
