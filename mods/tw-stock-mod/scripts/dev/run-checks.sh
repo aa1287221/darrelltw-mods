@@ -193,6 +193,9 @@ cat > "$FIXTURES/tf-feed/.claude/stock-band.json" <<'JSON'
   "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
   "us": [{ "code": "AAPL", "name": "Apple", "prevClose": 300 }],
   "futures": [{ "code": "TXFR1", "name": "台指近" }, { "code": "SRFJ6" }]
+}
+JSON
+
 # tf-pnl: the holdings-only user - a project with an EMPTY `futures` list
 # (so the 期貨庫存 stop has to come from the file alone); feed off, pinned to
 # 美股 so the cycle walk starts from a known stop. The harness writes the
