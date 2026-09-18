@@ -1,7 +1,7 @@
 // Watch the real pnl board animate over real time - same pattern as
 // frames.mjs (real timers, real wall clock, no surface.every stub needed
 // since the flap position is a pure function of Date.now()), except it
-// first walks the market button to the pnl stop, then watches the mount
+// first presses the 台股庫存 tab, then watches the mount
 // flap settle.
 //
 // Usage: node pnl-frames.mjs <board.js> <register.js> <projectDir> [seconds]
@@ -59,16 +59,12 @@ const surface = {
 let cur = await render()
 board(cur.props, surface)
 
-// walk the market button to the pnl stop, same as pnl-harness.mjs
-let presses = 0
-while (cur.props?.view !== 'pnl' && presses < 6) {
-  const marketButton = cur.buttons.find(b => b.props.label?.endsWith('▾'))
-  if (!marketButton) { console.error('no market button found'); process.exit(1) }
-  marketButton.props.onPress()
-  presses += 1
-  cur = await render()
-}
-console.log(`market button pressed ${presses}x -> view=${cur.props?.view}, mount should now be flapping in`)
+// press the 台股庫存 tab, same as pnl-harness.mjs
+const pnlTab = cur.buttons.find(b => b.props.key === 'stock-band:tab:tw:pnl')
+if (!pnlTab) { console.error('no 台股庫存 tab found'); process.exit(1) }
+pnlTab.props.onPress()
+cur = await render()
+console.log(`台股庫存 tab pressed -> view=${cur.props?.view}, mount should now be flapping in`)
 const text = (n, acc = []) => {
   if (n == null || n === false) return acc
   if (typeof n === 'string' || typeof n === 'number') { acc.push(String(n)); return acc }
