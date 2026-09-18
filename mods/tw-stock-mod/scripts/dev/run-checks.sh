@@ -2,7 +2,8 @@
 # One entry point for the scripts/dev harnesses that can fail: builds
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
-# file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view / pytest
+# file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view /
+# fit-rows / pytest
 # against them
 # plus check-personal.sh, and prints a PASS/FAIL line per check. Exits
 # non-zero if any of them did.
@@ -248,6 +249,30 @@ cat > "$FIXTURES/chart-view-tw/.claude/stock-band.json" <<'JSON'
 }
 JSON
 
+# fit-rows: NO `tw` list (the built-in 20 symbols, demo prices off the
+# harness's fixed clock), feed off, pageMs 0 (the harness sets it for the
+# ticker section), seven tw holdings for the 損益 view.
+mkdir -p "$FIXTURES/fit-rows/.claude"
+cat > "$FIXTURES/fit-rows/.claude/stock-band.json" <<'JSON'
+{
+  "market": "tw",
+  "feed": "off",
+  "pageMs": 0,
+  "us": [],
+  "holdings": {
+    "tw": [
+      { "code": "2330", "qty": 1000, "cost": 900 },
+      { "code": "2317", "qty": 2000, "cost": 150 },
+      { "code": "2454", "qty": 1000, "cost": 1200 },
+      { "code": "0050", "qty": 3000, "cost": 100 },
+      { "code": "2412", "qty": 1000, "cost": 120 },
+      { "code": "2881", "qty": 2000, "cost": 80 },
+      { "code": "2603", "qty": 1000, "cost": 200 }
+    ]
+  }
+}
+JSON
+
 # --- run -----------------------------------------------------------------
 declare -a results
 run_check() {
@@ -275,6 +300,7 @@ run_check "tf-feed"        node "$SCRIPT_DIR/tf-feed.mjs"     "$OUT/register.js"
 run_check "tf-pnl"         node "$SCRIPT_DIR/tf-pnl.mjs"      "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-pnl" "$FIXTURES/tf-plain"
 run_check "tabs"           node "$SCRIPT_DIR/tabs.mjs"        "$OUT/register.js" "$FIXTURES/tf-pnl" "$FIXTURES/tf-plain"
 run_check "chart-view"     node "$SCRIPT_DIR/chart-view.mjs"  "$OUT/register.js" "$OUT/board.js" "$FIXTURES/chart-view" "$FIXTURES/chart-view-tw"
+run_check "fit-rows"       node "$SCRIPT_DIR/fit-rows.mjs"    "$OUT/register.js" "$OUT/board.js" "$FIXTURES/fit-rows"
 run_check "pytest"         run_pytest
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
