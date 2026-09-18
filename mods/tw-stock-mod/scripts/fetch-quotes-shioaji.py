@@ -41,11 +41,14 @@ Three ways to run it:
   * spawned BY the band itself, when `stock-band.json` sets
     `"twSource": "shioaji"` (hooks/register.tsx's spawnShioaji). That path
     always passes `--out-dir`, `--heartbeat` and `--pidfile`:
-      - `--heartbeat FILE`: the band rewrites this file's mtime-equivalent
-        content on every tick it wants the Shioaji route. Once FILE is
-        missing or its timestamp is more than 90s old, this process exits by
-        itself - the band closed, or moved to the US board, and nothing is
-        watching anymore.
+      - `--heartbeat FILE`: the band rewrites this file on every tick it
+        wants the Shioaji route, as `{"ts": <ms>, "markets": ["tw", "tf"]}`
+        naming which markets to work this tick (stock rows only while "tw"
+        is listed, futures rows only while "tf" is). A bare ms number - what
+        a pre-T4 band wrote - still reads as both markets, for one release.
+        Once FILE is missing or its `ts` is more than 90s old, this process
+        exits by itself - the band closed, or stopped wanting either market,
+        and nothing is watching anymore.
       - `--pidfile FILE`: if FILE already holds another live process's pid,
         this run exits at once (0) rather than double-fetching for the same
         project; otherwise it writes its own pid there and removes it on the
@@ -73,6 +76,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 HEARTBEAT_MAX_AGE_MS = 90_000
+HEARTBEAT_MARKETS = frozenset({"tw", "tf"})  # the markets a heartbeat can ask this fetcher to work
 
 # 發行量加權股價指數 / 櫃買指數. Latin names because the board flaps one
 # character at a time and a Chinese character has no drum to riffle through.
@@ -473,15 +477,40 @@ def claim_pidfile(pidfile: Path) -> bool:
     return True
 
 
-def heartbeat_stale(path: Path) -> bool:
-    """Missing, unreadable, or older than HEARTBEAT_MAX_AGE_MS - all read as stale."""
-    if not path.exists():
-        return True
+def parse_heartbeat(text: str, now_ms: float) -> tuple[bool, frozenset[str]]:
+    """
+    (stale, markets the band wants worked). The band writes
+    `{"ts": <ms>, "markets": ["tw"|"tf", ...]}`; a pre-T4 band wrote the bare
+    ms number, which still reads as "every market" for one release so a
+    band/fetcher version skew never kills the fetcher on its first tick.
+    Anything else is stale: exiting beats guessing what the band wants.
+    """
+    text = text.strip()
     try:
-        ts = float(path.read_text(encoding="utf-8").strip())
-    except (ValueError, OSError):
-        return True
-    return (time.time() * 1000 - ts) > HEARTBEAT_MAX_AGE_MS
+        ts = float(text)
+        markets = HEARTBEAT_MARKETS
+    except ValueError:
+        try:
+            root = json.loads(text)
+        except ValueError:
+            return True, frozenset()
+        if not isinstance(root, dict) or not isinstance(root.get("ts"), (int, float)):
+            return True, frozenset()
+        ts = float(root["ts"])
+        raw = root.get("markets")
+        markets = frozenset(m for m in raw if m in HEARTBEAT_MARKETS) if isinstance(raw, list) else frozenset()
+    if (now_ms - ts) > HEARTBEAT_MAX_AGE_MS:
+        return True, markets
+    return False, markets
+
+
+def read_heartbeat(path: Path) -> tuple[bool, frozenset[str]]:
+    """Missing or unreadable reads as stale, same as a bad body - see parse_heartbeat."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return True, frozenset()
+    return parse_heartbeat(text, time.time() * 1000)
 
 
 def write_atomic(path: Path, payload: dict) -> None:
@@ -611,7 +640,7 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=10, help="seconds between snapshots; 0 writes once and exits")
     parser.add_argument("--codes", default="", help="comma-separated codes, overriding the band's own watchlist")
     parser.add_argument("--futures", default="", help="comma-separated 期貨合約代號（月合約或 R1/R2 別名，如 TXFR1,SRFJ6）；空值不做任何期貨工作")
-    parser.add_argument("--heartbeat", default="", help="path the band keeps rewriting while it wants this route; missing or >90s old exits this process (empty disables the check, for a by-hand run)")
+    parser.add_argument("--heartbeat", default="", help="path the band keeps rewriting while it wants this route, as {\"ts\": ms, \"markets\": [\"tw\"|\"tf\"]} (a bare ms number, the pre-T4 form, still means both markets); missing or >90s old exits this process, and each tick works only the markets named (empty disables the check and works every market, for a by-hand run)")
     parser.add_argument("--pidfile", default="", help="path holding this fetcher's pid; a live pid already there exits this run at once instead of double-fetching the same project")
     parser.add_argument("--check", action="store_true", help="diagnose the environment (Python version, shioaji install, env file, a real login, platform) and exit; writes nothing, needs no --codes")
     args = parser.parse_args()
@@ -768,52 +797,67 @@ def main() -> None:
     try:
         while running:
             # Heartbeat check first, before doing any work this tick: a stale
-            # heartbeat means nobody is watching Taiwan anymore (band closed,
-            # or on the US board), and the very first tick is exempt because
-            # the caller (spawnShioaji) writes the heartbeat moments BEFORE
-            # spawning this process, not after.
-            if heartbeat_path and not first_tick and heartbeat_stale(heartbeat_path):
-                print(f"心跳逾時（{heartbeat_path} 沒人更新），結束", file=sys.stderr)
-                break
+            # heartbeat means nobody wants either market anymore (band closed),
+            # and the very first tick is exempt because the caller
+            # (spawnShioaji) writes the heartbeat moments BEFORE spawning this
+            # process, not after. A by-hand run (no --heartbeat) works both.
+            if heartbeat_path:
+                stale, wanted = read_heartbeat(heartbeat_path)
+                if stale and not first_tick:
+                    print(f"心跳逾時（{heartbeat_path} 沒人更新），結束", file=sys.stderr)
+                    break
+                why = f"心跳要 {sorted(wanted) or '（沒有市場）'}"
+            else:
+                wanted = HEARTBEAT_MARKETS
+                why = "沒有 --heartbeat，全做"
             first_tick = False
+            work_tw = "tw" in wanted
+            work_tf = "tf" in wanted and bool(futures_codes)
+            tf_note = "做" if work_tf else ("不做：沒有 --futures 代號" if not futures_codes else "不做：心跳沒要 tf")
+            print(
+                f"{time.strftime('%H:%M:%S')}  tick  台股={'做' if work_tw else '不做：心跳沒要 tw'}  "
+                f"期貨={tf_note}  （{why}）",
+                file=sys.stderr,
+            )
 
-            try:
-                positions = fetch_positions(api)
-            except Exception as err:  # noqa: BLE001 - keep the last good positions rather than crash
-                print(f"庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
-            for pos in positions:
-                code = str(field(pos, "code", "")).strip()
-                if code:
-                    ensure_contract(code)
-                    if code not in watchlist_codes and not any(s["code"] == code for s in symbols):
-                        symbols.append({"code": code, "name": code})
+            if work_tw:
+                try:
+                    positions = fetch_positions(api)
+                except Exception as err:  # noqa: BLE001 - keep the last good positions rather than crash
+                    print(f"庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
+                for pos in positions:
+                    code = str(field(pos, "code", "")).strip()
+                    if code:
+                        ensure_contract(code)
+                        if code not in watchlist_codes and not any(s["code"] == code for s in symbols):
+                            symbols.append({"code": code, "name": code})
 
-            try:
-                payload = build_payload(api, contracts, index_contracts, watchlist_names)
-            except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
-                print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
-                payload = None
-            if payload:
-                write_atomic(out_path, payload)
-                rows = len(payload["quotes"])
-                stamp = time.strftime("%H:%M:%S", time.localtime(payload["dataAt"] / 1000))
-                print(f"{stamp}  {rows} 檔 -> {out_path}", file=sys.stderr)
-            # a failed snapshot leaves the file alone: the band drops a file
-            # older than 120 s by itself and says so, which beats a stale price
-            # that still looks live
+                try:
+                    payload = build_payload(api, contracts, index_contracts, watchlist_names)
+                except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
+                    print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    payload = None
+                if payload:
+                    write_atomic(out_path, payload)
+                    rows = len(payload["quotes"])
+                    stamp = time.strftime("%H:%M:%S", time.localtime(payload["dataAt"] / 1000))
+                    print(f"{stamp}  {rows} 檔 -> {out_path}", file=sys.stderr)
+                # a failed snapshot leaves the file alone: the band drops a file
+                # older than 120 s by itself and says so, which beats a stale price
+                # that still looks live
 
-            try:
-                holdings_payload = build_holdings_payload(
-                    positions, contracts, payload["quotes"] if payload else {}, watchlist_names
-                )
-            except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
-                print(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
-                holdings_payload = None
-            if holdings_payload:
-                write_atomic(holdings_path, holdings_payload)
-                print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
+                try:
+                    holdings_payload = build_holdings_payload(
+                        positions, contracts, payload["quotes"] if payload else {}, watchlist_names
+                    )
+                except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
+                    print(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    holdings_payload = None
+                if holdings_payload:
+                    write_atomic(holdings_path, holdings_payload)
+                    print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
 
-            if futures_codes:
+            if work_tf:
                 try:
                     futures_rows = fetch_futures_rows(api, futures_contracts, futures_codes, date.today().isoformat())
                 except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
