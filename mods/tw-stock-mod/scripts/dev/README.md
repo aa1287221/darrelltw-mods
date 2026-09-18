@@ -64,6 +64,7 @@ copy theirs if you add a new harness.
 | `rank-cross.mjs` | when two symbols' 漲跌幅 cross in rank, does the table mark the row that changed occupant with `was.code` **(asserts, currently FAILs - PR-a target)** | `node rank-cross.mjs $OUT/board.js $OUT/register.js <proj>` |
 | `tf-market.mjs` | 台指期 sessions (日盤/夜盤 across midnight and the weekend), the auto pick, the 台指期 cycle stop, no-data rows with no quotes source, and a project without `futures` unchanged **(asserts)** | `node tf-market.mjs $OUT/register.js <proj-with-futures> <proj-without>` |
 | `tf-quotes.mjs` | does a runtime-dir `futures-quotes.json` price the 台指期 table (永豐 footer, 5 分 K（永豐）, per-row decimals, alias → resolved month), feed the chart without a Yahoo request, and go no-data once stale; does the stock override stay as it was **(asserts)** | `node tf-quotes.mjs $OUT/register.js $OUT/board.js <tf-proj> <tw-proj>` |
+| `tf-pnl.mjs` | does a runtime-dir `futures-holdings.json` add the 期貨庫存 stop (with an empty `futures` list too), price each position × its multiplier in 口 at the contract's decimals with 紅漲綠跌, prefer a fresh `futures-quotes.json` over the file's own prices, sort by every key and page like 台股庫存; does the stop go with the file, and a project with neither stay as it was **(asserts)** | `node tf-pnl.mjs $OUT/register.js $OUT/board.js <holdings-proj> <plain-proj>` |
 
 ## The clock is yours to drive
 
