@@ -77,10 +77,11 @@ const TICKER_CELL_COLS = 28
 // Yahoo's spark endpoint answers `Number of symbols needs to be less than or
 // equal to 20` above 20 symbols (measured 2026-09-16: 20 -> 200, 21 -> 400).
 // That is a request-batching limit, not a watchlist-length one - `fetchSpark`
-// already splits a longer symbol list into 20-symbol requests - but a list
-// longer than Yahoo answers in two requests is not worth carrying, so this
-// caps it there too.
-const MAX_SYMBOLS = 20
+// already splits a longer symbol list into 20-symbol requests, and
+// feedInterval() slows the tick down as the batch count grows - so the
+// watchlist cap is a page-count choice, not a Yahoo one. 40 keeps a market
+// at three requests a tick at most (list + indices) and eight pages of five.
+const MAX_SYMBOLS = 40
 const SPARK_BATCH = 20 // Yahoo's own per-request symbol cap
 const PAGE_MS_DEFAULT = 10_000 // one page holds this long before the board turns
 const PAGE_MS_MIN = 4000
