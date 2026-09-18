@@ -1275,10 +1275,9 @@ def main() -> None:
                     overlays["tf"] = tf_overlay
             else:
                 tf_overlay.clear()
-            sync_subscriptions(api, sj, desired, subscribed)
-
             if args.interval <= 0:
                 break
+            sync_subscriptions(api, sj, desired, subscribed)
             slept = 0.0
             while running and slept < args.interval:
                 time.sleep(0.2)
