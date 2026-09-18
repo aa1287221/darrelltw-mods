@@ -663,8 +663,9 @@ landed on. The 台指期 table shows that resolution in the name column
 never a guess. The 期貨庫存 view names a holding by matching its position
 code (always an actual month, never an alias) against `futures`, so a
 config name only carries over to a held position when the config lists that
-same month code — an alias-only entry supplies the table's name, not a
-matching position's.
+same month code — an alias-only entry still names the table row, but a
+position under that alias's resolved month falls back to 永豐's own contract
+name instead (e.g. `臺股期貨 202610`), never a bare code.
 
 **Sessions.** 日盤 08:45–13:45 and 夜盤 15:00–05:00, Taipei time, weekdays
 only; 夜盤 crosses midnight, so Friday's session runs to Saturday 05:00 and
@@ -692,7 +693,8 @@ fixed 2 the way the stock markets use. `prevClose` is the contract's own
 trade.
 
 **Runtime files.** The fetcher writes two more files alongside the stock
-ones, same runtime dir, same freshness and read-order rules:
+ones, same runtime dir, each mirroring its stock counterpart's own freshness
+and read-order rules (the quotes file expires, the holdings file does not):
 `futures-quotes.json` (`market: "tf"`, `source: "永豐"`,
 `barLabel: "5 分 K（永豐）"`) and `futures-holdings.json`
 (`source: "永豐 期貨"`). The chart view for a `tf` symbol only ever reads
