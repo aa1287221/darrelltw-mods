@@ -12,12 +12,23 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
 # prototype/ is NOT excluded: it is real repo content and has carried a
 # leaked personal path before (render-styles.py's hardcoded jobs-tmp file).
-if rg -n 'Darrell/investment|/Users/darrellwang|darrellwang' \
-  "$REPO_ROOT" \
-  --glob '!node_modules' \
-  --glob '!.git' \
-  --glob '!**/check-personal.sh' \
-  --glob '!**/scripts/dev/README.md'; then
+PATTERN='Darrell/investment|/Users/darrellwang|darrellwang'
+# A machine without rg used to fall through to "clean" on `command not found`
+# (exit 127 inside `if`), so the gate passed without searching anything.
+search() {
+  if command -v rg >/dev/null 2>&1; then
+    rg -n "$PATTERN" "$REPO_ROOT" \
+      --glob '!node_modules' \
+      --glob '!.git' \
+      --glob '!**/check-personal.sh' \
+      --glob '!**/scripts/dev/README.md'
+  else
+    grep -rnIE "$PATTERN" "$REPO_ROOT" --exclude-dir=node_modules --exclude-dir=.git \
+      | grep -vE '/check-personal\.sh:|/scripts/dev/README\.md:'
+  fi
+}
+
+if search; then
   echo "check-personal: found personal paths above" >&2
   exit 1
 fi

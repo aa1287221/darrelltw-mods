@@ -5,10 +5,9 @@
 # file-bars against them plus check-personal.sh, and prints a PASS/FAIL line
 # per check. Exits non-zero if any of them did.
 #
-# rank-cross and chart-nav's own "名次交叉" section are EXPECTED to fail right
-# now - they pin down a real, not-yet-fixed bug (PR-a: focus/was.code track a
-# table position, not a symbol - see the comments in those two files). Seeing
-# them FAIL here is the harness working, not this script being broken.
+# rank-cross and chart-nav's "名次交叉" section once pinned the PR-a bug
+# (focus/was.code tracked a table position, not a symbol); that is fixed, so
+# every check here is expected to PASS.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,13 +19,16 @@ FIXTURES="$(mktemp -d)"
 cleanup() { rm -rf "$FIXTURES"; }
 trap cleanup EXIT
 
+# bun is not on every machine; `npx -y esbuild` takes the same flags
+if command -v bunx >/dev/null 2>&1; then ESBUILD=(bunx esbuild); else ESBUILD=(npx -y esbuild); fi
+
 echo "== build =="
-if ! (cd "$MOD_DIR" && bunx esbuild hooks/register.tsx --bundle --format=esm --jsx-factory=h \
+if ! (cd "$MOD_DIR" && "${ESBUILD[@]}" hooks/register.tsx --bundle --format=esm --jsx-factory=h \
   --jsx-fragment=Fragment --external:claude-code --outfile="$OUT/register.js"); then
   echo "esbuild register.tsx FAILED" >&2
   exit 1
 fi
-if ! (cd "$MOD_DIR" && bunx esbuild hooks/board.tsx --bundle --format=esm --jsx-factory=h \
+if ! (cd "$MOD_DIR" && "${ESBUILD[@]}" hooks/board.tsx --bundle --format=esm --jsx-factory=h \
   --jsx-fragment=Fragment --external:claude-code --outfile="$OUT/board.js"); then
   echo "esbuild board.tsx FAILED" >&2
   exit 1
