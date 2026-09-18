@@ -13,7 +13,7 @@ type TextTag = ClientElements['Text']
 // here looks arbitrary. Never name a local variable `h`: every JSX tag in this
 // file compiles to h(...).
 
-export type MarketId = 'tw' | 'us'
+export type MarketId = 'tw' | 'us' | 'tf'
 export type Phase = 'open' | 'closed'
 export type View = 'table' | 'chart' | 'pnl'
 
@@ -597,12 +597,13 @@ function signed(value: number, decimals = 2): string {
   return sign + thousands(Math.abs(value), decimals)
 }
 
-// up is red and down is green on the Taiwan board, the other way round on the
-// US board - the whole reason this mod tracks which market it is showing
+// up is red and down is green on the Taiwan boards (台股 and 台指期), the
+// other way round on the US board - the whole reason this mod tracks which
+// market it is showing
 function tone(market: MarketId, value: number): string {
   if (value === 0) return FLAT
-  const up = market === 'tw' ? DOWN_RED : UP_GREEN
-  const down = market === 'tw' ? UP_GREEN : DOWN_RED
+  const up = market === 'us' ? UP_GREEN : DOWN_RED
+  const down = market === 'us' ? DOWN_RED : UP_GREEN
   return value > 0 ? up : down
 }
 
@@ -850,7 +851,9 @@ function midTime(from: string, to: string): string {
     const [h, m] = hm.split(':')
     return Number(h) * 60 + Number(m)
   }
-  const mid = Math.floor((mins(from) + mins(to)) / 2)
+  // a 夜盤 (15:00-05:00) runs past midnight, so its end is a day later
+  const end = mins(to) <= mins(from) ? mins(to) + 1440 : mins(to)
+  const mid = Math.floor((mins(from) + end) / 2) % 1440
   return `${String(Math.floor(mid / 60)).padStart(2, '0')}:${String(mid % 60).padStart(2, '0')}`
 }
 

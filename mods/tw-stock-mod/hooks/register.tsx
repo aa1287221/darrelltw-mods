@@ -135,7 +135,7 @@ const TW_YAHOO_INDEX = '^TWII' // the Yahoo route's only index; ^TWOII answers a
 /** a footer index row on the MIS route; `code`/`ex` are what misChannel() reads */
 type TwIndex = { code: string; name: string; ex: TwExchange }
 
-type MarketId = 'tw' | 'us'
+type MarketId = 'tw' | 'us' | 'tf'
 type Phase = 'open' | 'closed'
 type MarketMode = 'auto' | MarketId
 /** a route the Taiwan feed can try, in the order `Config.twSources` lists them */
@@ -214,6 +214,9 @@ const US_LIST: Ticker[] = [
   { code: 'ARM', name: 'Arm', prevClose: 239.01, amp: 1.25, phase: 4.8, period: 46, drift: 0.55 },
 ]
 
+/** one trading session, minutes from local midnight; close <= open means it runs past midnight */
+type Session = { open: number; close: number }
+
 type MarketConf = {
   label: string
   list: Ticker[]
@@ -222,9 +225,8 @@ type MarketConf = {
   indexClose: number
   indexAmp: number
   indexDrift: number
-  /** minutes from local midnight */
-  open: number
-  close: number
+  /** weekday sessions in the day's order; 台指期 has two, the stock markets one */
+  sessions: Session[]
   offset: (now: number) => number
 }
 
@@ -253,8 +255,7 @@ const MARKETS: Record<MarketId, MarketConf> = {
     indexClose: 45862.52,
     indexAmp: 0.6,
     indexDrift: 0.75,
-    open: 9 * 60,
-    close: 13 * 60 + 30,
+    sessions: [{ open: 9 * 60, close: 13 * 60 + 30 }],
     offset: () => 8,
   },
   us: {
@@ -265,9 +266,24 @@ const MARKETS: Record<MarketId, MarketConf> = {
     indexClose: 26333.04,
     indexAmp: 0.5,
     indexDrift: -0.35,
-    open: 9 * 60 + 30,
-    close: 16 * 60,
+    sessions: [{ open: 9 * 60 + 30, close: 16 * 60 }],
     offset: usEasternOffset,
+  },
+  // 台灣期貨: no built-in list (the config's `futures` is the only source) and
+  // no demo walk - every zero here keeps the index card from inventing a level.
+  tf: {
+    label: '台指期',
+    list: [],
+    hours: '08:45-13:45 · 15:00-05:00',
+    indexName: '台指期',
+    indexClose: 0,
+    indexAmp: 0,
+    indexDrift: 0,
+    sessions: [
+      { open: 8 * 60 + 45, close: 13 * 60 + 45 },
+      { open: 15 * 60, close: 5 * 60 },
+    ],
+    offset: () => 8,
   },
 }
 
@@ -288,43 +304,73 @@ function localParts(now: number, offsetHours: number): LocalParts {
 
 const TAIPEI_OFFSET = 8 // UTC+8 all year, no daylight saving
 
-function isWeekday(dow: number): boolean {
-  return dow >= 1 && dow <= 5
-}
+/** one session on one weekday, as minutes since Sunday 00:00 market-local (`start` < `end`) */
+type SessionSpan = { session: Session; start: number; end: number }
 
 // PROTOTYPE LIMIT: weekday-only. Taiwan and US market holidays (and the
 // Taiwan make-up trading Saturdays) are not in here - a real feed's own
 // "no trades today" answer is what should decide this later.
+//
+// A session starts on a weekday and runs for its length, so a 夜盤 that
+// starts Friday 15:00 ends Saturday 05:00 and nothing starts on a weekend.
+// The week before and after are included so a lookup near Sunday midnight
+// still finds Friday's close and Monday's open.
+function sessionSpans(market: MarketId): SessionSpan[] {
+  const out: SessionSpan[] = []
+  for (const session of MARKETS[market].sessions) {
+    const length = (((session.close - session.open) % 1440) + 1440) % 1440
+    for (const week of [-1, 0, 1]) {
+      for (let dow = 1; dow <= 5; dow++) {
+        const start = (week * 7 + dow) * 1440 + session.open
+        out.push({ session, start, end: start + length })
+      }
+    }
+  }
+  return out
+}
+
+function weekMinute(now: number, market: MarketId): number {
+  const { dow, minutes } = localParts(now, MARKETS[market].offset(now))
+  return dow * 1440 + minutes
+}
+
+/** the session trading right now, if any */
+function openSession(now: number, market: MarketId): Session | undefined {
+  const t = weekMinute(now, market)
+  return sessionSpans(market).find(s => s.start <= t && t < s.end)?.session
+}
+
 function phaseOf(now: number, market: MarketId): Phase {
-  const conf = MARKETS[market]
-  const { dow, minutes } = localParts(now, conf.offset(now))
-  return isWeekday(dow) && minutes >= conf.open && minutes < conf.close ? 'open' : 'closed'
+  return openSession(now, market) ? 'open' : 'closed'
+}
+
+/** the next session to open and how far away it is */
+function nextSession(now: number, market: MarketId): { session: Session; minutes: number } {
+  const t = weekMinute(now, market)
+  let best: SessionSpan | undefined
+  for (const s of sessionSpans(market)) if (s.start > t && (!best || s.start < best.start)) best = s
+  return { session: best!.session, minutes: best!.start - t }
+}
+
+/** the session that closed most recently and how long ago */
+function lastSession(now: number, market: MarketId): { session: Session; minutes: number } {
+  const t = weekMinute(now, market)
+  let best: SessionSpan | undefined
+  for (const s of sessionSpans(market)) if (s.end <= t && (!best || s.end > best.end)) best = s
+  return { session: best!.session, minutes: t - best!.end }
+}
+
+/** the session the board describes: the one trading, else the one that closed last */
+function currentSession(now: number, market: MarketId): Session {
+  return openSession(now, market) ?? lastSession(now, market).session
 }
 
 function minutesToOpen(now: number, market: MarketId): number {
-  const conf = MARKETS[market]
-  const { dow, minutes } = localParts(now, conf.offset(now))
-  if (isWeekday(dow) && minutes < conf.open) return conf.open - minutes
-  let days = 1
-  let d = (dow + 1) % 7
-  while (!isWeekday(d)) {
-    days += 1
-    d = (d + 1) % 7
-  }
-  return days * 1440 - minutes + conf.open
+  return nextSession(now, market).minutes
 }
 
 function minutesSinceClose(now: number, market: MarketId): number {
-  const conf = MARKETS[market]
-  const { dow, minutes } = localParts(now, conf.offset(now))
-  if (isWeekday(dow) && minutes >= conf.close) return minutes - conf.close
-  let days = 1
-  let d = (dow + 6) % 7
-  while (!isWeekday(d)) {
-    days += 1
-    d = (d + 6) % 7
-  }
-  return days * 1440 - conf.close + minutes
+  return lastSession(now, market).minutes
 }
 
 /** when this market last closed, as a timestamp - minutesSinceClose walks back
@@ -341,8 +387,8 @@ function sessionNote(now: number, market: MarketId, phase: Phase): string {
   const conf = MARKETS[market]
   const zone = MARKETS[market].offset(now) === TAIPEI_OFFSET ? '' : ' ET'
   if (phase === 'open') return conf.hours
-  const mins = minutesToOpen(now, market)
-  return mins <= 1440 ? `下次開盤 ${hhmm(conf.open)}${zone}` : `下個交易日 ${hhmm(conf.open)}${zone}`
+  const { session, minutes } = nextSession(now, market)
+  return minutes <= 1440 ? `下次開盤 ${hhmm(session.open)}${zone}` : `下個交易日 ${hhmm(session.open)}${zone}`
 }
 
 // The person reading this band lives in Taipei, so US hours in ET answer the
@@ -354,7 +400,8 @@ function taipeiNote(now: number, market: MarketId, phase: Phase): string {
   if (conf.offset(now) === TAIPEI_OFFSET) return ''
   const shift = (TAIPEI_OFFSET - conf.offset(now)) * 60
   const at = (minutes: number) => hhmm((((minutes + shift) % 1440) + 1440) % 1440)
-  return phase === 'open' ? `台灣 ${at(conf.open)}-${at(conf.close)}` : `台灣 ${at(conf.open)}`
+  const session = phase === 'open' ? currentSession(now, market) : nextSession(now, market).session
+  return phase === 'open' ? `台灣 ${at(session.open)}-${at(session.close)}` : `台灣 ${at(session.open)}`
 }
 
 const PREVIEW_MINS = 60 // how early a market takes the band over before it opens
@@ -363,10 +410,13 @@ const PREVIEW_MINS = 60 // how early a market takes the band over before it open
 // showing the market that closed MOST RECENTLY - its closing prices are the
 // news right after 13:30, not the other side of the world's pre-market - until
 // the other market is within PREVIEW_MINS of its open.
-function pickMarket(now: number, mode: MarketMode): { market: MarketId; phase: Phase } {
+// 台指期 only takes the band over while it is the one market trading (夜盤
+// after 台股 and before 美股); the closed-market race stays between tw and us.
+function pickMarket(now: number, mode: MarketMode, hasFutures: boolean): { market: MarketId; phase: Phase } {
   if (mode !== 'auto') return { market: mode, phase: phaseOf(now, mode) }
   if (phaseOf(now, 'tw') === 'open') return { market: 'tw', phase: 'open' }
   if (phaseOf(now, 'us') === 'open') return { market: 'us', phase: 'open' }
+  if (hasFutures && phaseOf(now, 'tf') === 'open') return { market: 'tf', phase: 'open' }
   const twToOpen = minutesToOpen(now, 'tw')
   const usToOpen = minutesToOpen(now, 'us')
   const soonest = Math.min(twToOpen, usToOpen)
@@ -568,7 +618,10 @@ type Config = {
   animation: 'full' | 'off'
   /** show how many seconds until the next feed request */
   countdown: boolean
+  /** `tf` is the config's `futures` list: no built-in default and no MAX_SYMBOLS cap (parseFutures) */
   lists: Record<MarketId, Ticker[]>
+  /** `futures` entries parseFutures dropped, so the poll can log them once */
+  droppedFutures: string[]
   /** `twSources` includes `"shioaji"` only - how the band runs the fetcher script itself */
   shioaji: ShioajiConfig
   /**
@@ -637,6 +690,33 @@ function parseList(value: unknown, builtin: Ticker[]): Ticker[] {
   return out.length > 0 ? out : builtin
 }
 
+/**
+ * The `futures` watchlist. Unlike parseList there is no built-in list to
+ * fall back to and no MAX_SYMBOLS cap (a futures market costs no Yahoo
+ * request); an entry without a string `code` is dropped and reported.
+ */
+function parseFutures(value: unknown): { list: Ticker[]; dropped: string[] } {
+  const list: Ticker[] = []
+  const dropped: string[] = []
+  if (!Array.isArray(value)) return { list, dropped }
+  for (const raw of value) {
+    const entry = asRecord(raw)
+    const code = entry ? str(entry.code, '') : ''
+    if (!entry || !code) {
+      dropped.push(JSON.stringify(raw))
+      continue
+    }
+    // the demo-walk fields are never used for tf (see buildProps), so they are zero
+    list.push({ code, name: str(entry.name, code), prevClose: 0, amp: 0, phase: 0, period: 1, drift: 0 })
+  }
+  return { list, dropped }
+}
+
+/** whether the config names any futures contract - the switch for the tf market */
+function hasFutures(cfg: Config): boolean {
+  return cfg.lists.tf.length > 0
+}
+
 function defaultConfig(): Config {
   return {
     market: 'auto',
@@ -651,9 +731,10 @@ function defaultConfig(): Config {
     twIndices: TW_INDICES,
     animation: 'full',
     countdown: true,
-    lists: { tw: TW_LIST, us: US_LIST },
+    lists: { tw: TW_LIST, us: US_LIST, tf: [] },
+    droppedFutures: [],
     shioaji: { python: 'python3', env: '~/.sinobon.env', interval: 10 },
-    holdings: { tw: [], us: [] },
+    holdings: { tw: [], us: [], tf: [] },
     holdingsSource: 'file',
   }
 }
@@ -678,6 +759,7 @@ function feedMarkets(cfg: Config, market: MarketId): MarketId[] {
 
 /** what one market costs per tick, before the chart view's own bar fetch is added */
 function marketRequests(cfg: Config, market: MarketId): number {
+  if (market === 'tf') return 0 // 永豐 only, never an HTTP request from this module
   if (market === 'us') return Math.ceil((cfg.lists.us.length + US_INDICES.length) / SPARK_BATCH)
   // The preferred route's own cost - shioaji costs this module no HTTP
   // requests at all, so it is estimated as Yahoo's (the likely fallback,
@@ -748,7 +830,7 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
   const cfg = defaultConfig()
   if (!root) return cfg
   const market = str(root.market, 'auto')
-  if (market === 'tw' || market === 'us' || market === 'auto') cfg.market = market
+  if (market === 'tw' || market === 'us' || market === 'tf' || market === 'auto') cfg.market = market
   cfg.refreshMs = Math.max(1000, num(root.refreshMs, cfg.refreshMs))
   if (root.sort === 'list') cfg.sort = 'list'
   if (root.highlight === false) cfg.highlight = false
@@ -771,12 +853,15 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
   cfg.pageMs = pageMs <= 0 ? 0 : Math.max(PAGE_MS_MIN, pageMs)
   if (root.animation === 'off' || root.animation === false) cfg.animation = 'off'
   if (root.countdown === false) cfg.countdown = false
-  cfg.lists = { tw: parseList(root.tw, TW_LIST), us: parseList(root.us, US_LIST) }
+  const futures = parseFutures(root.futures)
+  cfg.lists = { tw: parseList(root.tw, TW_LIST), us: parseList(root.us, US_LIST), tf: futures.list }
+  cfg.droppedFutures = futures.dropped
   cfg.twIndices = parseTwIndices(root.twIndices)
   const holdings = asRecord(root.holdings)
   cfg.holdings = {
     tw: parseHoldingsList(holdings?.tw),
     us: parseHoldingsList(holdings?.us),
+    tf: [], // 期貨庫存 comes from the fetcher's own file (T6), not a config block
   }
   if (root.holdingsSource === 'config') cfg.holdingsSource = 'config'
   return cfg
@@ -916,7 +1001,7 @@ function parseQuotes(text: string | undefined, now: number): QuotesFile | undefi
       bars: parseBars(entry.bars),
     }
   }
-  const market = root.market === 'tw' || root.market === 'us' ? root.market : undefined
+  const market = root.market === 'tw' || root.market === 'us' || root.market === 'tf' ? root.market : undefined
   const idx = asRecord(root.index)
   // a fetcher that carries more than one index (Taiwan has 加權 and 櫃買) can
   // hand the whole board over and the footer flips through it
@@ -988,7 +1073,7 @@ function parseHoldingsFile(text: string | undefined): HoldingsFile | undefined {
   const holdingsRaw = root.holdings
   const holdings = parseHoldingsList(holdingsRaw)
   if (holdings.length === 0) return undefined
-  const market = root.market === 'tw' || root.market === 'us' ? root.market : undefined
+  const market = root.market === 'tw' || root.market === 'us' || root.market === 'tf' ? root.market : undefined
   return {
     asOf: num(root.asOf, 0),
     market,
@@ -1304,8 +1389,9 @@ function buildProps(
   /** which code the chart view is following; undefined or off-screen falls back to position 0 */
   focusCode: string | undefined,
 ): BoardProps {
-  const { market, phase } = pickMarket(now, mode)
+  const { market, phase } = pickMarket(now, mode, hasFutures(cfg))
   const conf = MARKETS[market]
+  const session = currentSession(now, market)
   const list = cfg.lists[market]
   let usedFile = false
 
@@ -1331,6 +1417,9 @@ function buildProps(
       // instead (board.tsx reads QuoteRow.noData).
       return { ...quoteRow(sym, sym.prevClose, sym.prevClose), noData: true }
     }
+    // a leveraged contract is never shown with an invented price: no quotes
+    // source for tf means the no-data marker, not the demo walk
+    if (market === 'tf') return { ...quoteRow(sym, 0, 0), noData: true }
     return quoteRow(sym, demoPrice(sym, now), sym.prevClose)
   })
 
@@ -1457,7 +1546,7 @@ function buildProps(
   const focusIdx = Math.max(0, shown.findIndex(q => q.code === focusCode))
   if (view === 'chart' && shown.length > 0) {
     const q = shown[focusIdx]
-    if (!usedFile && (q.bars?.length ?? 0) < CHART_BARS) {
+    if (!usedFile && market !== 'tf' && (q.bars?.length ?? 0) < CHART_BARS) {
       const sym = list.find(t => t.code === q.code)
       if (sym) q.bars = demoBars(sym, now, CHART_BARS)
     }
@@ -1514,7 +1603,7 @@ function buildProps(
     // closed: the session's close time, so "收盤 13:30" cannot read as "last
     // updated".
     clock:
-      phase === 'open' ? localParts(quotesFile?.dataAt ?? now, conf.offset(now)).clock : hhmm(conf.close),
+      phase === 'open' ? localParts(quotesFile?.dataAt ?? now, conf.offset(now)).clock : hhmm(session.close),
     // the live dot advances once per snapshot, so a frozen feed shows a frozen
     // dot instead of an animation that says "live" whatever happens
     seq: quotesFile?.seq ?? 0,
@@ -1546,8 +1635,8 @@ function buildProps(
     view,
     focus: focusIdx,
     barLabel: quotesFile?.barLabel ?? (usedFile ? 'K 棒' : 'K 棒（示範）'),
-    sessionOpen: hhmm(conf.open),
-    sessionClose: hhmm(conf.close),
+    sessionOpen: hhmm(session.open),
+    sessionClose: hhmm(session.close),
     now,
     // The full priced list, not just the page on screen: board.tsx slices it
     // itself for the 5 rows it draws (holdingsScroll says where), but it
@@ -1573,6 +1662,9 @@ let lastHoldingsFile: HoldingsFile | undefined // runtime-dir or project holding
 // session, so a file left behind at the project path is reported once
 // instead of on every poll tick (see the poll loop's use of it below)
 let loggedLegacyProjectHoldings = false
+// same idea for invalid `futures` entries: the poll re-parses the config
+// every tick, and one typo is worth one line, not one per tick
+let loggedDroppedFutures = false
 // whether the runtime-dir quotes file specifically (not the project
 // override) is fresh - feedTwShioaji's own health signal, set every poll
 let runtimeQuotesFresh = false
@@ -1851,17 +1943,20 @@ type CycleStop = { market: MarketId; pnl: boolean }
 
 /**
  * The market button's cycle, in order: 美股 → (美股庫存, only when US
- * holdings are configured - file or config) → 台股 → 台股庫存 → back to 美股.
+ * holdings are configured - file or config) → 台股 → 台股庫存 → (台指期, only
+ * when the config lists `futures`) → back to 美股. 期貨庫存 (a futures
+ * holdings file with positions) will follow 台指期 once T6 lands.
  * 台股庫存 is always a stop even with no holdings at all (it draws the "沒有
  * 庫存資料" hint row instead of disappearing - a stop that vanishes
  * depending on data would make the cycle's length unpredictable from press
  * to press). Rebuilt on every press since holdings can change mid-session
  * (a fresh stock-holdings.json write, or /reload-plugins).
  */
-function buildCycle(hasUsHoldings: boolean): CycleStop[] {
+function buildCycle(hasUsHoldings: boolean, hasTfTable: boolean): CycleStop[] {
   const stops: CycleStop[] = [{ market: 'us', pnl: false }]
   if (hasUsHoldings) stops.push({ market: 'us', pnl: true })
   stops.push({ market: 'tw', pnl: false }, { market: 'tw', pnl: true })
+  if (hasTfTable) stops.push({ market: 'tf', pnl: false })
   return stops
 }
 
@@ -1872,8 +1967,8 @@ function buildCycle(hasUsHoldings: boolean): CycleStop[] {
  * `auto`) lands on the next stop after whatever the clock was already
  * showing, never a jump back onto the stop already on screen.
  */
-function nextCycleStop(current: CycleStop, hasUsHoldings: boolean): CycleStop {
-  const cycle = buildCycle(hasUsHoldings)
+function nextCycleStop(current: CycleStop, hasUsHoldings: boolean, hasTfTable: boolean): CycleStop {
+  const cycle = buildCycle(hasUsHoldings, hasTfTable)
   const idx = cycle.findIndex(s => s.market === current.market && s.pnl === current.pnl)
   return cycle[(idx < 0 ? 0 : idx + 1) % cycle.length]
 }
@@ -1987,6 +2082,10 @@ export const register: Register = on => {
       const projectHoldingsText = await readOptional(HOLDINGS_PATH)
 
       config = parseConfigRoot(mergedRoot)
+      if (config.droppedFutures.length > 0 && !loggedDroppedFutures) {
+        loggedDroppedFutures = true
+        $.ui.log(`tw-stock-mod: futures 有 ${config.droppedFutures.length} 筆沒有 code，已略過：${config.droppedFutures.join(', ')}`)
+      }
       const runtimeQuotes = parseQuotes(runtimeQuotesText, now)
       runtimeQuotesFresh = runtimeQuotes !== undefined
       lastFile = runtimeQuotes ?? parseQuotes(projectQuotesText, now)
@@ -2401,8 +2500,9 @@ export const register: Register = on => {
     }
 
     const feedOnce = async (now: number) => {
-      const onScreen = pickMarket(now, modeOverride ?? config.market).market
+      const onScreen = pickMarket(now, modeOverride ?? config.market, hasFutures(config)).market
       for (const market of feedMarkets(config, onScreen)) {
+        if (market === 'tf') continue // T4 wires the futures feed; nothing to fetch here yet
         if (!marketNeedsFeed(now, market)) continue
         if (market === 'us') await feedUs(now)
         else await feedTw(now)
@@ -2414,6 +2514,7 @@ export const register: Register = on => {
     // K bars come from Yahoo for both markets: MIS has no candles at all, and
     // a 5-minute bar twenty minutes old still draws the right shape.
     const feedBars = async (market: MarketId, code: string) => {
+      if (market === 'tf') return // Yahoo has no futures mapping; tf bars only ever come from the file (T3)
       const now = await $.clock.now()
       if (config.feed === 'off' || now < feedSkipUntil || barsInFlight) return
       const key = `${market}:${code}`
@@ -2490,7 +2591,8 @@ export const register: Register = on => {
 
     const cols = e.viewport?.columns ?? e.props.bodyColumns ?? 80
     const mode = modeOverride ?? config.market
-    const props = buildProps(now, config, quotesFor(pickMarket(now, mode).market, now), mode, view, focusCode)
+    const onScreen = pickMarket(now, mode, hasFutures(config)).market
+    const props = buildProps(now, config, quotesFor(onScreen, now), mode, view, focusCode)
     // buildProps chases focusCode to whatever position it actually landed on
     // (falling back to 0 when the code is unset, paged off, or gone from the
     // list) - syncing it back here keeps that landing code, not a stale one,
@@ -2511,7 +2613,7 @@ export const register: Register = on => {
     // own row directly above the table.
     //
     // The market button walks the whole cycle (buildCycle/nextCycleStop),
-    // not just the two markets - 美股 → (美股庫存) → 台股 → 台股庫存 → 美股.
+    // not just the markets - 美股 → (美股庫存) → 台股 → 台股庫存 → (台指期) → 美股.
     // `market`/`view` do not change here for any stop-internal reason (the
     // watchlist itself is unaffected by which stop is showing), so the feed
     // gating in feedOnce (which reads modeOverride's MARKET half only) never
@@ -2528,7 +2630,7 @@ export const register: Register = on => {
     }
     const onCycle = () => {
       const hasUsHoldings = holdingsFor('us', lastHoldingsFile, config).holdings.length > 0
-      const nextStop = nextCycleStop({ market: props.market, pnl: props.view === 'pnl' }, hasUsHoldings)
+      const nextStop = nextCycleStop({ market: props.market, pnl: props.view === 'pnl' }, hasUsHoldings, hasFutures(config))
       // A market switch starts the table back at page 0: the two markets'
       // page counts have no relation to each other, so carrying the old
       // index over lands on whichever page the new market's remainder
@@ -2547,7 +2649,7 @@ export const register: Register = on => {
       if (nextStop.pnl) turnPnl() // landing on a pnl stop flaps it in, like a mount
       // the market the button just landed on may never have been fetched: ask
       // for it now rather than showing demo prices until the next tick
-      if (!quotesFor(pickMarket(now, modeOverride).market, now)) requestFeed?.()
+      if (!quotesFor(pickMarket(now, modeOverride, hasFutures(config)).market, now)) requestFeed?.()
       $.ui.invalidate('ui.render')
     }
     const onSnooze = () => {
