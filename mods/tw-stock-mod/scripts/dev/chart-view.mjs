@@ -54,6 +54,9 @@ const TXF_60 = [
   ...walk(47400, 8, 60 * MIN, taipei(17, 15, 0), 60, 0),
 ]
 const SRF_5 = walk(109.4, 40, 5 * MIN, taipei(17, 19, 40), 0.25, 2)
+// a 2-point range at 0 decimals: interpolated labels round to the same text
+// (47,429 twice) unless the axis dedups them - the screenshot's bug, in miniature
+const MXF_5 = Array.from({ length: 30 }, (_, i) => [47429, 47430, 47428, i % 2 ? 47430 : 47429, 40 + (i % 7), taipei(17, 20, 30) + i * 5 * MIN])
 const SRF_PREV = Number((SRF_5[SRF_5.length - 1][3] + 0.3).toFixed(2)) // a down day, so it sorts behind TXFR1
 const futuresFile = asOf => ({
   asOf,
@@ -67,6 +70,7 @@ const futuresFile = asOf => ({
       bars: TXF_5,
       barsBy: { 1: TXF_1, 5: TXF_5, 15: TXF_15, 60: TXF_60 },
     },
+    MXFR1: { price: 47430, prevClose: 47428, name: '小型臺指 近月', multiplier: 50, decimals: 0, resolved: 'MXFJ6', bars: MXF_5 },
     SRFJ6: { price: SRF_5[SRF_5.length - 1][3], prevClose: SRF_PREV, name: '小型元大台灣50ETF期貨 202610', multiplier: 1000, decimals: 2, bars: SRF_5 },
   },
 })
@@ -298,6 +302,17 @@ btns.find(b => b.label === 'K線').press()
 ;({ props: q, btns } = await band.draw())
 ok(q.chartMode === 'candle' && !textOf(render(q)).slice(1, 12).some(l => BRAILLE.test(l)), 'K線 brings the candles back')
 
+// --- the tight range (MXFR1): two grid rows round to the same text ----------------
+btns.find(b => b.label.startsWith('下一檔 ▶')).press()
+;({ props: q, btns } = await band.draw())
+lines = textOf(render(q))
+console.log('MXFR1 (2-point range):')
+show(lines)
+ok(q.quotes[q.focus]?.code === 'MXFR1', `next symbol is MXFR1: ${q.quotes[q.focus]?.code}`)
+ys = axisNumbers(lines.slice(1, 12))
+ok(ys.length >= 3 && new Set(ys).size === ys.length && strictlyDecreasing(ys), `a 2-point range still labels uniquely: ${ys.join(' > ')}`)
+ok(ys[0] === 47430 && ys[ys.length - 1] === 47428 && ys.includes(47429), `47,430 tag, 47,429 once, 47,428 昨結: ${ys.join(' > ')}`)
+
 // --- the row without barsBy (SRFJ6): bars alone, no timeframe buttons ------------
 btns.find(b => b.label.startsWith('下一檔 ▶')).press()
 ;({ props: q, btns } = await band.draw())
@@ -307,6 +322,8 @@ ok(!btns.some(b => /^\[?\d+分\]?$/.test(b.label)), `no timeframe buttons for a 
 ok(q.quotes[q.focus]?.bars?.length === 40 && q.barLabel === '5 分 K（永豐）', 'SRFJ6 draws its own 5 分 bars')
 ys = axisNumbers(lines.slice(1, 12))
 ok(ys.includes(SRF_PREV) && new Set(ys).size === ys.length && strictlyDecreasing(ys), `2-decimal axis with 昨結 ${SRF_PREV}, unique and decreasing: ${ys.join(' > ')}`)
+btns.find(b => b.label === '◀ 上一檔').press()
+;({ btns } = await band.draw())
 btns.find(b => b.label === '◀ 上一檔').press()
 
 // --- height: the maxRows clamp and chartRows config ---------------------------------

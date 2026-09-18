@@ -235,7 +235,7 @@ cat > "$FIXTURES/chart-view/.claude/stock-band.json" <<'JSON'
   "pageMs": 0,
   "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
   "us": [],
-  "futures": [{ "code": "TXFR1", "name": "台指近" }, { "code": "SRFJ6" }]
+  "futures": [{ "code": "TXFR1", "name": "台指近" }, { "code": "MXFR1", "name": "小台近" }, { "code": "SRFJ6" }]
 }
 JSON
 cat > "$FIXTURES/chart-view-tw/.claude/stock-band.json" <<'JSON'
