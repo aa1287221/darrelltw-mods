@@ -274,3 +274,115 @@ def test_fetch_futures_rows_requests_yesterday_through_today():
     fetcher.fetch_futures_rows(api, {"TXFJ6": TXF_CONTRACT}, ["TXFJ6"], "2026-09-19")
 
     assert api.kbars_calls == [{"code": "TXFJ6", "start": "2026-09-18", "end": "2026-09-19"}]
+
+
+# ---------------------------------------------------------------------------
+# path 14: position -> holding row (Sell negative qty, multiplier carried,
+# cost = price) and the SDK pnl cross-check
+# ---------------------------------------------------------------------------
+
+class FakeAction:
+    """str(sj.Action.X) == 'Action.X' (verified 2026-09-18, see reference-
+    shioaji-api-facts.md) - a plain "Buy"/"Sell" string fixture would let a
+    `direction == "Buy"` mutation pass by accident."""
+
+    def __init__(self, name):
+        self._name = name
+
+    def __str__(self):
+        return f"Action.{self._name}"
+
+
+BUY = FakeAction("Buy")
+SELL = FakeAction("Sell")
+
+
+def make_position(code, direction, quantity, price, last_price, pnl):
+    return types.SimpleNamespace(
+        id=1, code=code, direction=direction, quantity=quantity,
+        price=price, last_price=last_price, pnl=pnl,
+    )
+
+
+def test_futures_holding_row_buy_is_positive_qty():
+    pos = make_position("TXFJ6", BUY, 2, 17000.0, 17050.0, 20000.0)
+
+    row = fetcher.futures_holding_row(pos, TXF_CONTRACT)
+
+    assert row["code"] == "TXFJ6"
+    assert row["direction"] == "Buy"
+    assert row["qty"] == 2
+    assert row["cost"] == 17000.0
+    assert row["price"] == 17050.0
+    assert row["prevClose"] == 17000.0
+    assert row["multiplier"] == 200
+
+
+def test_futures_holding_row_sell_is_negative_qty():
+    pos = make_position("SRFJ6", SELL, 3, 109.0, 108.0, -300.0)
+
+    row = fetcher.futures_holding_row(pos, SRF_CONTRACT)
+
+    assert row["direction"] == "Sell"
+    assert row["qty"] == -3
+    assert row["cost"] == 109.0
+    assert row["price"] == 108.0
+    assert row["prevClose"] == 108.3
+    assert row["multiplier"] == 1000
+
+
+def test_futures_holding_row_drops_zero_quantity():
+    pos = make_position("TXFJ6", BUY, 0, 17000.0, 17050.0, 0.0)
+    assert fetcher.futures_holding_row(pos, TXF_CONTRACT) is None
+
+
+def test_check_futures_pnl_matches_sdk_value_within_float_noise():
+    # (109.5 - 108.3) * 1 * 1000 lands on 1200.0000000000027 in Python float
+    # math, not 1200.0 - an `==` check would fail this "matching" fixture for
+    # the wrong reason, which is the point of this test.
+    pos = make_position("SRFJ6", BUY, 1, 108.3, 109.5, 1200.0)
+    assert fetcher.check_futures_pnl(pos, SRF_CONTRACT) is None
+
+
+def test_check_futures_pnl_flags_mismatch():
+    # (17050 - 17000) * 2 * 200 = 20000, not 999 - wrong on purpose
+    pos = make_position("TXFJ6", BUY, 2, 17000.0, 17050.0, 999.0)
+
+    mismatch = fetcher.check_futures_pnl(pos, TXF_CONTRACT)
+
+    assert mismatch is not None
+    assert "999" in mismatch
+    assert "20000" in mismatch
+
+
+# ---------------------------------------------------------------------------
+# path 15 (holdings half): futures-holdings.json payload from canned rows
+# ---------------------------------------------------------------------------
+
+def test_build_futures_holdings_payload_shape():
+    rows = [
+        fetcher.futures_holding_row(make_position("TXFJ6", BUY, 2, 17000.0, 17050.0, 20000.0), TXF_CONTRACT),
+        fetcher.futures_holding_row(make_position("SRFJ6", SELL, 3, 109.0, 108.0, -300.0), SRF_CONTRACT),
+    ]
+
+    payload = fetcher.build_futures_holdings_payload(rows)
+
+    assert payload["market"] == "tf"
+    assert payload["source"] == "永豐 期貨"
+    assert len(payload["holdings"]) == 2
+    codes = {h["code"] for h in payload["holdings"]}
+    assert codes == {"TXFJ6", "SRFJ6"}
+    directions = {h["code"]: h["direction"] for h in payload["holdings"]}
+    assert directions == {"TXFJ6": "Buy", "SRFJ6": "Sell"}
+
+
+def test_build_futures_holdings_payload_empty_rows_still_has_shape():
+    # unsigned/missing futopt_account: an empty payload, never None, is
+    # written every tick so the band can tell "no positions" from "fetcher
+    # dead" from asOf alone.
+    payload = fetcher.build_futures_holdings_payload([])
+
+    assert payload["market"] == "tf"
+    assert payload["source"] == "永豐 期貨"
+    assert payload["holdings"] == []
+    assert "asOf" in payload
