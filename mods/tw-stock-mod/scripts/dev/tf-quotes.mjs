@@ -168,6 +168,7 @@ ok(/\+129\b/.test(rowOf('TXFR1')) && !rowOf('TXFR1').includes('+129.00'), 'TXFR1
 ok(rowOf('SRFJ6').includes('110.35') && rowOf('SRFJ6').includes('+2.05'), `SRFJ6 drawn with 2 decimals: ${rowOf('SRFJ6').trim()}`)
 ok(rowOf('TXFR1').includes('台指近 (TXFJ6)'), 'name column shows the resolved month')
 ok(lines.some(l => l.includes('永豐')) && !lines.some(l => l.includes('示範')), 'footer says 永豐, never 示範')
+ok(lines.some(l => /^\s*台指近\s+47,557\.00 ▲ \+129\.00 \+0\.27%/.test(l)), `footer card: 台指近 price ▲ change pct%: ${lines.find(l => /^\s*台指近\s/.test(l))?.trim()}`)
 
 // --- path 8: chart view on a tf symbol - file bars, no Yahoo ---------------
 btns.find(b => b.label === '趨勢圖').press()

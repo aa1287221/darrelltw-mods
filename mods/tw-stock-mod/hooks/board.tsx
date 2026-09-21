@@ -376,13 +376,14 @@ function cardFields(idx: IndexRow, w: number[], market: MarketId): Field[] {
     { text: padLeft(thousands(idx.value), w[1]), fg: WHITE, drum: NUM_DRUM },
     { text: arrow, fg, drum: '' },
     { text: padLeft(signed(idx.change), w[2]), fg, drum: NUM_DRUM },
+    { text: padLeft(`${signed(idx.pct)}%`, w[3]), fg, drum: NUM_DRUM },
   ]
 }
 
 /** the widest each field gets across every card, so the layout never shifts */
 function cardWidths(board: IndexRow[]): number[] {
   const wide = (f: (i: IndexRow) => string) => Math.max(...board.map(i => dispWidth(f(i))))
-  return [wide(i => i.name), wide(i => thousands(i.value)), wide(i => signed(i.change))]
+  return [wide(i => i.name), wide(i => thousands(i.value)), wide(i => signed(i.change)), wide(i => `${signed(i.pct)}%`)]
 }
 
 /**
