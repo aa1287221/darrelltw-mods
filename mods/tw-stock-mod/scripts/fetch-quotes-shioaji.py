@@ -819,9 +819,23 @@ def build_holdings_payload(positions: list, contracts: dict, quotes: dict, watch
 
 
 def pid_alive(pid: int) -> bool:
+    """A stopped (T/t) or zombie owner is not feeding: kill -0 still says
+    alive, so the band would skip respawning for as long as it stays that
+    way (a Ctrl-Z'd claude session drags the fetcher down with it). Kill a
+    stopped one so it cannot wake later and double-write the runtime dir."""
     try:
         os.kill(pid, 0)
     except OSError:
+        return False
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return True
+    if state in ("T", "t", "Z"):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
         return False
     return True
 
