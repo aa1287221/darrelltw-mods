@@ -151,6 +151,8 @@ ok(srf?.prevClose === 108.3 && Math.abs(srf.pct - pct(110.35, 108.3)) < 1e-9, `S
 ok(q.source === 'file', `source is the file: ${q.source}`)
 ok(q.sourceLabel === '永豐', `footer names the file's source: ${q.sourceLabel}`)
 ok(q.barLabel === '5 分 K（永豐）', `bar label from the file: ${q.barLabel}`)
+ok(q.index.name === '台指近' && q.index.value === 47557 && q.index.change === 129 && Math.abs(q.index.pct - pct(47557, 47428)) < 1e-9,
+  `footer index is 台指近's own price/change: ${q.index.name} ${q.index.value} ${q.index.change} ${q.index.pct}`)
 
 // --- path 11: the alias row shows what it resolved to ----------------------
 ok(txf?.name === '台指近 (TXFJ6)', `alias row: config name + resolved month: "${txf?.name}"`)
@@ -208,6 +210,7 @@ console.log('stale rows:', q.quotes.map(r => `${r.code} price=${r.price} noData=
 ok(q.quotes.length === 2 && q.quotes.every(r => r.noData === true), 'stale file: every tf row is a no-data row')
 ok(q.quotes.every(r => r.price === 0), 'stale file: no price at all, not the file price and not a demo walk')
 ok(q.source !== 'demo', `stale file: the footer does not claim 示範 prices for dashes: ${q.source}`)
+ok(q.index.value === 0 && q.index.change === 0, `stale file: footer index falls back to 0, never the stale price: ${q.index.value}`)
 lines = boardText(q)
 show(lines)
 ok(!lines.some(l => l.includes('示範')), 'stale file: board footer never says 示範')

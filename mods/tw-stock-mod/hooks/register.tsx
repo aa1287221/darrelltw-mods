@@ -2231,11 +2231,22 @@ function buildProps(
     }
   }
 
-  const idxPct = quotesFile?.index
-    ? quotesFile.index.pct
-    : conf.indexDrift + conf.indexAmp * Math.sin((2 * Math.PI * (now / 1000)) / 89)
-  const idxValue = quotesFile?.index ? quotesFile.index.value : conf.indexClose * (1 + idxPct / 100)
-  const idxChange = quotesFile?.index ? quotesFile.index.change : idxValue - conf.indexClose
+  // tf has no index feed: the footer shows 台指近 (TXFR1, else the first
+  // contract) from the fresh file, and 0 with no file - never a demo walk.
+  const tfIdxCode =
+    market === 'tf' && usedFile && quotesFile ? (quotesFile.quotes.TXFR1 ? 'TXFR1' : Object.keys(quotesFile.quotes)[0]) : undefined
+  const tfIdx = tfIdxCode ? quotesFile?.quotes[tfIdxCode] : undefined
+  const tfPrev = tfIdx?.prevClose ?? 0
+  const idxName = tfIdxCode ? (list.find(t => t.code === tfIdxCode)?.name ?? tfIdxCode) : conf.indexName
+  const idxPct = tfIdx
+    ? tfPrev > 0 ? ((tfIdx.price - tfPrev) / tfPrev) * 100 : 0
+    : market === 'tf'
+      ? 0
+      : quotesFile?.index
+        ? quotesFile.index.pct
+        : conf.indexDrift + conf.indexAmp * Math.sin((2 * Math.PI * (now / 1000)) / 89)
+  const idxValue = tfIdx ? tfIdx.price : quotesFile?.index ? quotesFile.index.value : conf.indexClose * (1 + idxPct / 100)
+  const idxChange = tfIdx ? tfIdx.price - tfPrev : quotesFile?.index ? quotesFile.index.change : idxValue - conf.indexClose
 
   // The pnl view's own list and scroll position - see the `pnlScroll` module
   // state comment for why it is not the watchlist's `page`.
@@ -2299,13 +2310,13 @@ function buildProps(
     animation: cfg.animation,
     countdown: cfg.countdown,
     quotes: shown,
-    index: { name: conf.indexName, value: idxValue, change: idxChange, pct: idxPct },
+    index: { name: idxName, value: idxValue, change: idxChange, pct: idxPct },
     // Taiwan has one index and no feed, so it falls through to the single row
     // and the board's flip finds nothing to flip
     indices:
       quotesFile?.indices && quotesFile.indices.length > 0
         ? quotesFile.indices
-        : [{ name: conf.indexName, value: idxValue, change: idxChange, pct: idxPct }],
+        : [{ name: idxName, value: idxValue, change: idxChange, pct: idxPct }],
     // tf without a fresh file draws dashes, not fake prices - so the footer
     // must not say 示範 (nor blink a live dot) over them
     source: usedFile ? (quotesFile?.origin ?? 'file') : market === 'tf' ? 'file' : 'demo',
