@@ -13,7 +13,7 @@
       "name": "tw-stock-mod",
       "source": "./mods/tw-stock-mod",
       "category": "productivity",
-      "description": "台股／美股看板：紅漲綠跌（台股）／綠漲紅跌（美股），券商風格表格，還有一個損益模式看你的庫存。報價預設走 Yahoo，免金鑰；永豐 Shioaji 為可選即時路線，照個人偏好順序（`~/.claude/stock-band.json`）嘗試。零模型 token。"
+      "description": "台股／美股看板：紅漲綠跌（台股）／綠漲紅跌（美股），券商風格表格，還有一個損益模式看你的庫存。報價預設走 Yahoo，免金鑰；永豐 Shioaji（macOS／Linux）與群益 Capital（Windows）是可選的即時路線，照個人偏好順序（`~/.claude/stock-band.json`）嘗試。零模型 token。"
     }
   ]
 }

@@ -23,9 +23,11 @@ function findClient(node) {
 
 let moduleTick = 0
 
-async function runCase(label, { userText, projectText, quotesText } = {}) {
+// `homeVar` picks which environment variable carries the home directory, and
+// `cwd` what $.session.cwd() answers - both so a case can stand in for
+// Windows, where $HOME is unset and a project path looks like `D:\app`.
+async function runCase(label, { userText, projectText, quotesText, homeVar = 'HOME', cwd = '/fake-project' } = {}) {
   const home = '/fake-home'
-  const cwd = '/fake-project'
   const files = {}
   if (userText !== undefined) files[`${home}/.claude/stock-band.json`] = userText
   if (projectText !== undefined) files['.claude/stock-band.json'] = projectText
@@ -44,7 +46,7 @@ async function runCase(label, { userText, projectText, quotesText } = {}) {
         files[path] = text
       },
     },
-    env: { get: async name => (name === 'HOME' ? home : undefined) },
+    env: { get: async name => (name === homeVar ? home : undefined) },
     session: { cwd: async () => cwd },
     process: {
       run: async (argv, init) => {
@@ -136,6 +138,50 @@ const d = await runCase('(d) shioaji stale falls through to yahoo this tick', {
 const dOk = d.processRuns.length === 1 && d.logs.some(l => l.includes('query1.finance.yahoo.com')) && d.p?.sourceLabel === 'Yahoo 延遲'
 console.log(`(d) PASS=${dOk}\n`)
 
-const allOk = aOk && bOk && cOk && dOk
+// (e) ["capital", "yahoo"], same fallthrough as (d) but through the other
+// broker route - and its spawn must be the PLAIN argv (python, script, ...),
+// never the /bin/sh + nohup wrapper, since 群益 only runs on Windows where
+// neither exists. `--detach` is what stands in for the backgrounding there,
+// so its presence is the thing worth pinning: without it $.process.run would
+// hang on the fetcher's pipes for the whole 15 s timeout.
+const e = await runCase('(e) capital stale falls through to yahoo this tick', {
+  projectText: JSON.stringify({
+    market: 'tw',
+    twSources: ['capital', 'yahoo'],
+    capital: { python: 'python', env: '/nonexistent-env-file', dll: 'C:/nope/SKCOM.dll', interval: 10 },
+  }),
+})
+const eArgv = e.processRuns[0]?.argv ?? []
+const eOk =
+  e.processRuns.length === 1 &&
+  eArgv[0] === 'python' &&
+  String(eArgv[1]).endsWith('fetch-quotes-capital.py') &&
+  eArgv.includes('--detach') &&
+  eArgv.includes('--dll') &&
+  e.logs.some(l => l.includes('query1.finance.yahoo.com')) &&
+  e.p?.sourceLabel === 'Yahoo 延遲'
+console.log(`(e) PASS=${eOk}\n`)
+
+// (f) Windows shape: no $HOME (only %USERPROFILE%) and a drive-letter cwd.
+// The runtime dir must still land under the home directory - falling back to
+// `<project>/.claude/` would write one person's live prices and PID file into
+// a shared repo - and its slug must be a legal directory name, so the drive
+// colon and the backslashes all become "-" (`D:\app` -> `D--app`).
+const f = await runCase('(f) windows: USERPROFILE home + drive-letter cwd', {
+  homeVar: 'USERPROFILE',
+  cwd: 'D:\\fake-project',
+  projectText: JSON.stringify({
+    market: 'tw',
+    twSources: ['capital', 'yahoo'],
+    capital: { python: 'python', env: '/nonexistent-env-file', dll: 'C:/nope/SKCOM.dll', interval: 10 },
+  }),
+})
+const fArgv = f.processRuns[0]?.argv ?? []
+const fOutDir = fArgv[fArgv.indexOf('--out-dir') + 1]
+const fOk = f.processRuns.length === 1 && fOutDir === '/fake-home/.claude/stock-band/D--fake-project/'
+console.log(`(f) out-dir=${fOutDir}`)
+console.log(`(f) PASS=${fOk}\n`)
+
+const allOk = aOk && bOk && cOk && dOk && eOk && fOk
 console.log(allOk ? 'ALL PASS' : 'SOME FAILED')
 process.exit(allOk ? 0 : 1)

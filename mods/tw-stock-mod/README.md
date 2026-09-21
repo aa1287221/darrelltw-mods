@@ -13,8 +13,9 @@ swaps the table for one symbol's K bars.
 Both read Yahoo's public endpoints by default (`Yahoo 即時` for the US,
 `Yahoo 延遲` for Taiwan, since Yahoo's Taiwan quotes run about twenty minutes
 behind) — no key and no account either way. Set `"twSources": ["shioaji"]` for
-real intraday ticks through a 永豐 brokerage account — the band runs the
-fetcher itself (`永豐 即時`). A market the feed cannot reach falls back to a
+real intraday ticks through a 永豐 brokerage account, or `["capital"]` for a
+群益 one on Windows — the band runs the fetcher itself either way (`永豐 即時` /
+`群益 即時`). A market the feed cannot reach falls back to a
 deterministic sine walk off each symbol's previous close and the footer says
 `示範資料（未接 API）`, so the tag always tells you what you are looking at.
 See [The live feed](#the-live-feed). **台灣期貨 (`tf`) is a third market**,
@@ -78,24 +79,29 @@ claude plugin marketplace remove darrelltw-mods
 
 Run the uninstall from the same project, and match the scope you installed
 with: a `user` install needs `--scope user`. Uninstalling leaves the runtime
-files behind in `~/.claude/stock-band/<project slug>/` (quote cache, holdings
-cache, heartbeat, 永豐's log and pid, and — with a `futures` list configured —
-`futures-quotes.json`/`futures-holdings.json` too) — delete that whole folder
-to clean those up too, using the same slug rule as 哪個檔放哪裡 below. The
-folder only exists once 永豐's fetcher has run; a Yahoo-only install never
-creates it.
+files behind in `~/.claude/stock-band/<project slug>/` (quote cache,
+heartbeat, a broker fetcher's log and pid, the SDK's own `shioaji.log` or
+`CapitalLog/`, any holdings it fetched, and — with a `futures` list configured —
+`futures-quotes.json`/`futures-holdings.json` too) — delete that whole folder to
+clean those up too, using the same slug rule as 哪個檔放哪裡 below. The folder
+only exists once a broker fetcher has run; a Yahoo-only install never creates
+it. On Windows the same folder sits under `%USERPROFILE%`, since Windows does
+not set `HOME`.
 
 **哪個檔放哪裡.** `~/.claude/stock-band.json`（使用者層級，不進版控）放個人偏好——
-`twSources`、`shioaji` 的券商路徑；`<project>/.claude/stock-band.json`（可進版控）放
-觀察清單，包含 `futures`。專案檔的 key 蓋掉個人檔同名的 key，見 [Configure](#configure)。
+`twSources`、`shioaji`／`capital` 的券商路徑；`<project>/.claude/stock-band.json`
+（可進版控）放觀察清單，包含 `futures`。專案檔的 key 蓋掉個人檔同名的 key，見
+[Configure](#configure)。
 
-**band 不會在你的 repo 裡寫任何檔。** 報價、庫存、心跳、永豐 log、永豐 pid 這幾類
+**band 不會在你的 repo 裡寫任何檔。** 報價、庫存、心跳、券商 log、券商 pid 這幾類
 執行期檔案都寫進 `~/.claude/stock-band/<專案路徑 slug>/`，不再寫進專案的 `.claude/`
 ——`<project>/.claude/stock-band.json` 因此可以放心進版控，只有券商路徑該留在個人檔。
 有 `futures` 設定時，報價與庫存各多一份 `futures-quotes.json`／
-`futures-holdings.json`，共七個檔案，見 [Taiwan futures (tf)](#taiwan-futures-tf)。
-Shioaji SDK 自己寫的 `shioaji.log` 也在這個執行期目錄——`fetch-quotes-shioaji.py`
-會先切到這裡再匯入 shioaji，所以不會跑進你的 repo。
+`futures-holdings.json`，見 [Taiwan futures (tf)](#taiwan-futures-tf)。
+SDK 自己寫的 log 也在這個執行期目錄：`fetch-quotes-shioaji.py` 會先切到這裡再匯入
+shioaji，`fetch-quotes-capital.py` 則把 SKCOM 的 `CapitalLog/` 指到這裡，所以都不會
+跑進你的 repo。Windows 沒有 `HOME`，這個目錄會落在 `%USERPROFILE%` 底下，slug 也會把
+磁碟機代號的冒號和反斜線一起換成 `-`（`D:\app` → `D--app`）。
 
 ## Nothing shows up?
 
@@ -388,26 +394,29 @@ watchlist, copy [`stock-band.example.json`](stock-band.example.json) to
 never inside a project — outside version control) is read first, then
 `<project>/.claude/stock-band.json` on top of it: any key the project file
 states wins, and any key only the user file states still applies. Your own
-source order and broker paths (`twSources`, `shioaji`) belong in the
+source order and broker paths (`twSources`, `shioaji`, `capital`) belong in the
 user-level file, so a shared project's config stays neutral and each person
 who opens it keeps their own preference — see
 [Your own source order](#your-own-source-order).
 
 | key | default | meaning |
 | --- | --- | --- |
-| `market` | `"auto"` | the state a session starts in: `auto` picks by the clock and keeps tracking it until a tab is pressed; `tw`/`us`/`tf` opens on that market instead |
+| `market` | `"auto"` | the state a session starts in: `auto` picks by the clock (台股 / 美股, or 台指期 while its session is the only one trading) and keeps tracking it until a stop is picked; `tw`/`us`/`tf`/`crypto` opens on that market instead. `crypto` never wins `auto` on its own — a 24/7 market would otherwise take the band over every tick |
+| `marketSwitcher` | `"tabbar"` | how the band switches market/holdings stops. `tabbar` (this fork's default, issue #9) draws one plain tab per stop — 美股 / [美股庫存] / 台股 / 台股庫存 / [台指期] / [期貨庫存] / [加密貨幣], the bracketed ones only when configured or held — with the current one marked `[台指期]`; the row never collapses, the session notes after it give way instead. Upstream's three alternatives: `select` draws a `市場 ▾` dropdown, `tabs` draws upstream's own tab Buttons (台股 first, `·庫存` for the holdings stops, collapsing to `cycle` when the terminal is too narrow), `cycle` draws one `‹ 台股 1/7 ›` Button that walks the stops in order. An unrecognized value falls back to `tabbar` |
 | `refreshMs` | `3000` | how often the module rebuilds the snapshot (min 1000; fixed at session start — changing it needs `/reload-plugins`). `1000` redraws every second, which is what makes the 永豐 tick overlay visible — see [Taiwan futures (tf)](#taiwan-futures-tf) |
 | `chartRows` | `16` | how tall the trend view is, in rows (min 8; clamped to the band's `maxRows − 2` at render so it never scrolls). `8` is the old one-screen layout; under 12 the volume rows go — see [The trend view](#the-trend-view-k-bars) |
-| `sort` | `"change"` | `change` = by change% desc, `list` = your order |
+| `sort` | per market | `change` = by change% desc, `list` = your order; `marketcap` / `volume` are crypto-only (CoinGecko supply × live price / Pionex 24h USDT turnover) and fall back to `change` on the other markets. Unset, 台股/美股/台指期 open on `change` and 加密貨幣 on `marketcap` |
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
 | `columns` | `"auto"` | how many symbols a row draws: `auto` = the fewest of 1–4 that hold the watchlist in the band's quote rows, as many as the terminal's width allows (1 when the list is 5 symbols or fewer; 2 from 77 columns, 3 from 118, 4 from 159); `1`/`2`/`3`/`4` force it, capped by the same width rule (a 74-column terminal draws one column whatever this says) — see [What the band shows](#what-the-band-shows) |
 | `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only. `tf` is not a value here — a non-empty `futures` list feeds itself automatically whenever `feed` is not `"off"`, on top of whatever this says, since it costs no HTTP request — see [Taiwan futures (tf)](#taiwan-futures-tf) |
-| `twSources` | `["yahoo"]` | Taiwan's routes, in preference order — the band tries the first and falls through to the next for a tick that one has nothing fresh for. `yahoo` = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `shioaji` = 永豐 real-time ticks, the band runs the fetcher itself — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher). A legacy `"twSource": "x"` (a single string) still works as an alias for `["x"]`. The shipped default never includes `shioaji` — put that in your own `~/.claude/stock-band.json` |
+| `twSources` | `["yahoo"]` | Taiwan's routes, in preference order — the band tries the first and falls through to the next for a tick that one has nothing fresh for. `yahoo` = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `shioaji` = 永豐 real-time ticks on macOS/Linux and `capital` = 群益 real-time ticks on Windows, the band runs the fetcher itself either way — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher) and [群益 Capital as that fetcher](#群益-capital-as-that-fetcher). A legacy `"twSource": "x"` (a single string) still works as an alias for `["x"]`. The shipped default never includes a broker route — put that in your own `~/.claude/stock-band.json` |
 | `shioaji` | `{ "python": "python3", "env": "~/.sinobon.env", "interval": 10 }` | read only when `"shioaji"` is somewhere in `twSources` — the interpreter, the env file holding `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` (`~` expands to `$HOME`), and seconds between snapshots |
+| `capital` | `{ "python": "python", "env": "~/.capital.env", "dll": "", "interval": 10, "indices": [TSEA, OTCA] }` | read only when `"capital"` is somewhere in `twSources` — the interpreter (must have `comtypes` and match the registered 元件's bitness), the env file holding `CAPITAL_USER_ID`/`CAPITAL_PASSWORD`, the path to the registered `SKCOM.dll` (**no default** — 群益 ships a zip with no install location), seconds between snapshots, and the SKCOM 商品代號 the footer's index board flaps through (`[]` turns it off) |
 | `feedMs` | `30000` | seconds between feed requests, in ms (floor 15000 — below that Yahoo answers 429; the request budget can widen it further) |
 | `pageMs` | `10000` | how long one page holds before the board turns, in ms (floor 4000; `0` turns auto-paging off and leaves `翻頁` as the only way to page). Pressing `翻頁` restarts this countdown |
 | `tw` / `us` | built-in lists | `{ code, name, prevClose }` per symbol; only `code` is required. Taiwan 上櫃 symbols need `"ex": "otc"` (e.g. 6488 環球晶) |
 | `futures` | `[]` | Taiwan futures contracts to watch, `{ code, name? }` per entry — see [Taiwan futures (tf)](#taiwan-futures-tf) |
+| `crypto` | built-in list (BTC ETH SOL BNB XRP DOGE ADA AVAX LINK BCH) | coins to watch, `{ code, name? }` per entry with the plain ticker (`BTC`); priced off Pionex's public tickers, one request a tick whatever the length, market cap off CoinGecko once an hour. Under `tabbar` the 加密貨幣 tab only appears once this key (any list) or `market: "crypto"` is present — the same opt-in rule as 台指期; `select`/`tabs`/`cycle` always offer it |
 | `holdings` | `{ "tw": [], "us": [] }` | manual positions for the 損益 view, `{ code, qty, cost }` per holding — the recommended place to hand-write your positions; add `"holdingsSource": "config"` to make this win over a fetched `stock-holdings.json` for a market where you want your own numbers to stick — see [Holdings and the 損益 view](#holdings-and-the-損益-view) |
 
 Both built-in lists are 20 symbols, so `columns` resolves to 2 on a
@@ -428,8 +437,8 @@ its deadline: with the defaults, a page holds 10–13 s instead of exactly 10.
 ### Your own source order
 
 A source order is a personal preference, not a project one — the person
-running the band is who has (or does not have) a 永豐 account, not the
-repository. Put `twSources` and `shioaji` in `~/.claude/stock-band.json`
+running the band is who has (or does not have) a broker account, not the
+repository. Put `twSources` and the broker block in `~/.claude/stock-band.json`
 instead of the project's own `stock-band.json`:
 
 ```jsonc
@@ -443,6 +452,21 @@ instead of the project's own `stock-band.json`:
 `python` is whichever interpreter has `shioaji` installed — the system
 `python3`, or a venv's own `bin/python3` if that is where you `pip install
 shioaji`. Point it at that venv, not at `python3` blindly.
+
+On Windows the same file lives at `%USERPROFILE%\.claude\stock-band.json` and
+names the 群益 route instead:
+
+```jsonc
+{
+  "twSources": ["capital", "yahoo"],
+  "capital": {
+    "python": "python",
+    "env": "~/.capital.env",
+    "dll": "~/CapitalAPI/元件/x64/SKCOM.dll",
+    "interval": 10
+  }
+}
+```
 
 Every project that has no `twSources` of its own then uses this order, and
 the project's `stock-band.json` stays free to commit — it never has to name
@@ -473,10 +497,12 @@ instead of leaving it on demo prices until the next tick.
   20-symbol list plus its index is 21 symbols, so it costs two requests a
   tick the same way a 20-symbol US list would. Yahoo's Taiwan quotes run
   about twenty minutes behind the exchange's own tape.
-- **Taiwan: `"twSources": ["shioaji"]` for 永豐's own real-time ticks — the band
-  runs the fetcher, you never touch a terminal.** See
-  [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher); the built-in
-  Yahoo feed does not run for Taiwan on this route, only the per-symbol
+- **Taiwan: `"twSources": ["shioaji"]` (macOS/Linux) or `["capital"]`
+  (Windows) for a broker's own real-time ticks — the band runs the fetcher,
+  you never touch a terminal.** See
+  [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher) and
+  [群益 Capital as that fetcher](#群益-capital-as-that-fetcher); the built-in
+  Yahoo feed does not run for Taiwan on either route, only the per-symbol
   Yahoo `chart` call the trend view already makes for K bars.
 - **K bars cost extra, so they are fetched only when the chart view wants
   them** — one request for the one symbol it is drawing, always through
@@ -575,7 +601,7 @@ In a project with the mod installed, tell Claude 「我要接永豐」— the
 `stock-quote-sources` skill walks you through it. The prerequisites (account,
 API enabled, 簽署中心 pass, Python version) are in
 [`references/quote-sources.md`](references/quote-sources.md)'s
-「4. 永豐 Shioaji」→「What you need」; this README does not keep its own copy
+「3. 永豐 Shioaji」→「What you need」; this README does not keep its own copy
 of that list.
 
 Run `<python> scripts/fetch-quotes-shioaji.py --check` first to verify your
@@ -645,6 +671,51 @@ Two things measured while wiring it up (2026-09-16):
   script subtracts it; anything else reading `snapshot.ts` has to as well.
 - `snapshot.close` is the last trade and never `-`, so there is no
   between-trades hole to patch.
+
+### 群益 Capital as that fetcher
+
+Contributed by [@ianyuchuang](https://github.com/ianyuchuang) in
+[#1](https://github.com/darrell-tw/darrelltw-mods/pull/1).
+
+The Windows half of the same idea. Tell Claude 「我要接群益」in a project with
+the mod installed and the `stock-quote-sources` skill walks you through it;
+the full prerequisite list lives in
+[`references/quote-sources.md`](references/quote-sources.md)'s
+「4. 群益 Capital API」→「What you need」, and this README does not keep its own
+copy of it either.
+
+The short version, because two of these bite people who skip them:
+
+1. Unzip 群益's `CapitalAPI_<version>_PythonExample.zip` somewhere stable
+   **outside the repo** — it ships no installer.
+2. Register the 元件 **once, as Administrator**, from the folder matching your
+   Python's bitness — `regsvr32 SKCOM.dll` inside `元件\x64` (or `x86`).
+   Mixing bitness is the failure that still reads "class not registered" after
+   you have registered it.
+3. `pip install comtypes` on that same interpreter.
+4. `CAPITAL_USER_ID` / `CAPITAL_PASSWORD` in an env file outside the repo.
+5. `python mods/tw-stock-mod/scripts/fetch-quotes-capital.py --check` — it
+   walks every one of the above plus a real login, the quote host, each
+   watchlist and index code, and the 證券 account, one ✅/❌ line each.
+
+Then put `"twSources": ["capital", "yahoo"]` and a `capital` block in
+`%USERPROFILE%\.claude\stock-band.json` (see
+[Your own source order](#your-own-source-order)). From there it behaves
+exactly like the 永豐 route: the band spawns
+[`scripts/fetch-quotes-capital.py`](scripts/fetch-quotes-capital.py) itself,
+keeps it fed with the same `stock-band.heartbeat`, keeps two sessions off each
+other's back with `stock-capital.pid`, logs to `stock-capital.log`, and falls
+through to the next `twSources` entry for any tick the quotes file is not
+fresh for. One implementation difference, if you are reading the code: Windows
+has no `nohup`, so the script detaches **itself** on `--detach` rather than
+being backgrounded by a shell.
+
+What it buys you is what the 永豐 route buys: the broker's own 昨收 reference,
+自動 上市/上櫃 resolution, and an account you already have. What it costs on top
+of 永豐's list is the COM registration, and the fact that 群益's manual documents
+no index 商品代號 at all — the defaults (`TSEA` 加權指, `OTCA` 櫃檯指) were found
+by dumping the SDK's own 商品清單 and checked against the exchange's MIS feed.
+The script still probes them at startup and `--check` prints which answered.
 
 The source inventory — which endpoints exist for each market, what each one
 costs and what was actually measured — is in
@@ -726,10 +797,12 @@ resets the scroll position back to the top.
   `永豐 庫存` into a project-path file by hand — that label is reserved for
   `scripts/fetch-quotes-shioaji.py`'s own output, and a hand-written file
   carrying it reads as a stale copy of the fetcher's legacy (pre-runtime-dir)
-  output and gets ignored (see `references/quote-sources.md` §5). If you use
-  this file, add `.claude/stock-holdings.json` to your `.gitignore`.
+  output and gets ignored (see `references/quote-sources.md` §6). `群益 庫存`
+  is `fetch-quotes-capital.py`'s equivalent label — not filtered anywhere, but
+  leave it to the script all the same. If you use this file, add
+  `.claude/stock-holdings.json` to your `.gitignore`.
 - **Do not hand-write** `~/.claude/stock-band/<project slug>/stock-holdings.json`
-  — that is 永豐's fetcher output, rewritten every tick, and the band never
+  — that is a broker fetcher's output, rewritten every tick, and the band never
   creates that runtime folder for you.
 
 **The title's 更新 time.** `asOf` shows there when the file states one; a

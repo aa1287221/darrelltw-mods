@@ -9,7 +9,7 @@ to choose a source; read that one to see the evidence.
 Every route below writes into one of the same places the band already reads:
 `hooks/register.tsx`'s built-in Yahoo feed, the runtime-dir override
 file at `~/.claude/stock-band/<project-slug>/stock-quotes.json` (what
-`fetch-quotes-shioaji.py` writes), or the project's own
+`fetch-quotes-shioaji.py` and `fetch-quotes-capital.py` write), or the project's own
 `<project>/.claude/stock-quotes.json` as a manual override (read order:
 runtime dir while fresh, then the project file, then the built-in feed).
 Nothing you configure changes `hooks/board.tsx` — the band does not know or
@@ -22,11 +22,12 @@ care which route filled in a number.
 | **Yahoo** (default) | none | none | US: real-time. Taiwan: ~20 min behind | Yes, native | Yes, native | Yes | Config's own `"ex": "otc"` | `Yahoo 即時` (US) / `Yahoo 延遲` (Taiwan) |
 | **Quotes-file override** | depends on what writes it | depends on what writes it | Whatever the writer promises | Only if the writer fills `series` | Only if the writer fills `bars` | Only if the writer fills `prevClose` | Handled by the writer, before the file is written | `source` string in the file, or `報價檔` if it leaves that blank |
 | **永豐 Shioaji**, `twSources: ["shioaji"]` | 永豐金 brokerage account + API access | No — the band spawns and re-spawns it itself | Real intraday tick | No — the script does not fill it (unverified whether Shioaji itself carries one) | No — same | Yes (`contract.reference`) | Automatic — the SDK resolves it | `永豐 即時` |
+| **群益 Capital**, `twSources: ["capital"]` | 群益 account with API 權限 + 證券帳戶, **Windows only** | No — the band spawns and re-spawns it itself | Real intraday tick | No — the script does not fill it | No — same | Yes (`SKSTOCKLONG.nRef`) | Automatic — the SDK resolves it | `群益 即時` |
 | **Fugle 富果** (not wired) | Free Fugle membership | Whatever you write | Real intraday | Not from the one REST endpoint checked | Not from the one REST endpoint checked | Yes (`previousClose`) | Automatic — the symbol alone is enough | Whatever `source` your fetcher writes |
 
 ## Preference order and the user-level file
 
-Taiwan's two built-in routes (Yahoo, Shioaji) are not a single choice
+Taiwan's built-in routes (Yahoo, MIS, Shioaji, 群益) are not a single choice
 any more - `twSources` is an ARRAY, in preference order: `["shioaji",
 "yahoo"]` tries Shioaji first, and for any tick Shioaji has nothing
 fresh for (the script has not logged in yet, or died) falls through to Yahoo,
@@ -50,11 +51,18 @@ project and therefore never lands in version control:
 }
 ```
 
-The band reads it via `$.env.get("HOME")` and merges it UNDER whatever the
+The two broker routes are also split by platform, because their SDKs are:
+`shioaji` is a POSIX-only Python package the band launches with `nohup`, and
+`capital` is a Windows COM server. Listing the one this machine cannot run
+costs nothing beyond a log line - it simply never writes a fresh file, and the
+tick falls through to the next entry.
+
+The band reads it via `$.env.get("HOME")`, falling back to `%USERPROFILE%` on
+Windows (which does not set `HOME`), and merges it UNDER whatever the
 project's own `<project>/.claude/stock-band.json` says: built-in defaults <
 `~/.claude/stock-band.json` < the project file, key for key (a key only the
 user file states still applies; a key the project file also states wins).
-Any key is legal in either file - `twSources`/`shioaji` are simply the ones
+Any key is legal in either file - `twSources`/`shioaji`/`capital` are the ones
 that most belong in the user-level one, so a shared project's config stays
 neutral and every contributor keeps their own order without editing a
 tracked file.
@@ -73,7 +81,8 @@ column and the trend view.
 
 **Freshness.** US quotes are real-time. Taiwan quotes through Yahoo run about
 20 minutes behind the exchange's own tape. Real intraday Taiwan prices are
-available through a 永豐 brokerage account instead (§3).
+available through a 永豐 brokerage account instead (§3, macOS/Linux) or a 群益
+one (§4, Windows).
 
 **Turn it on.** Nothing to do — it is the default for both markets. To be
 explicit about it in `<project>/.claude/stock-band.json`:
@@ -90,7 +99,7 @@ whether the number is live or 20 minutes old.
 20 symbols — a 21st gets `Number of symbols needs to be less than or equal to
 20` back, so a full watchlist plus indices costs two requests, not one. No
 official rate limit is published; the community number is roughly 360
-requests/hour, and the band's own budget of 300/hour (see §5) sits under it on
+requests/hour, and the band's own budget of 300/hour (see §6) sits under it on
 purpose.
 
 ## 2. The quotes-file override
@@ -102,7 +111,8 @@ hand-editable seam below, and wins over the built-in feed whenever the
 runtime-dir file is not fresh. Write `<project>/.claude/stock-quotes.json` in
 the shape of [`stock-quotes.example.json`](../stock-quotes.example.json), and
 the band uses it instead of Yahoo — **this is the seam for any source
-the module does not speak natively**, including Shioaji (§3) and Fugle (§4).
+the module does not speak natively**, including Shioaji (§3), 群益 (§4) and
+Fugle (§5).
 
 **The contract.** A file with these keys:
 
@@ -251,7 +261,7 @@ prints `更新 18:55` for a 10:55 snapshot.
 `"source": "永豐 即時"` in the file it writes).
 
 **Holdings.** The script also calls `api.list_positions()` every tick and
-writes `<project>/.claude/stock-holdings.json` — see §5. Its quotes fetch
+writes `<project>/.claude/stock-holdings.json` — see §6. Its quotes fetch
 covers the watchlist UNION every held code, so a holding that never made the
 watchlist still gets a live price there too, which the 損益 view prefers over
 the holdings file's own `price`/`prevClose`.
@@ -264,7 +274,147 @@ contract rather than a lookup table. This route is `tf`'s only source: there
 is no Yahoo or MIS fallback, so a stale file shows `無報價`, not a demo walk.
 See the README's [Taiwan futures (tf)](../README.md#taiwan-futures-tf).
 
-## 4. Fugle 富果 and other keyed vendors (not wired)
+## 4. 群益 Capital API, through `scripts/fetch-quotes-capital.py`
+
+The Windows counterpart of §3: another real-time route through a brokerage
+account you already have, for the machines Shioaji does not run on.
+Contributed by [@ianyuchuang](https://github.com/ianyuchuang) in
+[#1](https://github.com/darrell-tw/darrelltw-mods/pull/1).
+
+**What you need:**
+
+- **Windows.** SKCOM is a COM DLL with no macOS or Linux build. The two
+  broker routes are exact mirror images that way — `shioaji` is POSIX-only
+  because the band launches it with `nohup`, `capital` is Windows-only
+  because its SDK is.
+- A 群益 account with API 權限 開通, **including a 證券帳戶**. Without one you
+  cannot subscribe to 上市櫃 quotes at all — the manual says so next to
+  `SKQuoteLib_RequestStocks` itself, and it is not a permissions error you
+  would recognise, just an empty answer.
+- The SDK, unzipped somewhere stable outside the repo (群益 ships
+  `CapitalAPI_<version>_PythonExample.zip` with no installer), and its 元件
+  **registered once, as Administrator**, from the folder matching your
+  Python's bitness:
+
+  ```
+  cd <sdk>\元件\x64
+  regsvr32 SKCOM.dll
+  ```
+
+  That is what the SDK's own `install.bat` does. A 32-bit Python needs the
+  `x86` folder instead; mixing the two is the failure that looks like "COM
+  class not registered" even after registering.
+- `pip install comtypes`, on that same interpreter.
+- `CAPITAL_USER_ID` (身分證字號) / `CAPITAL_PASSWORD` in an env file outside
+  the repo — `~/.capital.env` unless `capital.env` says otherwise.
+- **A long-lived process**, for the same reason §3 needs one, plus one of its
+  own: SKCOM only moves prices into its cache while a Windows message pump is
+  running, so "fetch a quote" is not a call you can make from cold.
+
+**Why this cannot live inside the hooks module.** Same answer as §3, one step
+further: this is not merely a Python SDK but an in-process COM server whose
+quote subscription is delivered as Windows messages. The hooks module runs in
+a JS sandbox and can only reach it through `$.process`.
+
+**Turn it on, managed by the band.** Put `"twSources": ["capital", ...]` and
+the `capital` block in `~/.claude/stock-band.json` (not the project's - see
+[Preference order and the user-level file](#preference-order-and-the-user-level-file) above):
+
+```jsonc
+// ~/.claude/stock-band.json  (on Windows: %USERPROFILE%\.claude\stock-band.json)
+{
+  "twSources": ["capital", "yahoo"],
+  "capital": {
+    "python": "python",
+    "env": "~/.capital.env",
+    "dll": "~/CapitalAPI/元件/x64/SKCOM.dll",
+    "interval": 10
+  }
+}
+```
+
+`dll` has no default on purpose: 群益 ships a zip with no install location, so
+there is nothing to guess, and the script refuses up front rather than failing
+three steps later with a bare COM error. `python` must be the interpreter that
+has `comtypes` AND matches the registered 元件's bitness.
+
+**Run `<python> scripts/fetch-quotes-capital.py --check` first.** It walks the
+whole list above in order — platform, interpreter bitness, `comtypes`, the
+`SKCOM.dll` path, the registration itself, the env file, a real login, the
+quote host handshake, then every watchlist code and every index code with the
+name and price it resolved to, and finally the 證券 account behind the holdings
+query. Each line is a ✅ or ❌ with the fix next to it. It writes nothing but
+SKCOM's own log.
+
+**Turn it on by hand**, the same script, started yourself:
+
+```sh
+python mods/tw-stock-mod/scripts/fetch-quotes-capital.py --project . --interval 10
+```
+
+It reads the same `tw` watchlist out of `<project>/.claude/stock-band.json`,
+and `--env`/`--dll`/`--indices` all default to whatever the `capital` block
+already says, so there is normally nothing else to pass. Stop it with Ctrl-C;
+the band falls back to its own feed 120 seconds after the file goes stale.
+
+**How the band runs it.** Same heartbeat and pidfile contract as §3 —
+`stock-band.heartbeat` and `stock-capital.pid` in the runtime dir, the same
+90-second heartbeat timeout and the same once-a-minute respawn rule — with one
+difference that matters if you are reading the code: there is no `nohup` on
+Windows, so the script detaches **itself**. The band passes `--detach`, and the
+script re-launches a `DETACHED_PROCESS` child pointed at `--log`
+(`stock-capital.log`, runtime dir) and returns at once, which is what lets the
+band's one-shot `$.process.run` resolve while the fetcher keeps going.
+
+**What it carries.** `SKQuoteLib_GetStockByNoLONG` fills an `SKSTOCKLONG` per
+code: `nClose` is the last trade and `nRef` is 昨收/參考價 in the broker's own
+terms, which stays correct through an ex-dividend date. 上市/上櫃 resolves
+itself — no `"ex": "otc"` hint, same as Shioaji. No `series` and no `bars`, so
+the `spark` column stays plain and the chart view still fetches K bars from
+Yahoo per symbol, exactly as it does on the Shioaji route.
+
+**The decimal trap.** Every price in `SKSTOCKLONG` is an integer scaled by
+`sDecimal`, that product's own decimal places — 台積電 at 1188.0 arrives as
+`118800` with `sDecimal` 2. 群益's own Python examples hardcode `/100.0`, which
+is right for 證券 and wrong for a 4-decimal product; the script divides by
+`10 ** sDecimal` instead.
+
+**The timestamp trap, the other way round.** Unlike Shioaji (§3), SKCOM does
+not hand you a skewed epoch — it hands you no epoch at all: `nTradingDay`
+(`YYYYMMDD`) and `nDealTime` (`hhmmss`), both in exchange-local terms. The
+script converts them as UTC+8 rather than through the machine's own timezone,
+so a laptop set to another zone still prints the right 更新.
+
+**Pre-open honesty.** Before the first trade of the day `nClose` is 0. The
+script drops those rows rather than writing 昨收 in their place, which would
+draw a 平盤 trade that never happened — so a pre-open tick falls through to the
+next entry in `twSources` instead.
+
+**The index codes are not documented — and the obvious guess is wrong.**
+群益's manual lists no 商品代號 for 加權指數 or 櫃買指數. The defaults were
+found by dumping `SKQuoteLib_RequestStockList` and verified against the
+exchange's own MIS feed (2026-09-18): **`TSEA`** 加權指 read 47004.27 against
+t00's 47001.67, and **`OTCA`** 櫃檯指 read 409.11 against o00's 409.12. Do not
+"correct" these to `TSE01`/`OTC01` — `TSE01` is 水泥類股, a sector index, and
+`OTC01` does not resolve at all. An index also only fills a price once it has
+been subscribed like any other product, so the script adds these to its
+`RequestStocks` list rather than reading them straight out of the cache. Each
+is still probed at startup and dropped if it does not resolve, rather than
+written into the footer as a zero; `--check` prints which ones answered, and
+`"indices": []` turns the index board off on this route.
+
+**How to tell it took.** The footer reads `群益 即時` (the script sets
+`"source": "群益 即時"` in the file it writes).
+
+**Holdings.** The script also runs 群益's 未實現損益彙總 query
+(`GetProfitLossGWReport`, `nTPQueryType` 0 / `nFunc` 0) every tick and writes
+`stock-holdings.json` — see §6. That query needs `SKOrderLib_Initialize` and a
+證券 account, which is the one part of this route that can fail on its own: it
+does, loudly, in the log and in `--check`, and quotes keep working without it.
+Its quotes fetch covers the watchlist UNION every held code, so a holding that
+never made the watchlist still gets a live price there too.
+
+## 5. Fugle 富果 and other keyed vendors (not wired)
 
 Fugle is not built into the module. Route 2 (the quotes-file override) is how
 it — or any other vendor with a key — reaches the band; nobody has written
@@ -294,11 +444,12 @@ Fugle resolves 上市/上櫃 by symbol alone — its data source already spans b
 the exchange and 櫃買中心, so a fetcher does not need an `"ex"` hint the way
 Yahoo does.
 
-## 5. The holdings file and the 損益 view
+## 6. The holdings file and the 損益 view
 
 `stock-holdings.json` is what the 損益 button reads — positions, not
 watchlist prices. `scripts/fetch-quotes-shioaji.py` writes it every tick
-after `list_positions` (§3) into the runtime dir
+after `list_positions` (§3), and `scripts/fetch-quotes-capital.py` after
+未實現損益彙總 (§4), both into the runtime dir
 (`~/.claude/stock-band/<project-slug>/`), which wins whenever it parses;
 `<project>/.claude/stock-holdings.json` is the manual override, and anything
 else can write either one by hand or from its own fetcher, in the shape of
@@ -316,7 +467,10 @@ nothing priced that code. `source` is free text for the footer/title, but a
 project-path file written by hand must never carry `"source": "永豐 庫存"`
 — that label is reserved for `fetch-quotes-shioaji.py`'s own output (§3), and
 the band treats a project-path file with that exact source as a stale copy
-of the fetcher's pre-runtime-dir output and ignores it.
+of the fetcher's pre-runtime-dir output and ignores it. `"群益 庫存"` is
+`fetch-quotes-capital.py`'s equivalent label; it is not filtered anywhere
+(that fetcher never wrote to the project path), but leave it to the script
+all the same.
 
 **No staleness rule.** Unlike the quotes file, this one is never expired by
 age: a position does not go wrong just because nobody wrote a fresh copy in

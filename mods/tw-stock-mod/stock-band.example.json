@@ -1,15 +1,19 @@
 {
   "_comment": "Optional: copy to <project>/.claude/stock-band.json. Every key has a default, so a partial file is fine.",
   "market": "auto",
+  "_marketSwitcher_comment": "Which of four styles the band uses to switch market/holdings. \"tabbar\" (default) is this fork's tab row: one plain Button per stop (美股/[美股庫存]/台股/台股庫存/[台指期]/[期貨庫存]/[加密貨幣] - the bracketed ones only when configured or held), the current one marked [like this], never collapsing (the session notes give way instead). Upstream's three: \"tabs\" draws every stop (台股/[台股庫存]/[台指期]/[期貨庫存]/美股/[美股庫存]/加密貨幣) as its own Button and drops to \"cycle\" if the terminal is too narrow to fit them; \"select\" draws a dropdown (falls back to \"cycle\" on a surface with no Select at all, e.g. mobile); \"cycle\" draws one Button that walks the stops in order. An unrecognized value falls back to \"tabbar\".",
+  "marketSwitcher": "tabbar",
   "refreshMs": 3000,
   "sort": "change",
   "highlight": true,
   "trend": "none",
   "feed": "auto",
-  "_twSources_comment": "Where Taiwan prices come from, in preference order - the band tries the first entry and falls through to the next when it has nothing fresh this tick. \"yahoo\" needs no setup, ~20 min behind. \"shioaji\" is 永豐's real-time feed; the band spawns scripts/fetch-quotes-shioaji.py itself (see the `shioaji` block below and references/quote-sources.md). This project file's default is [\"yahoo\"] alone - a source order and broker paths are a PERSONAL preference, not a project one, so put your own in ~/.claude/stock-band.json instead of here (it merges under this file: built-in defaults < ~/.claude/stock-band.json < this file). A legacy \"twSource\": \"x\" (a single string) still works as an alias for [\"x\"].",
+  "_twSources_comment": "Where Taiwan prices come from, in preference order - the band tries the first entry and falls through to the next when it has nothing fresh this tick. \"yahoo\" needs no setup, ~20 min behind. \"shioaji\" is 永豐's real-time feed (macOS/Linux) and \"capital\" is 群益's (Windows); the band spawns scripts/fetch-quotes-shioaji.py / scripts/fetch-quotes-capital.py itself (see the `shioaji` and `capital` blocks below and references/quote-sources.md). This project file's default is [\"yahoo\"] alone - a source order and broker paths are a PERSONAL preference, not a project one, so put your own in ~/.claude/stock-band.json instead of here (it merges under this file: built-in defaults < ~/.claude/stock-band.json < this file). A legacy \"twSource\": \"x\" (a single string) still works as an alias for [\"x\"].",
   "twSources": ["yahoo"],
   "_shioaji_comment": "Read only when \"shioaji\" is somewhere in twSources - normally that means it belongs in ~/.claude/stock-band.json, not here. `env` holds SINOBON_API_KEY/SINOBON_SECRET_KEY (never commit it); `~` expands to $HOME.",
   "shioaji": { "python": "python3", "env": "~/.sinobon.env", "interval": 10 },
+  "_capital_comment": "Read only when \"capital\" is somewhere in twSources - same story as shioaji, and normally belongs in ~/.claude/stock-band.json too. Windows only (SKCOM is a COM DLL). `env` holds CAPITAL_USER_ID/CAPITAL_PASSWORD (never commit it); `dll` is the registered SKCOM.dll and has NO default, because 群益 ships a zip with no install location; `indices` are SKCOM 商品代號 for the footer board, probed at startup and dropped if they do not resolve ([] turns the board off). See references/quote-sources.md §4.",
+  "capital": { "python": "python", "env": "~/.capital.env", "dll": "", "interval": 10, "indices": [{ "code": "TSEA", "name": "TAIEX" }, { "code": "OTCA", "name": "TPEx" }] },
   "_holdings_comment": "The 損益 view's manual alternative to stock-holdings.json (which wins for whichever market it names). qty is shares, not 張; cost is the average cost per share.",
   "holdings": { "tw": [], "us": [] },
   "_holdingsSource_comment": "\"file\" (default): the holdings file the broker script writes wins. \"config\": the holdings block above wins - use it to show a demo portfolio while the Taiwan route is a live brokerage.",
@@ -81,5 +85,11 @@
   "futures": [
     { "code": "TXFR1", "name": "台指近" },
     { "code": "SRFJ6" }
+  ],
+  "_crypto_comment": "Crypto through Pionex's public tickers (no key) - `code` is the plain ticker (BTC), `name` optional. The built-in list (BTC ETH SOL BNB XRP DOGE ADA AVAX LINK BCH) already fills the 加密貨幣 stop under marketSwitcher tabs/select/cycle; the default tabbar only draws its 加密貨幣 tab once this key (any list) or market: \"crypto\" is present, the same opt-in rule as the 台指期 tab. Sorted by market cap (CoinGecko supply x live price) unless `sort` says otherwise.",
+  "crypto": [
+    { "code": "BTC" },
+    { "code": "ETH" },
+    { "code": "SOL" }
   ]
 }

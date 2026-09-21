@@ -11,9 +11,16 @@
 > 盤點，但 §1 的架構結論已經作廢（hooks 模組有 `$.http.fetch`，不需要外部
 > fetcher）。
 
-現況：**兩個市場都由 hooks 模組自己抓，預設都是 Yahoo**（免金鑰、台美一支
-API 搞定）。台股要盤中真即時，接永豐 Shioaji（見 §8）；其他券商／付費行情走
-`.claude/stock-quotes.json` 這個 override 檔案接縫（見 §9）。
+> 🔴 **2026-09-18 更新：第三個市場（加密貨幣）接上了，資料層與設定 only —
+> 市場切換 UI 是下一階段。** source of truth 是文末 **§11（Pionex，
+> 2026-09-18）**。跟 tw/us 不同：24/7 無開收盤、不進 auto 市場輪替（只有
+> `market: "crypto"` 明確指定才顯示）、漲跌是 24 小時漲跌不是對昨收。
+
+現況：**三個市場都由 hooks 模組自己抓**，tw/us 預設都是 Yahoo（免金鑰、台美
+一支 API 搞定），crypto 預設是 Pionex（免金鑰，見 §11）。台股要盤中真即時，
+macOS／Linux 接永豐 Shioaji（見 §8）、Windows 接群益 Capital（見 §10）；其他
+券商／付費行情走 `.claude/stock-quotes.json` 這個 override 檔案接縫（見
+§9）——這個接縫目前只服務 tw/us，crypto 還沒接進去。
 
 > ⚠️ §1-§5 的驗證狀態：這些端點是在更早的 session 盤點的，當時對外連線走政策代理，
 > 這幾支端點的 CONNECT 都被 gateway 回 403（組織政策拒絕，不是端點壞掉），
@@ -432,3 +439,264 @@ swagger 實查有 143 支端點，全部是 `exchangeReport/*` 這類收盤後�
 （台股的預設路線後來定案為 Yahoo，見開頭的 📍 連結；富果與永豐這兩節的
 取捨本身沒有變。）
 要翻案的訊號：富果把批次快照開放到免費層，或現有免金鑰路線開始被擋。
+
+## 10. 群益 Capital API / SKCOM（2026-09-18 接上，Windows 那條路）
+
+> ✅ **驗證狀態：2026-09-18 在 Windows 11 + Python 3.12 (64-bit) 上實測過**
+> ——真的註冊元件、真的登入、真的訂閱、真的收到報價與庫存。下面每個「實測」
+> 標記的數字都是那次跑出來的。唯一沒實測的是 32-bit（`元件\x86`）那條，
+> 手上沒有 32-bit Python。
+> 重跑一次的指令：`scripts/fetch-quotes-capital.py --check`，它會把整串走完並逐項印 ✅／❌。
+
+### 10.1 為什麼要有這條：永豐那條在 Windows 上根本起不來
+
+`hooks/register.tsx` 用 `nohup ... &` 包 `/bin/sh -c` 來讓一次性的
+`$.process.run` 能夠返回（見 §8.2）。Windows 沒有 `nohup`、沒有 `/bin/sh`，而
+`fetch-quotes-shioaji.py --check` 本來就直接把 `sys.platform == "win32"` 判成
+失敗。所以在 Windows 上，台股即時只剩 `mis`（證交所，免帳號）可選——這條補上
+的是「有券商帳號、而且人在 Windows」的那一格。
+
+兩條路線剛好互為鏡像：**永豐只跑 POSIX（band 用 nohup 啟動），群益只跑
+Windows（SKCOM 是 COM DLL，沒有 macOS／Linux 版）。**
+
+### 10.2 用到的 API（讀過原始碼／官方文件）
+
+登入到出價的順序是 SDK 自己規定的，跳步就拿不到東西：
+
+```
+SKCenterLib_SetLogPath(dir)        # 不設就寫到 process 的工作目錄
+SKCenterLib_Login(id, password)    # 0 = 成功
+SKQuoteLib_EnterMonitorLONG()      # 非同步
+  -> OnConnection(nKind=3003)      # SK_SUBJECT_CONNECTION_STOCKS_READY，等到這個才算連上
+SKQuoteLib_RequestStocks(1, "2330,2454,…")   # psPageNo「請固定帶 1」，上限 100 檔
+  -> OnNotifyQuoteLONG(...)        # 推到 SDK 自己的快取
+SKQuoteLib_GetStockByNoLONG(code, SKSTOCKLONG())  # 從那個快取讀出來
+```
+
+庫存走下單元件，是另一組：
+
+```
+SKOrderLib_Initialize()
+ReadCertByID(id)                   # 下單一定要；查詢不一定，所以腳本只是 best-effort
+GetUserAccount() -> OnAccount("市場,分公司代碼,分公司,帳號,身份證字號,姓名")
+   # 證券是市場別 "TS"，帳號 = 分公司代碼(4) + 帳號(7)
+GetProfitLossGWReport(id, TSPROFITLOSSGWQUERY{nTPQueryType=0, nFunc=0})
+  -> OnProfitLossGWReport(bstrData)  # 第一筆是查詢結果，之後每筆一檔
+```
+
+未實現損益**彙總**那個格式正好就是損益檢視要的東西（手冊 4-2-p 的欄位表，
+1-based）：1 股票名稱、2 股票代號、5 庫存股數、6 市價、7 今日市價漲跌、
+11 平均買進成本、27 交易種類代號。`qty` 直接是股數（不是張），`cost` 就是每股
+平均成本——跟 band 的 `Holding` 契約一對一。
+
+也有 `GetRealBalanceReport`（證券即時庫存）可以用，但它**沒有成本價**，所以
+損益算不出來；選未實現損益彙總是因為它同時帶股數跟成本。
+
+### 10.3 五個會讓你以為壞掉的坑
+
+- 🔴🔴 **`comtypes.client.PumpEvents` 收不到 SKCOM 的事件，要自己寫
+  `PeekMessage`／`DispatchMessage` 迴圈。** 這個坑吃掉最多時間，而且症狀
+  完全誤導：登入成功、`EnterMonitorLONG` 回 `SK_SUCCESS`、SDK 自己的
+  `Quote.log` 也寫了 `OnSessionConnect, Code: 3001`，但 Python 這側
+  **一個 `OnConnection` 都收不到**，`IsConnected()` 卡在 2（下載中）不動。
+  同一支帳號、同一台機器，換成原生 Win32 訊息迴圈之後 **2.5 秒**就收到
+  3001 + 3003、`IsConnected()` 變 1。
+  （實測 2026-09-18：`PumpEvents` 等 180 秒 = 0 個事件；raw pump = 2.5 秒。）
+  原因大概是 `PumpEvents` 走 `CoWaitForMultipleHandles`，派送的訊息種類跟
+  SKCOM 需要的不一樣。群益自己的範例踩不到，是因為它們跑在 Tkinter 的
+  `mainloop()` 裡——那就是一個原生訊息迴圈。見 `Capital.pump()`。
+- 🔴 **價格是整數，除數看 `sDecimal`。** `SKSTOCKLONG` 每個價格欄位都是整數，
+  乘過該商品自己的小數位數：台積電 1188.0 收到的是 `118800`、`sDecimal = 2`。
+  **群益自己的 Python 範例是寫死 `/100.0` 的**（`Quote.py` 的
+  `OnNotifyQuoteLONG`），證券剛好對，四位小數的匯率類商品就錯。腳本除
+  `10 ** sDecimal`。
+- 🔴 **沒有 epoch，只有 `nTradingDay`(YYYYMMDD) + `nDealTime`(hhmmss)。**
+  跟永豐那個「台北時間當 UTC 算」的坑（§8.4）方向相反：這邊根本沒給時間戳，
+  給的是交易所當地的年月日時分秒。腳本用 UTC+8 換算，不走機器自己的時區，
+  不然時區設在別的地方的筆電會把 `更新` 印錯。
+- **開盤前 `nClose` 是 0。** 這時候寫 `nRef`（昨收）進去會畫出一根根本沒成交過
+  的平盤，所以腳本直接把那幾筆丟掉——那個 tick 就落到 `twSources` 的下一條。
+- **元件位元數要跟 Python 對得上。** `regsvr32` 註冊的是 `元件\x64` 還是
+  `元件\x86`，要跟跑腳本的 Python 是 64-bit 還是 32-bit 一致。不一致的症狀是
+  「明明註冊過了還是說 class not registered」。
+
+### 10.4 指數代號：手冊沒寫，而且直覺猜的是錯的（已實測）
+
+整份 `群益API元件使用手冊_V2.13.59.docx` 裡找不到加權指數／櫃買指數的商品代號
+（搜過「指數」「加權」「TSE」都只有選擇權算 Greeks 的那個 `S` 參數和市場別字樣）。
+
+**猜 `TSE01`／`OTC01` 是錯的**：`TSE01` 查得到，但它是**水泥類股**（類股指數），
+`OTC01` 根本不存在（rc=9999）。正確代號是把 `SKQuoteLib_RequestStockList(0/1)`
+的商品清單整包倒出來找到的：
+
+| 代號 | 名稱 | 市場 | sDecimal |
+| --- | --- | --- | --- |
+| `TSEA` | 加權指 | 0 上市 | 2 |
+| `OTCA` | 櫃檯指 | 1 上櫃 | 2 |
+
+拿證交所自己的 MIS 端點對帳（2026-09-18 12:39，兩邊差幾秒）：
+
+| | 群益 SKCOM | 證交所 MIS |
+| --- | --- | --- |
+| 加權指數 | `TSEA` nClose 4700427 / 10² = **47004.27** | `t00` z = **47001.67** |
+| 櫃買指數 | `OTCA` nClose 40911 / 10² = **409.11** | `o00` z = **409.12** |
+
+順便驗掉 `sDecimal`：2330 同一時間 nClose 245000 / 10² = 2450，跟 `--check`
+印的一致。
+
+🔴 **指數也要訂閱才有價。** 沒進 `RequestStocks` 的話 `nClose` 是 0，只有
+`nRef`（昨收）有值——所以腳本是把指數代號跟觀察清單一起送進 `RequestStocks`，
+不是直接讀快取。
+
+保險機制沒拿掉：腳本啟動時仍會逐一探測，查不到的丟掉並留一行 log，而不是往頁尾
+寫一個 0 進去。`--check` 會把每個指數代號解析到的名稱與數值印出來；不想要頁尾
+指數就設 `"indices": []`。
+
+### 10.5 detach：Windows 這邊是腳本自己做的
+
+`$.process.run` 是一次性的，而且會等 child 的 stdout/stderr 管線關閉——常駐
+fetcher 的管線不會自己關。永豐那條靠 `nohup ... >>log 2>&1 &` 解決；Windows
+沒有 `nohup`，而 `start /b` 等於把「python 路徑可能含空白」的引號問題交給
+`cmd.exe`。所以改成**腳本自己 detach**：band 傳 `--detach`，腳本用
+`subprocess.Popen(..., creationflags=DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP,
+stdout=log, stderr=log)` 重開一個自己然後立刻返回。心跳檔、pid 檔、120 秒過期、
+一分鐘只重生一次這些規則跟永豐完全共用（`register.tsx` 的 `feedTwFetcher`
+現在是兩條路線共同的那一份）。
+
+### 10.6 順手修掉的 Windows 前置問題
+
+接這條之前，band 的兩個路徑規則在 Windows 上本來就是壞的——不修的話報價檔會
+寫進專案的 `.claude/`：
+
+- **`$HOME` 在 Windows 沒有。** `$.env.get("HOME")` 回 undefined，
+  `runtimeDir()` 就退回 `<project>/.claude/`。改成 `HOME` 找不到時
+  再找 `USERPROFILE`（TS 的 `userHome()` 與 Python 的 `user_home()` 同一套）。
+- **slug 沒處理磁碟機代號。** 舊規則只把 `/` 換成 `-`，`D:\app` 會原封不動變成
+  目錄名，裡面帶著 `:` 和 `\`。改成 `/`、`\`、`:` 都換成 `-`（`D:\app` →
+  `D--app`）。POSIX 路徑不含後兩者，所以**既有的執行期目錄一個都不會搬家**。
+
+`scripts/dev/sources-order.mjs` 的 case (e)/(f) 就是釘這兩件事的：(e) 確認
+`capital` 這條會用純 argv（不是 `/bin/sh` + `nohup`）啟動而且帶 `--detach`，
+(f) 用「只有 `%USERPROFILE%`、cwd 是 `D:\fake-project`」跑一次，確認 `--out-dir`
+落在 `/fake-home/.claude/stock-band/D--fake-project/`。
+
+### 10.7 跟其他台股路線比
+
+| | Yahoo | 證交所 MIS | 永豐 Shioaji | 群益 Capital |
+| --- | --- | --- | --- | --- |
+| 平台 | 都可以 | 都可以 | macOS／Linux | **Windows** |
+| 帳號 | 不用 | 不用 | 永豐帳戶＋API | 群益帳戶＋API＋證券帳戶 |
+| 前置 | 無 | 無 | `pip install shioaji` | 解壓 SDK＋`regsvr32`＋`pip install comtypes` |
+| 延遲 | 約 20 分 | 即時 | 即時 | 即時 |
+| 20 檔一次 | 2 個請求 | 1 個請求 | 1 次 `snapshots()` | 1 次訂閱，之後讀快取 |
+| 昨收 | 有 | 有 | `contract.reference` | `SKSTOCKLONG.nRef` |
+| K 棒／spark | 原生 | 無 | 無 | 無（都退回 Yahoo 的逐檔 chart） |
+| 庫存 | — | — | `list_positions` | 未實現損益彙總 |
+
+要翻案的訊號：群益把 K 線（`SKQuoteLib_RequestKLineAMByDate`，分線／新版輸出
+格式是 `年/月/日, 時:分, 開,高,低,收, 量`）也接進來，就能讓這條路線同時供 `bars`
+跟 `series`，比永豐那條多一截——目前兩條都沒做，K 棒一律走 Yahoo。
+
+---
+
+## 11. Pionex（加密貨幣第三個市場，2026-09-18 實測）
+
+### 11.1 端點與資料形狀
+
+公開、免金鑰、**免任何 header**（跟 Yahoo 不同——Yahoo 沒有瀏覽器 UA 會被
+擋，Pionex 一支裸 `curl` 就 200）：
+
+```
+GET https://api.pionex.com/api/v1/market/tickers?symbol=BTC_USDT
+GET https://api.pionex.com/api/v1/market/tickers            # 不帶 symbol，回全市場
+```
+
+成功（HTTP 200）：
+
+```json
+{"result":true,"data":{"tickers":[{"symbol":"BTC_USDT","time":1789746167017,
+ "open":"76846.01","close":"80707.58","high":"81153.69","low":"76259.98",
+ "volume":"38480.088467","amount":"3017756588.53451109","count":499384}]},
+ "timestamp":1789746167461}
+```
+
+失敗（**HTTP 仍是 200**——`result` 欄位才是成敗，不是狀態碼）：
+
+```json
+{"result":false,"code":"MARKET_INVALID_SYMBOL","message":"symbol error","timestamp":1789746227}
+```
+
+**`symbol=A,B` 不能一次帶多檔**（2026-09-18 實測）：
+
+```sh
+$ curl -s 'https://api.pionex.com/api/v1/market/tickers?symbol=BTC_USDT,ETH_USDT'
+{"result":false,"code":"MARKET_INVALID_SYMBOL","message":"symbol error","timestamp":1789746632}
+```
+
+所以 `feedCrypto()` 走「不帶 `symbol` 拉全市場（~330 檔、約 55 KB）再本地
+filter」這條路，watchlist 幾檔都是一次 tick 一個請求，不是逐檔打。
+
+其他欄位坑（實作細節見 `hooks/register.tsx` 的 `feedCrypto`/`pionexSymbol`
+註解，這裡只記證據）：
+
+- 所有數值是字串，要 `parseFloat`。
+- **沒有 changePercent 欄位。** `close` 是現價，`open` 是「24 小時前」的價，
+  不是「昨收」——這個市場的漲跌語意因此是 **24 小時漲跌**，跟 tw/us 的「對
+  昨收」不是同一件事。`feedCrypto` 把 `open` 塞進 `FileQuote.prevClose`，
+  借用既有的 `quoteRow()` 算式（沿用它，不是重寫一套）。
+- `symbol` 是 `BASE_QUOTE`（底線分隔），如 `BTC_USDT`。
+- 時間戳是 epoch 毫秒、UTC 基準，`new Date(ms)` 直接可用；但**錯誤物件的
+  `timestamp` 是秒**，不要拿來用。
+- **上架清單是 Pionex 自己的，不是幣圈通用的。** TON（`TON_USDT`）在 Pionex
+  上完全沒有市場（對照過完整 ~330 檔清單，2026-09-18／19 兩次都確認）。原本
+  的預設清單有 TON，而 `crypto-feed.mjs` 的 fixture 自己捏了一筆 `TON_USDT`
+  出來，於是**測試對著一個不存在的市場通過了**。兩邊都換成 BCH（Pionex 有，
+  且是成交額排得上的主流幣）。
+  - 教訓兩條：①預設清單的每個代號都要對照真實回應驗過，別假設某個幣「一定
+    有」；②fixture 的每一列都必須對應真實市場，否則測試證明不了真實 feed 的
+    任何事。
+  - 代號不存在本身不會壞：board 既有的「有快照但這個代號沒被定價」路徑會把
+    它畫成灰色 placeholder，不是假價格。但預設清單不該出一列永遠填不上的。
+  - 查法：`curl -s 'https://api.pionex.com/api/v1/market/tickers' | python3 -c "import json,sys; print([t['symbol'] for t in json.load(sys.stdin)['data']['tickers']])"`
+
+### 11.2 限流：weight 桶子實測（2026-09-18）
+
+官方文件只寫「10 per second」，且明講單位是 **weight**，不是 request 數，
+也不公開各端點的 weight 對照表
+（<https://pionex-doc.gitbook.io/apidocs/restful/general/rate-limit>）。以下是
+針對 `market/tickers` 這支端點本機實測出來的桶子形狀，**只對這支端點成立**，
+不要外推到 `depth`／`klines`／私有端點：
+
+- 每個回應都帶 `x-ratelimit-tokens`（剩餘額度，含小數）與 `x-ratelimit-last`
+  （unix 秒、含小數，看起來是上次計費的時間戳——目前只記錄，沒有用在程式邏輯
+  裡）。
+- 閒置穩定在 **29~30**，這是桶子容量；約 **10 tokens/秒**回補（跟官方講的
+  "10 per second" 對得上），停手後 **2 秒內**回補到 29。
+- **payload 大小不影響 weight**：拉全量（`?type=PERP`，612 檔、107 KB）跟拉
+  單檔（`?symbol=BTC_USDT`）用平行對照組量，兩組每發 tokens 掉幅一致（約
+  −1）——`market/tickers` 是純 per-request 計費，全量拉取沒有額外代價。
+- 25 發平行請求打下去，桶子掉到 **8.43**，**25/25 全部 HTTP 200，一次 429
+  都沒有**——這是驗證「10 連發不會撞牆」的證據，**不是**「限制其實更寬鬆」的
+  證據（10 連發剛好貼著上限，沒有超過），輪詢間隔仍維持 30 秒一次不放寬。
+- **`x-ratelimit-tokens` 是整個 IP 共用的桶，不是這支程式自己的用量**——同一
+  台機器上任何其他東西打 Pionex，都會讓這支程式讀到偏低的值。`feedCrypto`
+  在讀到低於 5 時跳過那一 tick 不打，這是正常的「主動讓路」，可能被別人的
+  流量觸發，不代表這支程式有 bug，也**不會**因此加重試或縮短輪詢間隔去補償
+  ——加重試正是官方文件警告的「failing to back off」，會把封鎖時間疊上去。
+
+429 本身：blocks the IP 60 秒，且**封鎖期間收到的請求會再疊加 +10 秒**，所以
+`CRYPTO_COOLDOWN_MS` 訂在 90 秒（比官方 60 秒門檻留一截安全邊界），是固定等待，
+不是像 Yahoo 那樣的指數退避（Yahoo 的節流行為沒有這麼明確寫在文件上，才需要
+指數退避去摸索；Pionex 這支是文件寫死的固定長度封鎖，不需要再發明一條曲線）。
+
+### 11.3 一個順手修掉的既有 bug：`round2()` 對小數價格失真
+
+寫 `scripts/dev/crypto-feed.mjs` 的快樂路徑測試時抓到：`quoteRow()` 原本用
+`round2()`（固定四捨五入到小數點後 2 位）算 `change`，這對 tw/us（沒有低於
+$1 的標的）無感，但 DOGE 這種 <$1 的幣會被輾壓——0.08177 → 0.08735 的真實漲幅
+是 $0.00558，`round2` 四捨五入成 $0.01，`pct` 又是從這個被捨入過的 `change`
+算出來的，等於把 6.8% 的真實漲跌顯示成 12.2%，不是顯示層的小瑕疵，是資料本身
+就算錯了。改成 `roundPrice()`：依數值本身的量級決定小數位數（≥1000 用 0
+位、≥1 用 2 位、<1 用 4 位，跟 `board.tsx` 的 `quotePriceDecimals()` 同一套
+門檻），tw/us 的值全部 ≥1，行為不變；`register.tsx` 裡所有 `round2(` 的呼叫點
+（`quoteRow`／`publish` 的指數計算）都換成了 `roundPrice(`。

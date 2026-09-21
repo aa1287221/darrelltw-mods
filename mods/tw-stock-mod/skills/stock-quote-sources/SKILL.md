@@ -1,6 +1,6 @@
 ---
 name: stock-quote-sources
-description: Use when the user wants to change, choose, or wire where tw-stock-mod's stock prices come from — switching the feed, connecting a broker or vendor API, or asking why a price looks stale. Trigger words include 換報價來源, 接永豐, 接 API, 即時報價, 股價來源, 換成 Yahoo, quote source, switch feed, wire shioaji, real-time quotes.
+description: Use when the user wants to change, choose, or wire where tw-stock-mod's stock prices come from — switching the feed, connecting a broker or vendor API, or asking why a price looks stale. Trigger words include 換報價來源, 接永豐, 接群益, 接 API, 即時報價, 股價來源, 換成 Yahoo, quote source, switch feed, wire shioaji, wire capital, SKCOM, real-time quotes.
 ---
 
 # Wiring tw-stock-mod's quote sources
@@ -19,9 +19,10 @@ README's [Taiwan futures (tf)](../../README.md#taiwan-futures-tf) section.
 | What the user wants | Route |
 | --- | --- |
 | Just works, no setup | Yahoo — already the default for both markets |
-| Real-time Taiwan prices, has a 永豐/Sinopac account | Shioaji, `twSources: ["shioaji"]` — the band runs the fetcher itself |
+| Real-time Taiwan prices, has a 永豐/Sinopac account (macOS/Linux) | Shioaji, `twSources: ["shioaji"]` — the band runs the fetcher itself |
+| Real-time Taiwan prices, has a 群益/Capital account (Windows) | Capital, `twSources: ["capital"]` — the band runs the fetcher itself |
 | Prices from their own broker or a paid vendor | The quotes-file override, fed by a script |
-| Specifically 富果/Fugle | Not built in — write a small fetcher into the override (§4 of the reference) |
+| Specifically 富果/Fugle | Not built in — write a small fetcher into the override (§5 of the reference) |
 | Something else entirely (custom data, a simulator) | Write a fetcher into the override ("Write your own fetcher" in the reference) |
 
 ## Steps per route
@@ -63,6 +64,35 @@ python3 \
 `~/.sinobon.env`). Leave it running — it holds a login session and writes
 `stock-quotes.json` (and `stock-holdings.json`) into the same runtime dir on
 a loop, unless `--out-dir` points somewhere else.
+
+**群益 Capital, managed by the band.** Windows only — SKCOM is a COM DLL. Put
+`CAPITAL_USER_ID`/`CAPITAL_PASSWORD` in an env file outside the repo, unzip the
+SDK somewhere stable, register its 元件 once as Administrator
+(`regsvr32 SKCOM.dll` in `元件d`), `pip install comtypes`, and set
+`~/.claude/stock-band.json` (NOT the project's) to:
+
+```json
+"twSources": ["capital", "yahoo"],
+"capital": {
+  "python": "python",
+  "env": "~/.capital.env",
+  "dll": "~/CapitalAPI/元件/x64/SKCOM.dll",
+  "interval": 10
+}
+```
+
+`dll` has no default — 群益 ships a zip with no install location, so the script
+refuses rather than guesses. `python` must have `comtypes` AND match the
+registered 元件's bitness. The band spawns
+`scripts/fetch-quotes-capital.py` itself, on the same heartbeat/pidfile
+contract as Shioaji (runtime dir, nothing to run by hand); the script detaches
+itself rather than via `nohup`, which Windows does not have. Footer tag:
+`群益 即時`. The same script writes `stock-holdings.json` every tick from
+未實現損益彙總, which is what feeds the 損益 view. First run
+`<python> scripts/fetch-quotes-capital.py --check` — it walks the platform,
+bitness, comtypes, the DLL path, the registration, the env file, a real login,
+the quote host, every watchlist and index code, and the 證券 account, one ✅/❌
+line each.
 
 **富果 Fugle, or any other vendor.** Not wired into the module. Write a small
 script that calls the vendor's API and writes

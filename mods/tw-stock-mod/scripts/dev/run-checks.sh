@@ -3,10 +3,11 @@
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
 # file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view /
-# fit-rows / pytest
-# against them
-# plus check-personal.sh, and prints a PASS/FAIL line per check. Exits
-# non-zero if any of them did.
+# fit-rows / pytest / crypto-feed / crypto-sort / market-select against them
+# (crypto-feed, crypto-sort and market-select build their own stub config
+# in-process instead, so they need no fixture directory) plus
+# check-engine-rules.sh and check-personal.sh, and prints a PASS/FAIL line
+# per check. Exits non-zero if any of them did.
 #
 # rank-cross and chart-nav's "名次交叉" section once pinned the PR-a bug
 # (focus/was.code tracked a table position, not a symbol); that is fixed, so
@@ -302,6 +303,10 @@ run_check "tabs"           node "$SCRIPT_DIR/tabs.mjs"        "$OUT/register.js"
 run_check "chart-view"     node "$SCRIPT_DIR/chart-view.mjs"  "$OUT/register.js" "$OUT/board.js" "$FIXTURES/chart-view" "$FIXTURES/chart-view-tw"
 run_check "fit-rows"       node "$SCRIPT_DIR/fit-rows.mjs"    "$OUT/register.js" "$OUT/board.js" "$FIXTURES/fit-rows"
 run_check "pytest"         run_pytest
+run_check "crypto-feed"    node "$SCRIPT_DIR/crypto-feed.mjs" "$OUT/register.js"
+run_check "crypto-sort"    node "$SCRIPT_DIR/crypto-sort.mjs" "$OUT/register.js"
+run_check "market-select"  node "$SCRIPT_DIR/market-select.mjs" "$OUT/register.js"
+run_check "engine-rules"   bash "$SCRIPT_DIR/check-engine-rules.sh"
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
 echo

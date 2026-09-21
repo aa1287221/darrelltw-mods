@@ -282,18 +282,40 @@ ok(
   '沒有真的翻頁卻被判定成剛翻頁，第 2 頁不該套上第 1 頁的舊股票當翻牌 (bug #1)',
 )
 
-// --- 新增：切市場沒重設 page，落在跟直覺不符的頁碼 -----------------------
-// 第二個漏洞：換市場（當年的 onCycle，現在的 onSelectStop）只呼叫 resetPnlScroll()，從沒把 page 歸零。
+// --- 新增：onCycle 切市場沒重設 page，落在跟直覺不符的頁碼 -------------------
+// 第二個漏洞：onCycle 換市場只呼叫 resetPnlScroll()，從沒把 page 歸零。
 // buildProps 用 ((page % pages) + pages) % pages 把舊 page 繞進新市場的合法
 // 範圍，不會當機，但落點完全看兩個市場頁數的餘數關係，不是使用者切市場時
-// 直覺期待的「從頭看」。這段把美股停在最後一頁、台股只有 2 頁，讓餘數落在
-// 非 0 的位置，驗證切過去該是台股第 1 頁而不是繞算出來的第 2 頁 - 修法是
-// 市場真的換了就把 page 寫回 0（見 onSelectStop 裡
-// `if (stop.market !== props.market)`）。20 檔頂到 MAX_SYMBOLS（見
-// register.tsx），5 檔一頁剛好 4 頁；7 台股 5 檔一頁是 2 頁，4 頁対 2 頁的餘
-// 數在最後一頁（index 3）時是 3 % 2 = 1 - 非 0，足以跟真正該歸零的 0 區分。
+// 直覺期待的「從頭看」。這段把美股停在最後一頁、加密貨幣只有 2 頁，讓餘數
+// 落在非 0 的位置，驗證切過去該是加密貨幣第 1 頁而不是繞算出來的第 2 頁 -
+// 修法是市場真的換了就把 page 寫回 0（見 onCycle 裡
+// `if (nextStop.market !== props.market)`）。20 檔頂到 MAX_SYMBOLS（見
+// register.tsx），5 檔一頁剛好 4 頁；加密貨幣是內建 CRYPTO_LIST 10 檔、5 檔
+// 一頁是 2 頁，4 頁対 2 頁的餘數在最後一頁（index 3）時是 3 % 2 = 1 - 非
+// 0，足以跟真正該歸零的 0 區分。
+//
+// `marketSwitcher: "cycle"` pins this fixture to the single cycle Button
+// (key `stock-band:market`) this section presses directly - the other two
+// switcher styles (`tabs`/`select`) jump straight to a target instead of
+// walking a cycle, so they have no "next stop" for this section to test.
+//
+// buildCycle's stops are marketStops(config) order (台股, [台股庫存], 美股,
+// [美股庫存], 加密貨幣, see register.tsx) - a market's `:pnl` stop only
+// exists when marketStops() actually finds holdings for it (holdingsFor()),
+// so this fixture states one `us` holding below (`holdings`/
+// `holdingsSource: 'config'`) purely to make 美股庫存 exist for this
+// section to walk through; the holdings VALUES themselves are never read by
+// any assertion here (this file is not the one proving P&L math). With that
+// stop present: 美股(table) 的下一站是 美股庫存（同市場，只換 pnl 視圖，見
+// 下面第一次按鈕：market 不變、page 也不該變）；再按一次才會真的換市場，落
+// 在 加密貨幣（見下面第二次按鈕）。這段原本假設下一站直接是台股，兩站的差
+// 異是 2026-09-19 那次改動把 buildCycle 從「美股庫存只在設定了美股庫存才
+// 出現」統一成「MARKET_STOPS 五站永遠都在」之後才出現的；同一天稍晚的一次
+// 修正又把「只在有庫存才出現」的判定救回來，但這次 tw/us 一致套用、且改成
+// 讀真實的 holdingsFor() 而不是一個獨立的 hasUsHoldings 參數 - 這段測試本
+// 身驗的行為（cycle 換市場時 page 重置與否）沒有變，只是取得 美股庫存 這一
+// 站存在所需的 fixture 設定變了。
 const usCycleCodes = Array.from({ length: 20 }, (_, i) => `U${String(i + 1).padStart(2, '0')}`)
-const twCycleCodes = Array.from({ length: 7 }, (_, i) => `T${String(i + 1).padStart(2, '0')}`)
 const cycleBand = {
   market: 'us',
   sort: 'list',
@@ -301,8 +323,10 @@ const cycleBand = {
   refreshMs: 1000,
   pageMs: 999999,
   columns: 1,
+  marketSwitcher: 'cycle',
   us: usCycleCodes.map((code, i) => ({ code, name: `美股${i}`, prevClose: 100 })),
-  tw: twCycleCodes.map((code, i) => ({ code, name: `台股${i}`, prevClose: 100 })),
+  holdings: { us: [{ code: 'U01', name: '美股0', qty: 1, cost: 1 }] },
+  holdingsSource: 'config',
 }
 await writeFile(bandPath, JSON.stringify(cycleBand, null, 2))
 await writeFile(
@@ -332,11 +356,21 @@ for (let guard = 0; guard < pCyc0.pageCount && pCyc0.page !== pCyc0.pageCount - 
 }
 ok(pCyc0.page === pCyc0.pageCount - 1, `美股停在最後一頁（page=${pCyc0.pageCount - 1}），用來製造切市場後的餘數落點`)
 
+// 第一次按：美股(table) 的下一站是 美股庫存 - 同一個市場，只是換到 pnl 視
+// 圖，onCycle 的 `if (nextStop.market !== props.market)` 不成立，page 該原
+// 封不動留在 3。
 const { btns: bCyc1 } = await show('市場切換：切市場前')
-bCyc1.find(x => x.key === 'stock-band:tab:tw')?.press()
-let { props: pCyc2 } = await show('市場切換：切到台股')
-ok(pCyc2.market === 'tw', '按台股分頁後市場真的換成台股')
-ok(pCyc2.pageCount === 2, '台股 7 檔、每頁 5 檔，共 2 頁')
+bCyc1.find(x => x.key === 'stock-band:market').press()
+let { props: pCyc1 } = await show('市場切換：切到美股庫存（同市場）')
+ok(pCyc1.market === 'us' && pCyc1.view === 'pnl', '按市場循環鈕一次先落在同市場的庫存視圖')
+ok(pCyc1.page === 3, `同市場切換不動 page，該仍是 3：實際 page=${pCyc1.page}`)
+
+// 第二次按：美股庫存 → 加密貨幣，市場真的換了。
+const { btns: bCyc2 } = await show('市場切換：切到加密貨幣前')
+bCyc2.find(x => x.key === 'stock-band:market').press()
+let { props: pCyc2 } = await show('市場切換：切到加密貨幣')
+ok(pCyc2.market === 'crypto', '按市場循環鈕兩次後市場真的換成加密貨幣')
+ok(pCyc2.pageCount === 2, '加密貨幣內建 10 檔、每頁 5 檔，共 2 頁')
 ok(
   pCyc2.page === 0,
   `market 真的換了，page 該歸零從頭看，不是繞算 3 % 2 = 1 落在第 2 頁：實際 page=${pCyc2.page} (bug #2)`,

@@ -13,7 +13,7 @@ type TextTag = ClientElements['Text']
 // here looks arbitrary. Never name a local variable `h`: every JSX tag in this
 // file compiles to h(...).
 
-export type MarketId = 'tw' | 'us' | 'tf'
+export type MarketId = 'tw' | 'us' | 'tf' | 'crypto'
 export type Phase = 'open' | 'closed'
 export type View = 'table' | 'chart' | 'pnl'
 
@@ -640,13 +640,34 @@ function signed(value: number, decimals = 2): string {
   return sign + thousands(Math.abs(value), decimals)
 }
 
+/**
+ * How many decimals a watchlist PRICE cell prints with when the row carries
+ * no `decimals` of its own (a futures row always does - the contract's own
+ * digits win, see QuoteRow.decimals). tw/us stay a fixed 2 - a table mixing
+ * NT$18.65 and NT$6,055 stocks still reads fine at a flat 2. Crypto has no
+ * such range: BTC trades in the tens of thousands while DOGE trades in
+ * cents, and a fixed decimal count either drowns DOGE in trailing zeros or
+ * throws away BTC's only meaningful digits - so this scales the decimal
+ * count to the PRICE's own magnitude instead of the market's, and only for
+ * crypto (tw/us keep the flat 2 they always had).
+ */
+function quotePriceDecimals(market: MarketId, price: number): number {
+  if (market !== 'crypto') return 2
+  if (price >= 1000) return 0
+  if (price >= 1) return 2
+  return 4
+}
+
 // up is red and down is green on the Taiwan boards (台股 and 台指期), the
 // other way round on the US board - the whole reason this mod tracks which
-// market it is showing
+// market it is showing. Crypto follows the US convention (green up / red
+// down) - that is the crypto-market norm, not a "not Taiwan" default, and
+// the `!== 'tw'` shape below already reads that way for free.
 function tone(market: MarketId, value: number): string {
   if (value === 0) return FLAT
-  const up = market === 'us' ? UP_GREEN : DOWN_RED
-  const down = market === 'us' ? DOWN_RED : UP_GREEN
+  const taiwan = market === 'tw' || market === 'tf'
+  const up = taiwan ? DOWN_RED : UP_GREEN
+  const down = taiwan ? UP_GREEN : DOWN_RED
   return value > 0 ? up : down
 }
 
@@ -1146,7 +1167,7 @@ function drawTwoColQuote(r: Row, half: HalfLayout, q: QuoteRow, market: MarketId
   }
 
   const color = tone(market, q.pct)
-  const digits = q.decimals ?? 2
+  const digits = q.decimals ?? quotePriceDecimals(market, q.price)
   const turn = q.was ? rowTurn - slot * (turned ? PAGE_ROW_STAGGER : ROW_STAGGER) : RESTING
   const was = q.was ?? q
   const stagger = turned ? 0 : STAGGER
@@ -1169,7 +1190,7 @@ function drawTickerCell(r: Row, left: number, q: QuoteRow, market: MarketId, row
     return
   }
   const color = tone(market, q.pct)
-  const digits = q.decimals ?? 2
+  const digits = q.decimals ?? quotePriceDecimals(market, q.price)
   const turn = q.was ? rowTurn - slot * (turned ? PAGE_ROW_STAGGER : ROW_STAGGER) : RESTING
   const was = q.was ?? q
   const stagger = turned ? 0 : STAGGER
@@ -1318,7 +1339,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     const focus = Math.max(0, Math.min(quotes.length - 1, props.focus))
     const q = quotes[focus]
     const color = tone(props.market, q.pct)
-    const digits = q.decimals ?? 2
+    const digits = q.decimals ?? quotePriceDecimals(props.market, q.price)
     const width = surface.columns || 80
     const chartRight = Math.max(lay.pctRight, Math.min(width - 1, CHART_RIGHT_CAP))
     const plotW = Math.max(10, chartRight - lay.badgeCol - AXIS_W)
@@ -1421,12 +1442,13 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // 成本/現價 reuse the table's own price formatter - `thousands()` at 2
     // decimals, the same call the watchlist table's price column makes
     // regardless of market (e.g. 2,436.04) - unless the row carries its
-    // contract's own `decimals` (futures). `decimals` stays market-dependent
-    // for money that is NOT a price - 今日損益/總損益 and the totals row read
-    // as integer TWD, the same way the rest of the band's TWD figures do (US
-    // keeps cents throughout).
-    const priceDecimalsOf = (row: Holding) => row.decimals ?? 2
-    const decimals = props.market === 'us' ? 2 : 0
+    // contract's own `decimals` (futures), or the market is crypto (see
+    // quotePriceDecimals). `decimals` stays market-dependent for money that
+    // is NOT a price - 今日損益/總損益 and the totals row read as integer TWD
+    // (台股 and 台指期), the same way the rest of the band's TWD figures do;
+    // us and crypto (both USD-family, cents-denominated) keep 2 decimals.
+    const priceDecimalsOf = (row: Holding) => row.decimals ?? quotePriceDecimals(props.market, row.price)
+    const decimals = props.market === 'tw' || props.market === 'tf' ? 0 : 2
     const futures = props.market === 'tf'
     // register.tsx has already sorted the full list by props.pnlSortKey/Dir
     // and clamped holdingsScroll to it - this only slices the window and
@@ -1723,7 +1745,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
         }
 
         const color = tone(props.market, q.pct)
-        const digits = q.decimals ?? 2
+        const digits = q.decimals ?? quotePriceDecimals(props.market, q.price)
               // A row turns only when its price actually moved: flapping a number
         // that did not change is noise, and a real board flaps only what
         // changed. Each field's wave front is offset by its own column, so

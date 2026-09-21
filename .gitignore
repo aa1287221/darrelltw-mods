@@ -12,6 +12,15 @@ __pycache__/
 # this, so it should never land here - this line is just a safety net
 shioaji.log
 
+# fetch-quotes-capital.py points SKCenterLib_SetLogPath at the runtime dir, so
+# SKCOM's log should never land here either - same safety net
+CapitalLog/
+
+# 群益's SDK download: a third-party zip with no business in this repo. Unzip it
+# somewhere stable outside the tree and point capital.dll at it - see
+# mods/tw-stock-mod/references/quote-sources.md §4.
+CapitalAPI_*_PythonExample.zip
+
 # observability hook state, written per session
 .runtime/
 
