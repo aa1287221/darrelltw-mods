@@ -339,3 +339,44 @@ def test_log_line_appends_one_json_line_per_call(tmp_path):
     assert len(lines) == 2
     assert json.loads(lines[0]) == {"action": "place", "code": "2330"}
     assert json.loads(lines[1]) == {"action": "status"}
+
+
+# ---------------------------------------------------------------------------
+# format_status_lines / settle_after_cancel: status says so when empty, cancel
+# reports the settled state rather than the pre-cancel snapshot
+# ---------------------------------------------------------------------------
+
+def test_format_status_lines_empty_says_no_orders():
+    assert order.format_status_lines([], "sim") == ["沒有委託（模擬）"]
+
+
+def test_format_status_lines_lists_each_trade():
+    import shioaji as sj
+
+    trades = [make_trade("A1", "2330", sj.Action.Buy, 1188.0, 1, sj.OrderStatus.Filled, 1)]
+    lines = order.format_status_lines(trades, "sim")
+    assert len(lines) == 1 and "A1" in lines[0] and "Filled" in lines[0]
+
+
+def test_settle_after_cancel_returns_first_non_pending_snapshot():
+    import shioaji as sj
+
+    snapshots = [
+        [make_trade("A1", "2330", sj.Action.Buy, 2300.0, 1, sj.OrderStatus.Submitted, 0)],
+        [make_trade("A1", "2330", sj.Action.Buy, 2300.0, 1, sj.OrderStatus.Submitted, 0)],
+        [make_trade("A1", "2330", sj.Action.Buy, 2300.0, 1, sj.OrderStatus.Cancelled, 0)],
+    ]
+    calls = []
+    trade, settled = order.settle_after_cancel(lambda: snapshots[len(calls)], "A1", tries=5, sleep=lambda s: calls.append(s))
+    assert settled is True
+    assert trade.status.status == sj.OrderStatus.Cancelled
+    assert len(calls) == 2  # slept twice, then the third snapshot settled
+
+
+def test_settle_after_cancel_gives_up_after_tries_and_says_so():
+    import shioaji as sj
+
+    stuck = [make_trade("A1", "2330", sj.Action.Buy, 2300.0, 1, sj.OrderStatus.Submitted, 0)]
+    trade, settled = order.settle_after_cancel(lambda: stuck, "A1", tries=3, sleep=lambda s: None)
+    assert settled is False
+    assert trade is stuck[0]

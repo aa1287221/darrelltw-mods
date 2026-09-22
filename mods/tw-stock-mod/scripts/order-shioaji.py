@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 
 DEFAULT_MAX_QTY = 1
@@ -225,6 +226,33 @@ def format_trade_line(trade) -> str:
     return f"{order_id}  {code}  {side}  {price}  {qty}  {status_text}  已成 {filled}"
 
 
+PENDING_STATUSES = ("PendingSubmit", "PreSubmitted", "Submitted")
+
+
+def format_status_lines(trades, mode: str) -> list[str]:
+    """One line per trade; an explicit 沒有委託 line when there is none, so an
+    empty listing is never mistaken for a silent failure."""
+    if not trades:
+        return [f"沒有委託（{'正式' if mode == 'live' else '模擬'}）"]
+    return [format_trade_line(t) for t in trades]
+
+
+def settle_after_cancel(refresh, order_id: str, tries: int = 5, delay: float = 1.0, sleep=time.sleep):
+    """(trade, settled). cancel_order() returns the pre-cancel snapshot, so
+    poll `refresh()` until the order leaves a pending status; the last
+    snapshot is returned either way so the caller still has a line to print."""
+    trade = None
+    for attempt in range(tries):
+        trade = find_trade_by_id(refresh(), order_id) or trade
+        status_enum = field(field(trade, "status", None), "status", None) if trade is not None else None
+        status_text = str(field(status_enum, "value", status_enum)) if status_enum is not None else ""
+        if trade is not None and status_text not in PENDING_STATUSES:
+            return trade, True
+        if attempt < tries - 1:
+            sleep(delay)
+    return trade, False
+
+
 def log_line(log_path: Path, record: dict) -> None:
     """Append one JSON line - orders.log is append-only, never rewritten."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -325,6 +353,11 @@ def enter_session(args, user_cfg: dict, project_cfg: dict, action: str, extra: d
     os.chdir(RUNTIME_DIR)
     import shioaji as sj
 
+    # api.Contracts is deprecated in favour of api.contracts (v2: get()/info(),
+    # no Stocks/Futures maps) - still works, and the fetcher shares the same
+    # v1 path; migrate both together rather than half of one.
+    warnings.filterwarnings("ignore", message="api.Contracts is deprecated", category=DeprecationWarning)
+
     api = do_login(sj, api_key, secret_key, simulation=(mode != "live"))
 
     if mode == "live" and not enforce_live_ca(api, user_cfg, action, extra):
@@ -412,8 +445,8 @@ def cmd_status(args, user_cfg: dict, project_cfg: dict) -> None:
     mode, api, _sj = session
     try:
         trades = fetch_trades(api)
-        for trade in trades:
-            print(format_trade_line(trade))
+        for line in format_status_lines(trades, mode):
+            print(line)
         log_line(
             ORDERS_LOG,
             {
@@ -442,11 +475,14 @@ def cmd_cancel(args, user_cfg: dict, project_cfg: dict) -> None:
         if trade is None:
             refuse("cancel", f"查不到委託：{args.order_id}", {"id": args.order_id})
             return
-        cancelled = do_cancel(api, trade)
-        print(format_trade_line(cancelled))
+        do_cancel(api, trade)
+        settled_trade, settled = settle_after_cancel(lambda: fetch_trades(api), args.order_id)
+        print(format_trade_line(settled_trade or trade))
+        if not settled:
+            print("取消已送出，但狀態還沒更新——稍後用 status 再查一次", file=sys.stderr)
         log_line(
             ORDERS_LOG,
-            {"ts": now_ms(), "action": "cancel", "mode": mode, "id": args.order_id},
+            {"ts": now_ms(), "action": "cancel", "mode": mode, "id": args.order_id, "settled": settled},
         )
     finally:
         try:
