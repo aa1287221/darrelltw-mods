@@ -2413,6 +2413,27 @@ function fetcherStateFor(route: string): FetcherState {
 // turn. Keyed by market because a snapshot must never reach the other board:
 // US prices under 加權指數 would be worse than no prices at all.
 let liveBy: Partial<Record<MarketId, { file: QuotesFile; prev?: Record<string, FileQuote> }>> = {}
+// The file slots' own "last snapshot", per market: a file-driven market
+// (tf always; tw/us whenever a fetcher's file wins) has no liveBy entry, so
+// without this the rows would jump to a new price instead of flapping to it.
+// `prev` is the quotes the current file replaced - what the rows flap FROM.
+let fileSeen: Partial<Record<MarketId, { asOf: number; quotes: Record<string, FileQuote>; prev?: Record<string, FileQuote> }>> = {}
+
+/**
+ * Notes a new file snapshot per market and starts one turn for it: the
+ * previous file's quotes become that market's `prev`, and `turnSeq` bumps
+ * exactly once for a changed asOf, never for a re-read of the same file.
+ */
+function noteFileSnapshots(): void {
+  for (const market of Object.keys(quotesFiles) as MarketId[]) {
+    const file = quotesFiles[market]
+    if (!file) continue
+    const seen = fileSeen[market]
+    if (seen?.asOf === file.asOf) continue
+    fileSeen[market] = { asOf: file.asOf, quotes: file.quotes, prev: seen?.quotes }
+    if (seen) turnSeq += 1
+  }
+}
 // keyed `<market>:<code>`, since a Taiwan code and a US ticker share a namespace
 let liveBars: Record<string, { bars: Bar[]; at: number }> = {}
 let feedSkipUntil = 0 // set by a 429 or a network error, doubling each time
@@ -2695,9 +2716,11 @@ function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
     const bridgeHolds = bridge && snapshotHolds(bridge.file.asOf, now, market)
     const merged = bridgeHolds ? { ...bridge.file.quotes, ...file.quotes } : file.quotes
     const { quotes, barsFromYahoo } = withLiveBars(market, merged, now)
+    const prev = fileSeen[market]?.asOf === file.asOf ? fileSeen[market]?.prev : undefined
     return {
       ...file,
       quotes,
+      ...(prev ? { prev } : {}),
       ...(barsFromYahoo && !file.barLabel ? { barLabel: YAHOO_BAR_LABEL } : {}),
     }
   }
@@ -3066,6 +3089,7 @@ export const register: Register = on => {
       const futuresQuotes = parseQuotes(futuresQuotesText, now)
       futuresQuotesFresh = futuresQuotes !== undefined
       fillQuoteSlots(futuresQuotes, ['tf'])
+      noteFileSnapshots()
       // The project-path holdings file only: a 0.9-era Shioaji fetcher wrote
       // its output straight here (before runtimeDir existed) and always
       // stamped it "永豐 庫存" - see parseHoldingsFile's docblock. That file

@@ -37,21 +37,21 @@ const SRF_BARS = [
   [109.45, 109.45, 109.4, 109.45], [109.45, 109.5, 109.4, 109.45], [109.5, 109.55, 109.45, 109.55], [109.55, 109.6, 109.5, 109.6],
   [109.6, 109.7, 109.55, 109.65], [109.65, 109.8, 109.6, 109.8], [109.8, 110.1, 109.75, 110.05], [110.05, 110.4, 110.0, 110.35],
 ]
-const futuresFile = asOf => ({
+const futuresFile = (asOf, txfPrice = 47557.0) => ({
   asOf,
   dataAt: asOf - 5_000,
   market: 'tf',
   source: '永豐',
   barLabel: '5 分 K（永豐）',
   quotes: {
-    TXFR1: { price: 47557.0, prevClose: 47428.0, name: '臺股期貨 近月', multiplier: 200.0, decimals: 0, bars: TXF_BARS, resolved: 'TXFJ6' },
+    TXFR1: { price: txfPrice, prevClose: 47428.0, name: '臺股期貨 近月', multiplier: 200.0, decimals: 0, bars: TXF_BARS, resolved: 'TXFJ6' },
     SRFJ6: { price: 110.35, prevClose: 108.3, name: '小型元大台灣50ETF期貨 202610', multiplier: 1000.0, decimals: 2, bars: SRF_BARS },
   },
 })
-const writeFutures = async (dir, asOf) => {
+const writeFutures = async (dir, asOf, txfPrice) => {
   const runtime = runtimeDirFor(dir)
   await mkdir(runtime, { recursive: true })
-  await writeFile(`${runtime}futures-quotes.json`, JSON.stringify(futuresFile(asOf), null, 1))
+  await writeFile(`${runtime}futures-quotes.json`, JSON.stringify(futuresFile(asOf, txfPrice), null, 1))
 }
 
 /** boots one fresh register.js against `dir`; `tag` defeats the ESM module cache */
@@ -142,8 +142,8 @@ let { props: q, btns } = await band.draw()
 console.log(`tf table: market=${q.market} phase=${q.phase} source=${q.source} label=${q.sourceLabel} bars=${q.barLabel}`)
 console.log('rows:', q.quotes.map(r => `${r.code} "${r.name}" price=${r.price} pct=${r.pct.toFixed(3)} dec=${r.decimals} noData=${!!r.noData}`).join('  '))
 ok(q.market === 'tf' && q.phase === 'open', `pinned tf, 夜盤 open: ${q.market} ${q.phase}`)
-const txf = q.quotes.find(r => r.code === 'TXFR1')
-const srf = q.quotes.find(r => r.code === 'SRFJ6')
+let txf = q.quotes.find(r => r.code === 'TXFR1')
+let srf = q.quotes.find(r => r.code === 'SRFJ6')
 ok(txf && !txf.noData && txf.price === 47557, `TXFR1 priced from the file: ${txf?.price}`)
 ok(srf && !srf.noData && srf.price === 110.35, `SRFJ6 priced from the file: ${srf?.price}`)
 ok(txf?.prevClose === 47428 && Math.abs(txf.pct - pct(47557, 47428)) < 1e-9, `TXFR1 今日% from prevClose (昨結): ${txf?.pct}`)
@@ -202,6 +202,27 @@ ok(lines[0].includes('5 分 K（永豐）'), `chart title carries the file's bar
 ok(/47,557\b/.test(lines[0]) && !lines[0].includes('47,557.00'), 'chart title honours 0 decimals')
 ok(band.fetched.length === 0, 'still no request after moving to the second contract')
 btns.find(b => b.label === '回清單').press()
+
+// --- path 4b: a NEW snapshot (later asOf, TXFR1 moved) -> the rows flap from
+// the old price: `was` carries it and `turn` advances once; re-reading the
+// same snapshot advances nothing
+;({ props: q } = await band.draw())
+const turnBefore = q.turn
+const seqBefore = q.seq
+await band.poll()
+;({ props: q } = await band.draw())
+ok(q.turn === turnBefore, `re-reading the same snapshot does not start a turn: ${turnBefore} -> ${q.turn}`)
+await writeFutures(tfDir, CLOCK - 5_000, 47600.0)
+await band.poll()
+;({ props: q } = await band.draw())
+txf = q.quotes.find(r => r.code === 'TXFR1')
+srf = q.quotes.find(r => r.code === 'SRFJ6')
+ok(q.turn === turnBefore + 1, `a new snapshot starts exactly one turn: ${turnBefore} -> ${q.turn}`)
+ok(q.seq > seqBefore, `the live dot beats on a new file snapshot: seq ${seqBefore} -> ${q.seq}`)
+ok(txf?.price === 47600 && txf?.was?.price === 47557, `TXFR1 flaps from the previous file price: was=${txf?.was?.price} now=${txf?.price}`)
+ok(srf?.price === 110.35 && srf?.was === undefined, `SRFJ6 (unchanged) gets no was, so only the moved row flaps (quoteRow's rule): was=${srf?.was?.price}`)
+await writeFutures(tfDir, CLOCK - 10_000)
+await band.poll()
 
 // --- path 5: the same file, older than the stale window -> no-data, never demo
 await writeFutures(tfDir, CLOCK - QUOTE_STALE_MS - 1)
