@@ -8,6 +8,7 @@ one copy rather than a drifting local one.
 """
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -80,9 +81,30 @@ def test_release_twice_is_safe(tmp_path):
 
 
 def test_claim_refuses_a_live_owner(tmp_path):
+    # a child of our own, so it is alive and ours whatever PID the runner has
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        pidfile = tmp_path / "stock.pid"
+        pidfile.write_text(str(owner.pid), encoding="utf-8")
+        assert not _common.claim_pidfile(pidfile)
+    finally:
+        owner.kill()
+        owner.wait()
+
+
+def test_claim_takes_over_an_owner_that_exited(tmp_path):
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
     pidfile = tmp_path / "stock.pid"
-    pidfile.write_text(str(os.getppid()), encoding="utf-8")  # the test runner's parent is alive
-    assert not _common.claim_pidfile(pidfile)
+    pidfile.write_text(str(gone.pid), encoding="utf-8")
+    assert _common.claim_pidfile(pidfile)
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs a pid we may not signal")
+def test_a_pid_we_may_not_signal_is_not_our_fetcher():
+    # PID 1 belongs to root: kill -0 answers EPERM, which after a reboot is
+    # exactly a stale pidfile naming someone else's process
+    assert _common.pid_alive(1) is False
 
 
 def test_claim_takes_over_a_dead_or_garbled_owner(tmp_path):

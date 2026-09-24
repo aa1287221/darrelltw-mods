@@ -1,4 +1,5 @@
-// Endpoint helpers for the built-in feed: URLs and parsers for Yahoo, 證交所 MIS and symbol spellings. No requests are made here - register.tsx owns those.
+// Endpoint helpers for the built-in feed: URLs and parsers for Yahoo, 證交所 MIS
+// and symbol spellings. No requests are made here - register.tsx owns those.
 
 import { CHART_BARS, FEED_UA, MIS_URL } from './constants.ts'
 import type { TwExchange } from './constants.ts'

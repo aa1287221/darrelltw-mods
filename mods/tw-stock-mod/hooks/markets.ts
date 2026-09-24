@@ -1,8 +1,8 @@
-// Markets, their watchlists and trading sessions: which market is open, when the next one opens, and which one the band shows.
+// Markets, their watchlists and trading sessions: which market is open, when
+// the next one opens, and which one the band shows.
 
 import type { TwExchange } from './constants.ts'
 import type { Config } from './config.ts'
- // the Yahoo route's only index; ^TWOII answers a year-old close
 
 /** a footer index row on the MIS route; `code`/`ex` are what misChannel() reads */
 export type TwIndex = { code: string; name: string; ex: TwExchange }

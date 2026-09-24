@@ -177,4 +177,4 @@ export const TW_INDICES: TwIndex[] = [
   { code: 't15', name: 'SHIPPING', ex: 'tse' }, // 航運類指數
   // 櫃買 is { code: 'o00', name: 'TPEx', ex: 'otc' } - it needs the otc channel
 ]
-export const TW_YAHOO_INDEX = '^TWII'
+export const TW_YAHOO_INDEX = '^TWII' // the Yahoo route's only index; ^TWOII answers a year-old close

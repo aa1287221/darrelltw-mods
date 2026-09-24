@@ -1,4 +1,5 @@
-// The quotes and holdings files: parsing, staleness, and pricing holdings off them.
+// The quotes and holdings files: parsing, staleness, and pricing holdings off
+// them.
 
 import { QUOTE_STALE_MS } from './constants.ts'
 import type { MarketId } from './markets.ts'

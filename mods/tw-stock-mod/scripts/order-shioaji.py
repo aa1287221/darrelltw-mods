@@ -11,10 +11,10 @@ import warnings
 from pathlib import Path
 
 # the helpers every script here shares - scripts/_common.py, next to this file
-from _common import field, load_env
+from _common import RUNTIME_DIR_ROOT, field, load_env
 
 DEFAULT_MAX_QTY = 1
-RUNTIME_DIR = Path.home() / ".claude" / "stock-band"
+RUNTIME_DIR = Path.home() / RUNTIME_DIR_ROOT  # orders.log is per user, not per project
 ORDERS_LOG = RUNTIME_DIR / "orders.log"
 USER_CONFIG_PATH = Path.home() / ".claude" / "stock-band.json"
 

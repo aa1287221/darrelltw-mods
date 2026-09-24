@@ -1,8 +1,8 @@
 """
 What fetch-quotes-shioaji.py, fetch-quotes-capital.py and order-shioaji.py
-share: the runtime-dir rule (which must match hooks/register.tsx's
-runtimeDir()), env-file parsing, the watchlist read, the pidfile protocol,
-the atomic file write and the give-up threshold. Each script imports it from
+share: the runtime-dir rule (which must match runtimeDir() in
+hooks/constants.ts), env-file parsing, the watchlist read, the pidfile
+protocol, the heartbeat age, the atomic file write and the give-up threshold. Each script imports it from
 its own folder - running `python scripts/<script>.py` puts that folder first
 on sys.path.
 
@@ -21,6 +21,10 @@ from pathlib import Path
 
 RUNTIME_DIR_ROOT = ".claude/stock-band"
 
+# A fetcher exits once the band's heartbeat file is older than this: the band
+# closed, or stopped wanting the fetcher's markets.
+HEARTBEAT_MAX_AGE_MS = 90_000
+
 # How long every snapshot may keep failing before a fetcher gives up and
 # exits for a fresh login - well inside the band's own 120 s staleness window,
 # so the band's respawn finds the pidfile free. See failed_ticks_limit().
@@ -32,8 +36,8 @@ GIVE_UP_AFTER_S = 60
 
 def user_home() -> str:
     """
-    Same rule as hooks/register.tsx: `HOME` first, then `USERPROFILE`. Windows
-    does not set `HOME` for a normal process, so without the second one every
+    Same rule as userHome() in hooks/register.tsx: `HOME` first, then
+    `USERPROFILE`. Windows does not set `HOME` for a normal process, so without the second one every
     runtime file would fall back into the project's own `.claude/` - exactly
     what the runtime dir exists to avoid.
     """
@@ -42,7 +46,7 @@ def user_home() -> str:
 
 def runtime_slug(project: str) -> str:
     """
-    Same rule as hooks/register.tsx's runtimeDir(): the project path with its
+    Same rule as runtimeDir() in hooks/constants.ts: the project path with its
     leading separators dropped and every remaining separator turned into "-".
     `\\` and `:` count as separators alongside `/` so a Windows path becomes a
     legal directory name (`D:\\app` -> `D--app`); a POSIX path is unaffected by
@@ -55,7 +59,7 @@ def runtime_dir(home: str, project: str) -> Path:
     """
     `home` falls back to the project's own `.claude/` only when neither HOME
     nor USERPROFILE is set, matching the TS side. `project` must already be
-    the same normalized absolute string register.tsx would compute (see each
+    the same normalized absolute string the band would compute (see each
     main()'s use of this) - a symlink-resolved or otherwise reshaped string
     here would land manual runs and the band in two different directories.
     """
@@ -117,27 +121,59 @@ def field(obj, name, default=None):
 # --- pidfile -----------------------------------------------------------------
 
 
+def _windows_pid_alive(pid: int) -> bool:
+    """
+    Windows has no `kill -0`: os.kill(pid, 0) there is not a probe at all -
+    signal 0 is CTRL_C_EVENT, so it calls GenerateConsoleCtrlEvent, which
+    either fails from a console-less (DETACHED_PROCESS) fetcher or sends the
+    target a Ctrl-C. Ask the kernel instead: a process we may not open
+    (ERROR_ACCESS_DENIED) exists; one we can open is alive until it has an
+    exit code.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    error_access_denied = 5
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == error_access_denied
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True  # opened it, so it exists; an unreadable exit code is not proof it ended
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def pid_alive(pid: int) -> bool:
     """
-    Windows has no `kill -0`: os.kill(pid, 0) raises PermissionError for a
-    live process owned by someone else and OSError for a dead one, so a
-    PermissionError counts as alive. OpenProcess would be exact, but a false
-    "alive" only ever costs one skipped respawn.
-
-    Elsewhere a stopped (T/t) or zombie owner is not feeding either: kill -0
-    still says alive, so the band would skip respawning for as long as it
-    stays that way (a Ctrl-Z'd claude session drags the fetcher down with
-    it). Kill a stopped one so it cannot wake later and double-write the
-    runtime dir. No /proc (macOS) reads as alive, as kill -0 said.
+    Whether the pid a pidfile names is a fetcher still feeding. Windows asks
+    the kernel (see _windows_pid_alive). Elsewhere kill -0 answers, and any
+    error - no such process, or EPERM for a pid a reboot handed to another
+    user's process - means it is not ours and not feeding. A stopped (T/t) or
+    zombie owner is not feeding either: kill -0 still says alive, so the band
+    would skip respawning for as long as it stays that way (a Ctrl-Z'd claude
+    session drags the fetcher down with it). Kill a stopped one so it cannot
+    wake later and double-write the runtime dir. No /proc (macOS) reads as
+    alive, as kill -0 said.
     """
+    if os.name == "nt":
+        try:
+            return _windows_pid_alive(pid)
+        except (OSError, AttributeError, ValueError):
+            return False  # no answer from the kernel: take the pidfile over rather than never respawn
     try:
         os.kill(pid, 0)
-    except PermissionError:
-        return True
     except OSError:
         return False
-    if os.name == "nt":
-        return True
     try:
         state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
     except (OSError, IndexError):

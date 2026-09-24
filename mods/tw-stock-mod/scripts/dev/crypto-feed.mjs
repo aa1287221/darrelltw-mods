@@ -12,8 +12,8 @@ const [, , modPath] = process.argv
 globalThis.h = (type, props, ...kids) => ({ type, props: props ?? {}, kids: kids.flat() })
 globalThis.Fragment = 'Fragment'
 
-// Must match the literals in hooks/register.tsx - neither constant is
-// exported, so this harness names them again to tell a Pionex ticker
+// Must match the literals in hooks/constants.ts - the bundle does not
+// export them, so this harness names them again to tell a Pionex ticker
 // request apart from a CoinGecko market-cap-supply request in the shared
 // $.http.fetch stub below (fetchCryptoSupply now rides the same tick as
 // feedCrypto - see register.tsx's feedOnce).

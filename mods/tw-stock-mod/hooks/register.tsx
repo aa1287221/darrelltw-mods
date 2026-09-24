@@ -33,7 +33,7 @@ import type { BoardProps as ClientBoardProps } from './board.tsx'
 // falls back to a deterministic sine walk off each symbol's previous close,
 // and the footer then says 示範資料 rather than pretending.
 // Machine-written quotes and holdings live under the user's home directory
-// now (see runtimeDir below), never in the project's `.claude/`. Quotes read
+// now (see runtimeDir in constants.ts), never in the project's `.claude/`. Quotes read
 // order: the runtime-dir file while it is fresh (<120s), then the project's
 // `.claude/stock-quotes.json` - which stays as the override seam (see
 // stock-band.example.json and docs/stock-api-notes.md) for a hand-edited
@@ -52,7 +52,8 @@ import type { BoardProps as ClientBoardProps } from './board.tsx'
 //   files.ts     - the quotes/holdings files
 //   feeds.ts     - endpoint URLs and response parsers (no requests)
 //   switcher.ts  - the market tab row
-// This file keeps the module state, buildProps and the three hooks.
+// This file keeps the module state, buildProps and the three hooks (the one
+// other piece of state is files.ts's per-file parse cache).
 // board.tsx is the Client surface and is never imported at runtime.
 //
 // Never name a local variable `h`: every JSX tag in this file compiles to h(...).

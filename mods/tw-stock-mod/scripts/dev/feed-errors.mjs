@@ -23,7 +23,7 @@ globalThis.Fragment = 'Fragment'
 // Tue 2026-09-22 10:00 Taipei - 台股 open, so marketNeedsFeed() is true every tick
 const TW_OPEN = Date.UTC(2026, 8, 22, 2, 0)
 const FEED_MS = 30_000
-const STUCK_MS = 120_000 // register.tsx's IN_FLIGHT_STUCK_MS
+const STUCK_MS = 120_000 // hooks/constants.ts's IN_FLIGHT_STUCK_MS
 
 const hostOf = u =>
   u.includes('finance.yahoo.com') ? 'yahoo' : u.includes('mis.twse.com.tw') ? 'mis' : u.includes('pionex') ? 'pionex' : 'other'

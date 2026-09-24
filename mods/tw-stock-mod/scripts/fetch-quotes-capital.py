@@ -96,6 +96,7 @@ from pathlib import Path
 
 # the helpers every script here shares - scripts/_common.py, next to this file
 from _common import (
+    HEARTBEAT_MAX_AGE_MS,
     claim_pidfile,
     failed_ticks_limit,
     load_env,
@@ -107,7 +108,6 @@ from _common import (
     write_atomic,
 )
 
-HEARTBEAT_MAX_AGE_MS = 90_000
 
 # What the band's footer calls this route, and what the 損益 view calls the
 # positions. Both travel through the files as `source`.

@@ -1,4 +1,5 @@
-// stock-band.json: the Config shape, its parsers and defaults, and the layout/request-budget math that follows from it.
+// stock-band.json: the Config shape, its parsers and defaults, and the
+// layout/request-budget math that follows from it.
 
 import { CHART_ROWS_MIN, COLUMN_MIN_COLS, DEFAULT_CHART_ROWS, DEFAULT_REFRESH_MS, FEED_MS_DEFAULT, FEED_MS_MIN, MAX_COLUMNS, MAX_SYMBOLS, PAGE_MS_DEFAULT, PAGE_MS_MIN, PNL_CHROME_ROWS, REQUESTS_PER_HOUR, SPARK_BATCH, TABLE_CHROME_ROWS, TABLE_QUOTE_ROWS, TICKER_CELL_COLS, TW_INDICES, US_INDICES } from './constants.ts'
 import { CRYPTO_LIST, TW_LIST, US_LIST, hasFutures } from './markets.ts'

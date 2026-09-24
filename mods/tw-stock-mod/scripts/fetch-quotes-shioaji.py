@@ -84,6 +84,7 @@ from typing import NamedTuple
 
 # the helpers every script here shares - scripts/_common.py, next to this file
 from _common import (
+    HEARTBEAT_MAX_AGE_MS,
     claim_pidfile,
     failed_ticks_limit,
     field,
@@ -96,7 +97,6 @@ from _common import (
     write_atomic,
 )
 
-HEARTBEAT_MAX_AGE_MS = 90_000
 HEARTBEAT_MARKETS = frozenset({"tw", "tf"})  # the markets a heartbeat can ask this fetcher to work
 
 # 發行量加權股價指數 / 櫃買指數. Latin names because the board flaps one
