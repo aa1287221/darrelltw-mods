@@ -1238,7 +1238,11 @@ def main() -> None:
                     print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
 
             if work_tf:
-                attempted += 1
+                # same guard as the stock side: a code that resolves to no
+                # contract (an expired month, a typo) has nothing to price,
+                # which is not a dead session - only resolved codes count
+                tf_priceable = any(code in futures_contracts for code in tick_futures_codes)
+                attempted += 1 if tf_priceable else 0
                 try:
                     futures_rows = fetch_futures_rows(
                         api, futures_contracts, tick_futures_codes, date.today().isoformat(), kbars_cache=futures_kbars_cache
@@ -1247,7 +1251,7 @@ def main() -> None:
                     print(f"期貨快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                     futures_rows = {}
                 futures_payload = build_futures_payload(futures_rows)
-                failed += 0 if futures_payload else 1
+                failed += 1 if tf_priceable and not futures_payload else 0
                 if futures_payload:
                     write_atomic(futures_out_path, tf_overlay.absorb(futures_payload, int(time.time() * 1000)))
                     print(f"{len(futures_payload['quotes'])} 檔期貨 -> {futures_out_path}", file=sys.stderr)
