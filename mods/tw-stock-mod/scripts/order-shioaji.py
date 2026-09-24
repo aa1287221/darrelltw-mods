@@ -11,7 +11,7 @@ import warnings
 from pathlib import Path
 
 # the helpers every script here shares - scripts/_common.py, next to this file
-from _common import RUNTIME_DIR_ROOT, field, load_env
+from _common import RUNTIME_DIR_ROOT, field, load_env, utf8_stdio
 
 DEFAULT_MAX_QTY = 1
 RUNTIME_DIR = Path.home() / RUNTIME_DIR_ROOT  # orders.log is per user, not per project
@@ -513,6 +513,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    utf8_stdio()  # before argparse, so even --help survives a cp1252 pipe
     args = build_arg_parser().parse_args()
     user_cfg = read_json_config(USER_CONFIG_PATH)
     # Read-only: its `order` block is never consulted (resolve_mode ignores

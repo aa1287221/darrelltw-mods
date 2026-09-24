@@ -10,6 +10,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -231,3 +232,60 @@ def test_claim_passes_the_pidfile_mtime_to_pid_alive(tmp_path, monkeypatch):
     os.utime(pidfile, (PIDFILE_WRITTEN, PIDFILE_WRITTEN))
     assert _common.claim_pidfile(pidfile) is False
     assert seen["args"] == (4242, PIDFILE_WRITTEN)
+
+
+# --- Windows: the same probe against the real kernel ---------------------------
+# The two claim tests above (a live child, an exited one) already go through
+# the real _windows_pid_alive on Windows; these add the cases only the real
+# kernel can answer. CI runs them on windows-latest.
+on_windows = pytest.mark.skipif(os.name != "nt", reason="needs the real kernel32")
+
+
+@on_windows
+def test_windows_real_kernel_reused_pid_reads_as_not_ours(tmp_path):
+    # a running process created AFTER the pidfile was written: the pidfile's
+    # pid was handed to someone else, so the pidfile is stale
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        pidfile = tmp_path / "stock.pid"
+        pidfile.write_text(str(owner.pid), encoding="utf-8")
+        an_hour_ago = pidfile.stat().st_mtime - 3600
+        os.utime(pidfile, (an_hour_ago, an_hour_ago))
+        assert _common.pid_alive(owner.pid, an_hour_ago) is False
+        assert _common.claim_pidfile(pidfile) is True
+    finally:
+        owner.kill()
+        owner.wait()
+
+
+@on_windows
+def test_windows_real_kernel_running_owner_is_alive():
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert _common.pid_alive(owner.pid) is True
+        assert _common.pid_alive(owner.pid, time.time() + 1) is True
+    finally:
+        owner.kill()
+        owner.wait()
+
+
+@on_windows
+def test_windows_real_kernel_pid_that_does_not_exist_is_not_ours():
+    assert _common.pid_alive(0x7FFFFFF0) is False
+
+
+@pytest.mark.parametrize("script", ["fetch-quotes-capital.py", "fetch-quotes-shioaji.py", "order-shioaji.py"])
+def test_scripts_run_as_scripts_on_a_cp1252_pipe(script, tmp_path):
+    # The band runs each script as `python <path>` from the project's cwd, so
+    # `_common` must import from the script's own folder. And an English
+    # Windows hands a pipe or a log file the cp1252 codepage, which has no
+    # CJK: --help (all Chinese) used to die with UnicodeEncodeError there.
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    env.pop("PYTHONPATH", None)
+    done = subprocess.run(
+        [sys.executable, str(SCRIPTS / script), "--help"],
+        capture_output=True, cwd=tmp_path, env=env,
+    )
+    assert done.returncode == 0, (script, done.stderr.decode("utf-8", "replace"))
+    out = done.stdout.decode("utf-8")
+    assert out.startswith("usage:") and ("永豐" in out or "群益" in out), out[:200]

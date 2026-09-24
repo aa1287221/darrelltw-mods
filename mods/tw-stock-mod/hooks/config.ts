@@ -359,22 +359,34 @@ export function feedMarkets(cfg: Config, market: MarketId): MarketId[] {
   return markets
 }
 
+/**
+ * What a tick really fetches, beyond the config: `tw`/`us` count the
+ * holdings not on each watchlist (register.tsx's feedList / holdingExtras) -
+ * they ride the same batched requests, so they can tip a list into a second
+ * batch - and `down` names the HTTP routes currently backed off, which a tw
+ * tick falls through past.
+ */
+export type FeedExtras = { tw?: number; us?: number; down?: TwSourceName[] }
+
 /** what one market costs per tick, before the chart view's own bar fetch is added */
-function marketRequests(cfg: Config, market: MarketId): number {
+function marketRequests(cfg: Config, market: MarketId, extras: FeedExtras = {}): number {
   if (market === 'tf') return 0 // 永豐 only, never an HTTP request from this module
-  if (market === 'us') return Math.ceil((cfg.lists.us.length + US_INDICES.length) / SPARK_BATCH)
+  if (market === 'us') return Math.ceil((cfg.lists.us.length + (extras.us ?? 0) + US_INDICES.length) / SPARK_BATCH)
   // Pionex's ticker endpoint answers the whole exchange in one request
   // whatever the watchlist length - `symbol=A,B` does not batch (verified
   // 2026-09-18, see PIONEX_TICKERS_URL) so feedCrypto pulls everything and
   // filters locally instead of paying per symbol.
   if (market === 'crypto') return 1
-  // The preferred route's own cost - shioaji costs this module no HTTP
-  // requests at all, so it is estimated as Yahoo's (the likely fallback,
-  // and a safe overestimate for the budget floor below).
-  // MIS answers the whole list plus both indices in one call, whatever the
-  // list length - there is no sparkline column left to pay Yahoo for on top.
-  if (cfg.twSources[0] === 'mis') return 1
-  return Math.ceil((cfg.lists.tw.length + 1) / SPARK_BATCH)
+  // A tick walks `twSources` in order, and the HTTP route it lands on is the
+  // first one not backed off: that one is what the tick pays for. A broker
+  // route (shioaji, capital) costs this module no HTTP request, but it can
+  // fall through, so the HTTP route behind it is still what is budgeted.
+  // Yahoo pays per batch of the watchlist plus holdings plus the index; MIS
+  // answers the whole list and both indices in one call whatever its length.
+  const http = cfg.twSources.filter(source => source === 'yahoo' || source === 'mis')
+  const route = http.find(source => !extras.down?.includes(source)) ?? http[0]
+  if (route === 'yahoo') return Math.ceil((cfg.lists.tw.length + (extras.tw ?? 0) + 1) / SPARK_BATCH)
+  return route === 'mis' ? 1 : 0
 }
 
 /**
@@ -385,11 +397,11 @@ function marketRequests(cfg: Config, market: MarketId): number {
  * `market` names it - see feedMarkets), even though its cost is a fixed 1
  * and so never actually changes which side of the max wins.
  */
-export function requestsPerTick(cfg: Config): number {
+export function requestsPerTick(cfg: Config, extras: FeedExtras = {}): number {
   if (cfg.feed === 'off') return 0
-  const tw = marketRequests(cfg, 'tw')
-  const us = marketRequests(cfg, 'us')
-  const crypto = marketRequests(cfg, 'crypto')
+  const tw = marketRequests(cfg, 'tw', extras)
+  const us = marketRequests(cfg, 'us', extras)
+  const crypto = marketRequests(cfg, 'crypto', extras)
   return cfg.feed === 'both' ? tw + us : cfg.feed === 'tw' ? tw : cfg.feed === 'us' ? us : Math.max(tw, us, crypto)
 }
 
@@ -399,8 +411,8 @@ export function requestsPerTick(cfg: Config): number {
  * ceiling around 360, and `both` doubles that. The floor here turns the
  * budget into an interval, so no config can get the host banned.
  */
-export function feedInterval(cfg: Config): number {
-  const budgetFloor = Math.ceil((requestsPerTick(cfg) * 3_600_000) / REQUESTS_PER_HOUR)
+export function feedInterval(cfg: Config, extras: FeedExtras = {}): number {
+  const budgetFloor = Math.ceil((requestsPerTick(cfg, extras) * 3_600_000) / REQUESTS_PER_HOUR)
   return Math.max(cfg.feedMs, FEED_MS_MIN, budgetFloor)
 }
 

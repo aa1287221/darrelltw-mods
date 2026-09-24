@@ -18,11 +18,11 @@ jobs:
       run:
         working-directory: mods/tw-stock-mod
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install pytest, ripgrep and the claude CLI
@@ -40,3 +40,22 @@ jobs:
         run: bash scripts/dev/run-checks.sh
         env:
           SKIP_NETWORK: "1"
+
+  # The 群益 fetcher is Windows-only, and its pidfile guard asks the Windows
+  # kernel (_common._windows_pid_alive) - a stub can only check the logic, so
+  # the fetchers' Python suite also runs here against the real kernel32.
+  windows-fetchers:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mods/tw-stock-mod
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: python -m pip install --quiet pytest
+      - name: pytest (scripts/tests)
+        run: python -m pytest scripts/tests -q -rs

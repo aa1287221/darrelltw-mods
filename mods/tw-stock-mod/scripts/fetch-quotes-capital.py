@@ -105,6 +105,7 @@ from _common import (
     release_pidfile,
     runtime_dir,
     user_home,
+    utf8_stdio,
     write_atomic,
 )
 
@@ -849,6 +850,7 @@ def run_check(args, dll_path: Path, log_dir: Path, codes: list[str], indices: li
 
 
 def main() -> None:
+    utf8_stdio()  # before argparse, so even --help survives a cp1252 pipe
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--project", default=os.getcwd(), help="the project whose .claude/stock-band.json holds the `tw` watchlist; also, when --out-dir is unset, what the runtime-dir slug is built from")
     parser.add_argument("--out-dir", default="", help="where stock-quotes.json / stock-holdings.json go; default is the same runtime dir hooks/register.tsx computes for --project")
@@ -869,14 +871,9 @@ def main() -> None:
     parser.add_argument("--detach", action="store_true", help="re-launch self detached and return at once (what the band spawns with; there is no nohup on Windows)")
     parser.add_argument("--check", action="store_true", help="diagnose the environment (platform, bitness, comtypes, SKCOM registration, env file, a real login, the quote host, every code, the 證券 account) and exit")
     args = parser.parse_args()
-
-    # Everything this script prints is Chinese, and --check prints ✅/❌ on
-    # top of that. A detached child's stdout is a plain file handle, so
-    # Python would otherwise encode it with the console codepage (cp950
-    # here), which has no room for those glyphs and raises mid-message.
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+    # (stdout/stderr are UTF-8 already: utf8_stdio() at the top of main,
+    # before argparse, so --help and --check's ✅/❌ survive a detached
+    # child's plain file handle too)
 
     # Not `.resolve()`: that would follow symlinks and could reshape this
     # string differently than $.session.cwd() does on the TS side, landing a

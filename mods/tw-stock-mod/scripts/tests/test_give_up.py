@@ -90,7 +90,8 @@ def start_fetcher(tmp_path, futures_code, markets=("tf",), extra=()):
         [sys.executable, "-c", RUNNER, str(SCRIPTS), str(fake), *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        encoding="utf-8",  # the script writes UTF-8 whatever the locale (utf8_stdio)
+        errors="replace",
     )
 
 
@@ -98,14 +99,15 @@ def test_unresolvable_futures_code_is_not_a_dead_session(tmp_path):
     proc = start_fetcher(tmp_path, "MXFJ6")  # expired month: resolves to no contract
     try:
         proc.wait(timeout=3)
+        still_running = False
     except subprocess.TimeoutExpired:
-        pass  # still running after ~10x the give-up window: correct
+        still_running = True  # ~10x the give-up window and still going: correct
     finally:
         if proc.poll() is None:
-            proc.kill()
+            proc.kill()  # its exit code is ours then (1 on Windows), not the fetcher's
         output = proc.communicate()[0]
+    assert still_running, output
     assert "結束讓 band 重新登入" not in output, output
-    assert proc.returncode != 1, output
 
 
 def test_resolved_futures_code_with_empty_snapshots_gives_up(tmp_path):
