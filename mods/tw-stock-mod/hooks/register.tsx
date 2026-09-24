@@ -6,7 +6,7 @@ import type { MarketId, MarketMode, MarketSwitcher, Phase, SortKey, Ticker, TwSo
 import { PNL_SORT_KEYS, PNL_SORT_LABELS, TIMEFRAMES, demoBars, demoPrice, quoteRow, roundPrice, sortHoldings } from './quotes.ts'
 import type { Bar, ChartMode, FileQuote, IndexRow, PnlSortKey, PricedHolding, QuoteRow, Timeframe } from './quotes.ts'
 import { asRecord, defaultConfig, effectiveColumns, feedInterval, feedMarkets, fitBand, num, parseConfigRoot, parseJsonRecord, requestsPerTick, str } from './config.ts'
-import type { BoardLayout, Config, Fit } from './config.ts'
+import type { BoardLayout, Config, FeedExtras, Fit } from './config.ts'
 import { holdingsFor, parseHoldingsFile, parseQuotes, pricedHoldings } from './files.ts'
 import type { HoldingsFile, QuotesFile } from './files.ts'
 import { FEED_HEADERS, chartUrl, misChannel, misUrl, parseChartBars, parseMis, parseSpark, pionexSymbol, sparkUrl, yahooSymbol } from './feeds.ts'
@@ -74,6 +74,19 @@ function holdingExtras(market: MarketId, list: Ticker[], cfg: Config): Ticker[] 
   return holdings
     .filter(h => !have.has(h.code))
     .map(h => ({ code: h.code, name: h.name, prevClose: h.prevClose ?? h.cost ?? 100, amp: 0.8, phase: 0, period: 57, drift: 0 }))
+}
+
+/** what the feed fetches for a market: the watchlist UNION the holdings not on it */
+function feedList(market: MarketId): Ticker[] {
+  return [...config.lists[market], ...holdingExtras(market, config.lists[market], config)]
+}
+
+/** the symbols holdings add on top of each watchlist - what the request budget has to pay for too */
+function feedExtras(): FeedExtras {
+  return {
+    tw: holdingExtras('tw', config.lists.tw, config).length,
+    us: holdingExtras('us', config.lists.us, config).length,
+  }
 }
 
 /**
@@ -662,6 +675,16 @@ let cryptoSupplyWarned = false // this session's one-time "falling back to volum
 let cryptoUnmappedWarned = false // this session's one-time "no CoinGecko id for ..." log
 let feedSeq = 0 // one per snapshot the feed accepted; drives the board's live dot
 let nextFeedAt = 0 // when the next request is due; the board counts down to it
+// The feed timer's period, fixed when session.start installs it, and when a
+// timer tick last went ahead. The budget (feedInterval) can grow after that -
+// holdings added mid-session widen what a tick fetches - so a timer tick goes
+// ahead only once the CURRENT interval has passed since the last one; the
+// timer itself cannot be re-armed at a new period.
+let feedEvery = 0
+let lastTimedFeedAt = 0
+// timer ticks land a few ms either side of the period; this keeps a tick that
+// is due from being skipped for arriving a hair early
+const FEED_DUE_SLACK_MS = 1000
 // when the K-bar request in flight started, 0 when none is - a time rather
 // than a flag so a request that never settles cannot latch it forever (see
 // IN_FLIGHT_STUCK_MS)
@@ -1232,7 +1255,7 @@ export const register: Register = on => {
       const idxPrev = idx?.prevClose ?? idx?.price ?? 0
       feedSeq += 1
       turnSeq += 1
-      nextFeedAt = opts.now + feedInterval(config)
+      nextFeedAt = nextTimedFeedAt(opts.now)
       liveBy[opts.market] = {
         prev: liveBy[opts.market]?.file.quotes,
         file: {
@@ -1290,7 +1313,7 @@ export const register: Register = on => {
 
     const feedUs = async (now: number) => {
       if (backedOff('yahoo', now)) return
-      const list = [...config.lists.us, ...holdingExtras('us', config.lists.us, config)]
+      const list = feedList('us')
       const symbols = [...list.map(t => t.code), ...US_INDICES.map(i => i.symbol)]
       const answer = await fetchSpark(symbols, now, '')
       if (!answer) return
@@ -1333,7 +1356,7 @@ export const register: Register = on => {
         }
         return
       }
-      const list = [...config.lists.crypto, ...holdingExtras('crypto', config.lists.crypto, config)]
+      const list = feedList('crypto')
       if (list.length === 0) return
       const res = await safeFetch(PIONEX_TICKERS_URL)
       // a network error keeps the last snapshot like any other failure; no
@@ -1449,7 +1472,7 @@ export const register: Register = on => {
       // NOT the hardcoded CRYPTO_COINGECKO_ID map, or a user-added coin not
       // in that map would never even try CoinGecko and would just sort last
       // with no explanation why.
-      const list = [...config.lists.crypto, ...holdingExtras('crypto', config.lists.crypto, config)]
+      const list = feedList('crypto')
       const unmapped = [...new Set(list.filter(t => !CRYPTO_COINGECKO_ID[t.code]).map(t => t.code))]
       if (unmapped.length > 0 && !cryptoUnmappedWarned) {
         cryptoUnmappedWarned = true
@@ -1528,7 +1551,7 @@ export const register: Register = on => {
       // backed off counts as "no snapshot this tick", so feedTw falls
       // through to the next `twSources` entry instead of stopping here
       if (backedOff('yahoo', now)) return false
-      const list = [...config.lists.tw, ...holdingExtras('tw', config.lists.tw, config)]
+      const list = feedList('tw')
       if (list.length === 0) return false
       const symbols = [...list.map(t => yahooSymbol('tw', t)), TW_YAHOO_INDEX]
       const answer = await fetchSpark(symbols, now, ' (台股)')
@@ -1560,7 +1583,7 @@ export const register: Register = on => {
      */
     const feedTwMis = async (now: number): Promise<boolean> => {
       if (backedOff('mis', now)) return false
-      const list = [...config.lists.tw, ...holdingExtras('tw', config.lists.tw, config)]
+      const list = feedList('tw')
       if (list.length === 0) return false
       // the first entry is the one the market is read by, so an empty list
       // would leave the board with no headline index at all - parseTwIndices
@@ -1894,6 +1917,41 @@ export const register: Register = on => {
       }
     }
 
+    /**
+     * When the next timer tick that will actually go ahead lands: the first
+     * multiple of the timer's period past the last timed tick that clears the
+     * current interval (see feedEvery) - what the board's countdown shows.
+     */
+    const nextTimedFeedAt = (now: number): number => {
+      const interval = feedInterval(config, feedExtras())
+      if (!feedEvery || !lastTimedFeedAt || interval <= feedEvery) return now + interval
+      const steps = Math.max(1, Math.ceil((interval - FEED_DUE_SLACK_MS) / feedEvery))
+      let at = lastTimedFeedAt + steps * feedEvery
+      while (at <= now) at += feedEvery
+      return at
+    }
+
+    let loggedInterval = 0
+    /** the timer's tick: goes ahead only once the current budget interval has passed */
+    const timedFeed = async () => {
+      const now = await $.clock.now()
+      const interval = feedInterval(config, feedExtras())
+      // only a budget that outgrew the timer's period gates anything: while
+      // it fits, every timer tick goes ahead exactly as the timer fires
+      const outgrown = interval > feedEvery
+      if (outgrown && lastTimedFeedAt && now < lastTimedFeedAt + interval - FEED_DUE_SLACK_MS) return
+      if (outgrown && interval !== loggedInterval) {
+        loggedInterval = interval
+        $.ui.log(
+          `tw-stock-mod: ${requestsPerTick(config, feedExtras())} requests per tick now (holdings widened the feed), ` +
+            `so it fetches every ${Math.round((Math.ceil((interval - FEED_DUE_SLACK_MS) / feedEvery) * feedEvery) / 1000)}s ` +
+            `(budget ${REQUESTS_PER_HOUR}/hour)`,
+        )
+      }
+      lastTimedFeedAt = now
+      await feed()
+    }
+
     const feed = async () => {
       const now = await $.clock.now()
       // Snoozed means the table is not on screen at all, so the 30 minutes it
@@ -1985,10 +2043,13 @@ export const register: Register = on => {
     }
 
     if (config.feed !== 'off') {
-      const every = feedInterval(config)
+      // sized off the holdings the boot poll above already read; see
+      // timedFeed for holdings that widen the feed later
+      const every = feedInterval(config, feedExtras())
+      feedEvery = every
       if (every > config.feedMs) {
         $.ui.log(
-          `tw-stock-mod: ${requestsPerTick(config)} requests per tick, so the feed ticks every ` +
+          `tw-stock-mod: ${requestsPerTick(config, feedExtras())} requests per tick, so the feed ticks every ` +
             `${Math.round(every / 1000)}s instead of ${Math.round(config.feedMs / 1000)}s ` +
             `(budget ${REQUESTS_PER_HOUR}/hour)`,
         )
@@ -1996,9 +2057,9 @@ export const register: Register = on => {
       // the timer goes in before the boot tick: a boot request that never
       // settles would otherwise leave the session with no feed timer at all
       $.clock.every(every, () => {
-        feed().catch(err => $.ui.log(`tw-stock-mod: feed failed: ${err}`))
+        timedFeed().catch(err => $.ui.log(`tw-stock-mod: feed failed: ${err}`))
       })
-      await feed().catch(err => $.ui.log(`tw-stock-mod: feed failed: ${err}`))
+      await timedFeed().catch(err => $.ui.log(`tw-stock-mod: feed failed: ${err}`))
     }
 
     return r

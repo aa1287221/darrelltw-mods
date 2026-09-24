@@ -575,7 +575,9 @@ instead of leaving it on demo prices until the next tick.
 - **The request budget is enforced, not just the interval.** `feedMs` alone
   cannot bound the rate once a tick costs more than one request, so the feed
   works out its own floor from a 300 requests/hour budget (see `feedInterval`)
-  and logs when it widens the tick.
+  and logs when it widens the tick. The cost counts what a tick really fetches
+  — the watchlist plus any holdings not on it — and holdings that appear
+  mid-session slow the fetches down rather than overrun the budget.
 
 ## Overriding the feed with a file
 
