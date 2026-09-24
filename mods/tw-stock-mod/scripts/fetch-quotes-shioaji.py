@@ -186,7 +186,18 @@ def snapshot_rows(api, contracts: dict, watchlist_names: dict | None = None) -> 
 
 
 def build_payload(api, contracts: dict, index_contracts: list, watchlist_names: dict) -> dict | None:
-    quotes = snapshot_rows(api, contracts, watchlist_names)
+    # One api.snapshots call for the watchlist AND the footer indices (永豐
+    # meters API usage), split back apart by code. Index codes (001/101) never
+    # look like a stock's, but if one ever did, the two go in separate calls
+    # rather than one row silently standing in for the other.
+    indexes = {c.code: c for _, c in index_contracts}
+    if indexes.keys() & contracts.keys():
+        quotes = snapshot_rows(api, contracts, watchlist_names)
+        index_rows = snapshot_rows(api, indexes) if quotes else {}
+    else:
+        rows = snapshot_rows(api, {**contracts, **indexes}, watchlist_names)
+        quotes = {code: row for code, row in rows.items() if code in contracts}
+        index_rows = {code: row for code, row in rows.items() if code in indexes}
     if not quotes:
         return None
 
@@ -200,7 +211,6 @@ def build_payload(api, contracts: dict, index_contracts: list, watchlist_names: 
         row_ns = row.pop("ts", 0)
         row["dataAt"] = fix_taipei_ts(row_ns) if row_ns else data_at
 
-    index_rows = snapshot_rows(api, {c.code: c for _, c in index_contracts})
     indices = []
     for name, contract in index_contracts:
         row = index_rows.get(contract.code)
@@ -818,6 +828,29 @@ def read_heartbeat(path: Path) -> tuple[bool, frozenset[str]]:
     return parse_heartbeat(text, time.time() * 1000)
 
 
+# Positions change when the user trades, not every tick: each list is
+# re-queried once per this, and the tick in between reuses the last one (the
+# holdings file still gets this tick's prices - those come from the snapshot).
+POSITIONS_REFRESH_S = 60.0
+
+
+class PositionsClock:
+    """When a position list is due again: at once on the first tick, then every
+    `period` seconds after the last fetch that succeeded - a fetch that raised
+    never calls fetched(), so the next tick tries again."""
+
+    def __init__(self, period: float, now=time.monotonic):
+        self.period = period
+        self.now = now
+        self.last = None
+
+    def due(self) -> bool:
+        return self.last is None or self.now() - self.last >= self.period
+
+    def fetched(self) -> None:
+        self.last = self.now()
+
+
 def fetch_positions(api) -> list:
     """`list_positions` in shares, not 張 - the band's Holding.qty contract wants shares."""
     import shioaji as sj
@@ -1061,8 +1094,11 @@ def main() -> None:
     tf_overlay = QuotesOverlay(futures_out_path)
     subscribed: dict = {}
     tick_stats = new_tick_stats()
+    stock_positions_clock = PositionsClock(POSITIONS_REFRESH_S)
+    futures_positions_clock = PositionsClock(POSITIONS_REFRESH_S)
     try:
         positions = fetch_positions(api)
+        stock_positions_clock.fetched()
     except Exception as err:  # noqa: BLE001 - a failed first fetch just means no holdings this run
         print(f"庫存查詢失敗: {type(err).__name__}: {err}", file=sys.stderr)
         positions = []
@@ -1167,9 +1203,10 @@ def main() -> None:
             work_tw = "tw" in wanted
             tf_wanted = "tf" in wanted
             futures_positions = last_futures_positions
-            if tf_wanted:
+            if tf_wanted and futures_positions_clock.due():
                 try:
                     futures_positions = fetch_futures_positions(api)
+                    futures_positions_clock.fetched()
                 except Exception as err:  # noqa: BLE001 - None/unsigned accounts return [] inside; only a network/SDK error reaches here, so keep last tick's positions
                     print(f"期貨庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
                     futures_positions = last_futures_positions
@@ -1198,10 +1235,12 @@ def main() -> None:
             attempted = failed = 0
 
             if work_tw:
-                try:
-                    positions = fetch_positions(api)
-                except Exception as err:  # noqa: BLE001 - keep the last good positions rather than crash
-                    print(f"庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
+                if stock_positions_clock.due():
+                    try:
+                        positions = fetch_positions(api)
+                        stock_positions_clock.fetched()
+                    except Exception as err:  # noqa: BLE001 - keep the last good positions rather than crash
+                        print(f"庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
                 for pos in positions:
                     code = str(field(pos, "code", "")).strip()
                     if code:
