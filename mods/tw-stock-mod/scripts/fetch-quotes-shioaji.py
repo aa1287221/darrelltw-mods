@@ -916,7 +916,10 @@ def write_atomic(path: Path, payload: dict) -> None:
     to demo prices.
     """
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    # compact: futures-quotes.json carries every K bar and is rewritten up to
+    # once a second, and indent=1 put each bar number on its own line (~40%
+    # of the bytes). `python -m json.tool FILE` reads it back for a human.
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     tmp.replace(path)
 
 

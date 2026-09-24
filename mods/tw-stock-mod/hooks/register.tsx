@@ -1527,6 +1527,33 @@ function parseBarsBy(value: unknown): Partial<Record<Timeframe, Bar[]>> | undefi
 // ignored and the band falls back to demo prices (no-data rows for tf).
 function parseQuotes(text: string | undefined, now: number): QuotesFile | undefined {
   if (!text) return undefined
+  const file = parseQuotesText(text)
+  // staleness is the one part that depends on `now`, so it stays outside the cache
+  if (!file || now - file.asOf > QUOTE_STALE_MS) return undefined
+  return file
+}
+
+// The poll re-reads every quotes file each refreshMs, and most reads return
+// the same text as last time - a futures file with every K bar in it is tens
+// of KB of JSON to re-parse for nothing. Keyed by the text itself, so a
+// rewritten file always parses fresh; the result is never mutated downstream
+// (buildProps copies rows out of it), so sharing it across polls is safe.
+// A handful of entries covers every quotes file one poll reads.
+const QUOTES_PARSE_CACHE_MAX = 4
+const quotesParseCache = new Map<string, QuotesFile | undefined>()
+
+function parseQuotesText(text: string): QuotesFile | undefined {
+  if (quotesParseCache.has(text)) return quotesParseCache.get(text)
+  const file = parseQuotesUncached(text)
+  if (quotesParseCache.size >= QUOTES_PARSE_CACHE_MAX) {
+    // Map keeps insertion order, so the first key is the oldest
+    quotesParseCache.delete(quotesParseCache.keys().next().value as string)
+  }
+  quotesParseCache.set(text, file)
+  return file
+}
+
+function parseQuotesUncached(text: string): QuotesFile | undefined {
   let root: Record<string, unknown> | undefined
   try {
     root = asRecord(JSON.parse(text) as unknown)
@@ -1535,7 +1562,7 @@ function parseQuotes(text: string | undefined, now: number): QuotesFile | undefi
   }
   if (!root) return undefined
   const asOf = num(root.asOf, 0)
-  if (!asOf || now - asOf > QUOTE_STALE_MS) return undefined
+  if (!asOf) return undefined
   const quotesRaw = asRecord(root.quotes)
   if (!quotesRaw) return undefined
   const quotes: Record<string, FileQuote> = {}
