@@ -274,9 +274,18 @@ def test_windows_real_kernel_pid_that_does_not_exist_is_not_ours():
     assert _common.pid_alive(0x7FFFFFF0) is False
 
 
-@on_windows
-def test_windows_scripts_import_common_when_run_as_scripts():
-    # the band runs the fetchers as `python <path>`, from the project's cwd
-    for script in ("fetch-quotes-capital.py", "fetch-quotes-shioaji.py", "order-shioaji.py"):
-        done = subprocess.run([sys.executable, str(SCRIPTS / script), "--help"], capture_output=True, text=True)
-        assert done.returncode == 0, (script, done.stderr)
+@pytest.mark.parametrize("script", ["fetch-quotes-capital.py", "fetch-quotes-shioaji.py", "order-shioaji.py"])
+def test_scripts_run_as_scripts_on_a_cp1252_pipe(script, tmp_path):
+    # The band runs each script as `python <path>` from the project's cwd, so
+    # `_common` must import from the script's own folder. And an English
+    # Windows hands a pipe or a log file the cp1252 codepage, which has no
+    # CJK: --help (all Chinese) used to die with UnicodeEncodeError there.
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    env.pop("PYTHONPATH", None)
+    done = subprocess.run(
+        [sys.executable, str(SCRIPTS / script), "--help"],
+        capture_output=True, cwd=tmp_path, env=env,
+    )
+    assert done.returncode == 0, (script, done.stderr.decode("utf-8", "replace"))
+    out = done.stdout.decode("utf-8")
+    assert out.startswith("usage:") and ("永豐" in out or "群益" in out), out[:200]

@@ -105,6 +105,7 @@ from _common import (
     release_pidfile,
     runtime_dir,
     user_home,
+    utf8_stdio,
     write_atomic,
 )
 
@@ -849,6 +850,7 @@ def run_check(args, dll_path: Path, log_dir: Path, codes: list[str], indices: li
 
 
 def main() -> None:
+    utf8_stdio()  # before argparse, so even --help survives a cp1252 pipe
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--project", default=os.getcwd(), help="the project whose .claude/stock-band.json holds the `tw` watchlist; also, when --out-dir is unset, what the runtime-dir slug is built from")
     parser.add_argument("--out-dir", default="", help="where stock-quotes.json / stock-holdings.json go; default is the same runtime dir hooks/register.tsx computes for --project")

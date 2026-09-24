@@ -90,7 +90,8 @@ def start_fetcher(tmp_path, futures_code, markets=("tf",), extra=()):
         [sys.executable, "-c", RUNNER, str(SCRIPTS), str(fake), *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        encoding="utf-8",  # the script writes UTF-8 whatever the locale (utf8_stdio)
+        errors="replace",
     )
 
 

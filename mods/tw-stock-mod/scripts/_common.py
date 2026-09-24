@@ -68,6 +68,26 @@ def runtime_dir(home: str, project: str) -> Path:
     return Path(home) / RUNTIME_DIR_ROOT / runtime_slug(project)
 
 
+# --- output streams -------------------------------------------------------------
+
+
+def utf8_stdio() -> None:
+    """
+    Every script here prints Chinese. Written to a pipe or a file - the band's
+    spawn, `--detach`'s log, a test - Python encodes stdout/stderr with the
+    locale's codepage, which on an English Windows is cp1252: stdout then
+    raises UnicodeEncodeError on the first CJK character (`--help`, `--check`,
+    order confirmations) and stderr turns the log into \\uXXXX escapes. UTF-8
+    always, escaping anything that still cannot be written. A real console is
+    unaffected: Python writes it as Unicode whatever this says.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass  # not a TextIOWrapper (replaced, or closed): leave it be
+
+
 # --- env file and config -----------------------------------------------------
 
 
