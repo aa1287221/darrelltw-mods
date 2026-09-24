@@ -6,7 +6,8 @@
 # fit-rows / pytest / feed-errors / crypto-feed / crypto-sort / market-select
 # against them (feed-errors, crypto-feed, crypto-sort and market-select build their own stub config
 # in-process instead, so they need no fixture directory) plus
-# check-engine-rules.sh and check-personal.sh, and prints a PASS/FAIL line
+# tsc (typecheck), check-engine-rules.sh, `claude plugin validate` (when the CLI is on PATH)
+# and check-personal.sh, and prints a PASS/FAIL line
 # per check. Exits non-zero if any of them did.
 #
 # rank-cross and chart-nav's "名次交叉" section once pinned the PR-a bug
@@ -313,7 +314,27 @@ run_check "feed-errors"    node "$SCRIPT_DIR/feed-errors.mjs" "$OUT/register.js"
 run_check "crypto-feed"    node "$SCRIPT_DIR/crypto-feed.mjs" "$OUT/register.js"
 run_check "crypto-sort"    node "$SCRIPT_DIR/crypto-sort.mjs" "$OUT/register.js"
 run_check "market-select"  node "$SCRIPT_DIR/market-select.mjs" "$OUT/register.js"
+# tsc across hooks/: the real engine types when /plugin-types has written
+# them, else scripts/dev/types-stub (loose `$`, everything the mod declares
+# checked for real - cross-file imports, and board.tsx's BoardProps against
+# what buildProps sends).
+run_typecheck() {
+  local cfg="$SCRIPT_DIR/tsconfig.stub.json"
+  if [[ -d "$MOD_DIR/.claude/types" || -d "$MOD_DIR/../../.claude/types" ]]; then cfg="$MOD_DIR/tsconfig.json"; fi
+  echo "tsc -p ${cfg#"$MOD_DIR"/}"
+  if command -v bunx >/dev/null 2>&1; then bunx -p typescript@5 tsc -p "$cfg"; else npx -y -p typescript@5 tsc -p "$cfg"; fi
+}
+run_check "typecheck"      run_typecheck
 run_check "engine-rules"   bash "$SCRIPT_DIR/check-engine-rules.sh"
+# The engine's own load-time scan of the hooks module (what it hooks, which $
+# calls, and the rules esbuild and tsc accept but the host refuses - e.g. $
+# passed into a function imported from another file). Needs the claude CLI;
+# no login.
+if command -v claude >/dev/null 2>&1; then
+  run_check "plugin-validate" claude plugin validate "$MOD_DIR"
+else
+  echo; echo "== plugin-validate =="; echo "skipped (no claude CLI on PATH)"; results+=("SKIP  plugin-validate")
+fi
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
 echo

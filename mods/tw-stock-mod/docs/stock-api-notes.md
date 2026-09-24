@@ -636,7 +636,7 @@ $ curl -s 'https://api.pionex.com/api/v1/market/tickers?symbol=BTC_USDT,ETH_USDT
 所以 `feedCrypto()` 走「不帶 `symbol` 拉全市場（~330 檔、約 55 KB）再本地
 filter」這條路，watchlist 幾檔都是一次 tick 一個請求，不是逐檔打。
 
-其他欄位坑（實作細節見 `hooks/register.tsx` 的 `feedCrypto`/`pionexSymbol`
+其他欄位坑（實作細節見 `hooks/register.tsx` 的 `feedCrypto` 與 `hooks/feeds.ts` 的 `pionexSymbol`
 註解，這裡只記證據）：
 
 - 所有數值是字串，要 `parseFloat`。

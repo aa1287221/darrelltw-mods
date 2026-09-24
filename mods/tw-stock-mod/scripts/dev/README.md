@@ -140,7 +140,7 @@ your real project or `~/.claude`); runs `feed-idle.mjs` → `chart-nav.mjs` →
 `tf-feed.mjs` → `tf-pnl.mjs` → `tabs.mjs` → `chart-view.mjs` → `fit-rows.mjs`
 → `pytest` (`scripts/tests`, via `~/.claude/stock-band-venv/bin/python` when
 present, else `python3`) → `feed-errors.mjs` → `crypto-feed.mjs` → `crypto-sort.mjs` →
-`market-select.mjs` → `check-engine-rules.sh` → `check-personal.sh` in that
+`market-select.mjs` → `typecheck` → `check-engine-rules.sh` → `plugin-validate` → `check-personal.sh` in that
 order, and prints a `PASS`/`FAIL` line per check. Exits non-zero if any of
 them did.
 
@@ -159,6 +159,22 @@ since a runner's IP gets 429'd by Yahoo often enough that a red there would
 say nothing about the change. CI installs `pytest` and `ripgrep`;
 `check-engine-rules.sh` fails outright without `rg` rather than reporting
 clean on a check it never ran.
+
+`typecheck` runs `tsc` over `hooks/`: against the engine's real types when
+`/plugin-types` has written them to `.claude/types`, else against
+`scripts/dev/types-stub/` (`tsconfig.stub.json`), which leaves `$`, hook
+events and Client surfaces loose and checks everything the mod declares
+itself - imports between the hooks files, and `BoardPropsFitClient` in
+`register.tsx`, which fails when what `buildProps` sends no longer fits
+`board.tsx`'s `BoardProps`.
+
+`plugin-validate` runs `claude plugin validate` on the mod: the engine's own
+scan of the hooks module and every file it imports - what it hooks, which `$`
+calls it makes, and the load rules esbuild and tsc accept but the host
+refuses (e.g. `$` passed into a function imported from another file: the
+engine follows `$` only into functions declared in the hook's own file). It
+needs the `claude` CLI but no login, and prints `SKIP` without it; CI
+installs it.
 
 ## The stub host cannot answer everything
 

@@ -940,12 +940,17 @@ never the repo).
 # type-check (needs the early-access types: run /plugin-types in a Claude Code
 # session opened in THIS folder first)
 bunx -p typescript tsc -p .
+# ...or without them: loose `$`, everything the mod declares still checked
+bunx -p typescript tsc -p scripts/dev/tsconfig.stub.json
 
 # lint
 bunx --bun oxlint@1.83.0 hooks --deny-warnings
 
-# validate the manifest
+# validate the manifest and the hooks module (the engine's own load-time scan)
 claude plugin validate .
+
+# every harness, pytest and both validators in one go (see scripts/dev/README.md)
+bash scripts/dev/run-checks.sh
 
 # iterate on the layout without Claude Code: the Python spec animates the band
 python3 prototype/stock-band-demo.py            # market picked by the clock
@@ -955,3 +960,14 @@ python3 prototype/render_stock_png.py           # regenerate the preview PNG
 
 Never name a local variable `h` in `hooks/register.tsx` or `hooks/board.tsx` —
 every JSX tag in those files compiles to a call of `h`.
+
+`hooks/register.tsx` is the hooks module: the module state, `buildProps` and
+the three hooks. The pure parts it imports sit beside it — `constants.ts`,
+`markets.ts` (sessions, `pickMarket`), `quotes.ts`, `config.ts`
+(`stock-band.json` parsing, `fitBand`), `files.ts` (the quotes/holdings
+files), `feeds.ts` (endpoint URLs and parsers) and `switcher.ts` (the tab
+row). The engine follows `$` only into functions declared in the hook's own
+file, so anything that takes `$` stays in `register.tsx`; `claude plugin
+validate .` says so if one moves. `hooks/board.tsx` is the Client surface;
+`register.tsx` imports its `BoardProps` for a compile-time fit check only.
+The Python scripts share `scripts/_common.py`.

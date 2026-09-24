@@ -2,7 +2,7 @@
 fetch-quotes-capital.py's pure functions: the 未實現損益 row parser, the quotes
 payload built off SKCOM's SKSTOCKLONG fields, the exchange-clock stamp, the
 index/heartbeat parsers, and the runtime-dir slug both fetchers must share
-with hooks/register.tsx's runtimeDir(). No SKCOM, no Windows - `api.stock()`
+with runtimeDir() in hooks/constants.ts. No SKCOM, no Windows - `api.stock()`
 is a canned SimpleNamespace per code.
 """
 import calendar
@@ -29,7 +29,7 @@ shioaji = load("fetch-quotes-shioaji.py", "fetch_quotes_shioaji_rt")
 
 
 # ---------------------------------------------------------------------------
-# runtime dir: both fetchers and register.tsx's runtimeDir() must agree
+# runtime dir: both fetchers and runtimeDir() in hooks/constants.ts must agree
 # (`project.replace(/^[/\\]+/, '').replace(/[/\\:]/g, '-')`)
 # ---------------------------------------------------------------------------
 

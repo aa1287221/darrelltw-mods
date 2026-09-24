@@ -543,7 +543,7 @@ const pickers = new WeakMap<object, Picker>()
 // band's `maxRows` (#13) and hands it over as boardRows/quoteRows/layout.
 
 // --- the ticker (a band of 3 rows or fewer): `代號 價格 ▲pct` cells on one
-// line; register.tsx's TICKER_CELL_COLS is this same 28 (it counts the cells)
+// line; hooks/constants.ts's TICKER_CELL_COLS is this same 28 (it counts the cells)
 const TICKER_CODE_W = 6
 const TICKER_PRICE_W = 9 // "12,345.67"
 const TICKER_PCT_W = 9 // "▼ -10.00%"
@@ -748,7 +748,7 @@ const TWO_COL_GUTTER = 6 // clear columns between the halves, so 變更% and the
 // spends that 76 out of `width - 1`, the same one column short of the raw
 // terminal width the single-column `layout` reserves - so the terminal
 // itself needs to be 77 columns or wider, not 76, before two columns fit
-// (118 for three, 159 for four; register.tsx's COLUMN_MIN_COLS is the same
+// (118 for three, 159 for four; hooks/constants.ts's COLUMN_MIN_COLS is the same
 // 35 + 6 step).
 const MIN_HALF_WIDTH = 35
 
