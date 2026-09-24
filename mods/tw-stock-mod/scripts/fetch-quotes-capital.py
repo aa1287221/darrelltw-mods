@@ -54,8 +54,8 @@ Three ways to run it:
         wants the 群益 route. Once FILE is missing or more than 90s old this
         process exits by itself - the band closed, or moved to the US board,
         and nothing is watching anymore. It also exits (1) once the quote
-        host has been down (or every snapshot has raised) for
-        MAX_FAILED_TICKS ticks in a row, so the band's respawn logs in again;
+        host has been down (or no snapshot has priced anything) for
+        GIVE_UP_AFTER_S (60 s), so the band's respawn logs in again;
         while the host is down it writes no quotes at all, since SKCOM's
         cache would otherwise pass frozen prices off as fresh.
       - `--pidfile FILE`: if FILE already holds another live process's pid,
@@ -88,6 +88,7 @@ import atexit
 import calendar
 import ctypes
 import json
+import math
 import os
 import re
 import subprocess
@@ -96,10 +97,10 @@ import time
 from pathlib import Path
 
 HEARTBEAT_MAX_AGE_MS = 90_000
-# Consecutive ticks the quote link may read as down (or every snapshot raise)
-# before the fetcher exits so the band respawns a fresh login - 6 x the
-# default 10 s interval, about a minute, inside the band's 120 s staleness.
-MAX_FAILED_TICKS = 6
+# How long every snapshot may keep failing before the fetcher gives up and
+# exits for a fresh login - well inside the band's own 120 s staleness window,
+# so the band's respawn finds the pidfile free. See failed_ticks_limit().
+GIVE_UP_AFTER_S = 60
 
 RUNTIME_DIR_ROOT = ".claude/stock-band"
 
@@ -750,6 +751,15 @@ def claim_pidfile(pidfile: Path) -> bool:
     return True
 
 
+def failed_ticks_limit(interval: float) -> int:
+    """How many failed ticks in a row mean the session is dead: GIVE_UP_AFTER_S
+    worth at whatever --interval this run uses, never less than one tick. A
+    fixed tick count gave up after 3 minutes at interval 30 (past the band's
+    120 s staleness, so its respawns all bounced off our pidfile) and after
+    6 s at interval 1 (a blip forcing a full re-login)."""
+    return max(1, math.ceil(GIVE_UP_AFTER_S / interval)) if interval > 0 else 1
+
+
 def release_pidfile(pidfile: Path) -> None:
     """Unlink the pidfile only while it still names this process: a successor
     that already claimed it (after this one was judged dead) keeps its claim."""
@@ -1146,7 +1156,8 @@ def main() -> None:
     resubscribe(codes + [c for c, _ in indices])
 
     first_tick = True
-    failed_ticks = 0  # consecutive ticks with the quote link down or the snapshot raising
+    failed_ticks = 0  # consecutive ticks that wrote no quotes (link down, raised, or nothing priced)
+    give_up_at = failed_ticks_limit(args.interval)
     try:
         while True:
             # Heartbeat check first, before doing any work this tick: a stale
@@ -1173,20 +1184,24 @@ def main() -> None:
             # (OnConnection 3002/3021), so a snapshot taken now would stamp a
             # frozen price with a fresh asOf and the band would keep calling
             # it 群益 即時. Write nothing while the link is down: the file goes
-            # stale, the band says so, and past MAX_FAILED_TICKS this exits so
-            # the band's respawn logs in again.
+            # stale, the band says so, and past GIVE_UP_AFTER_S this exits so
+            # the band's respawn logs in again. Down is EITHER signal saying
+            # so: OnConnection's 3002/3021 clears `connected` even while
+            # IsConnected() may still read 1, and a reconnect whose 3003 was
+            # missed costs one clean respawn, never a frozen price.
             payload = None
-            if api.quote_state() != QUOTE_STATE_READY:
+            if not api.connected or api.quote_state() != QUOTE_STATE_READY:
                 print(f"報價主機斷線（保留上一份檔案）{api.connection_error}", file=sys.stderr)
-                failed_ticks += 1
             else:
                 try:
                     payload = build_payload(api, codes, indices, watchlist_names)
-                    failed_ticks = 0
                 except Exception as err:  # noqa: BLE001 - any COM error is the same story here
                     print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
-                    failed_ticks += 1
-            if failed_ticks >= MAX_FAILED_TICKS:
+            # only a written file counts as alive: a link that reads READY but
+            # prices nothing (subscriptions lost on a silent reconnect) is as
+            # dead as one that is down
+            failed_ticks = 0 if payload else failed_ticks + 1
+            if failed_ticks >= give_up_at:
                 print(f"連續 {failed_ticks} 輪沒有報價，結束讓 band 重新登入", file=sys.stderr)
                 sys.exit(1)
             if payload:

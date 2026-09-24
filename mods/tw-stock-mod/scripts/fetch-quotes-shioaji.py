@@ -48,9 +48,9 @@ Three ways to run it:
         a pre-T4 band wrote - still reads as both markets, for one release.
         Once FILE is missing or its `ts` is more than 90s old, this process
         exits by itself - the band closed, or stopped wanting either market,
-        and nothing is watching anymore. It also exits (1) after
-        MAX_FAILED_TICKS ticks in a row where every snapshot raised - a dead
-        session - so the band's respawn logs in again.
+        and nothing is watching anymore. It also exits (1) once every
+        snapshot has raised for GIVE_UP_AFTER_S (60 s) - a dead session - so
+        the band's respawn logs in again.
       - `--pidfile FILE`: if FILE already holds another live process's pid,
         this run exits at once (0) rather than double-fetching for the same
         project; otherwise it writes its own pid there and removes it on
@@ -85,10 +85,10 @@ from typing import NamedTuple
 
 HEARTBEAT_MAX_AGE_MS = 90_000
 HEARTBEAT_MARKETS = frozenset({"tw", "tf"})  # the markets a heartbeat can ask this fetcher to work
-# Consecutive ticks in which every snapshot the tick attempted raised before
-# the fetcher gives up and exits for a fresh login - 6 x the default 10 s
-# interval, about a minute, well inside the band's own 120 s staleness window.
-MAX_FAILED_TICKS = 6
+# How long every snapshot may keep failing before the fetcher gives up and
+# exits for a fresh login - well inside the band's own 120 s staleness window,
+# so the band's respawn finds the pidfile free. See failed_ticks_limit().
+GIVE_UP_AFTER_S = 60
 
 # 發行量加權股價指數 / 櫃買指數. Latin names because the board flaps one
 # character at a time and a Chinese character has no drum to riffle through.
@@ -869,6 +869,15 @@ def claim_pidfile(pidfile: Path) -> bool:
     return True
 
 
+def failed_ticks_limit(interval: float) -> int:
+    """How many failed ticks in a row mean the session is dead: GIVE_UP_AFTER_S
+    worth at whatever --interval this run uses, never less than one tick. A
+    fixed tick count gave up after 3 minutes at interval 30 (past the band's
+    120 s staleness, so its respawns all bounced off our pidfile) and after
+    6 s at interval 1 (a blip forcing a full re-login)."""
+    return max(1, math.ceil(GIVE_UP_AFTER_S / interval)) if interval > 0 else 1
+
+
 def release_pidfile(pidfile: Path) -> None:
     """Unlink the pidfile only while it still names this process: a successor
     that already claimed it (after this one was judged dead) keeps its claim."""
@@ -1120,16 +1129,11 @@ def main() -> None:
 
     atexit.register(cleanup)
 
-    # Installed before login, not after: a SIGTERM during the (slow) login
-    # would otherwise kill the process before any cleanup could run. Before
-    # the loop, `running = False` just means the loop never starts.
-    def stop(*_):
-        nonlocal running
-        running = False
-
-    running = True
-    signal.signal(signal.SIGINT, stop)
-    signal.signal(signal.SIGTERM, stop)
+    # SIGTERM exits through atexit's cleanup even during the (slow) login,
+    # where the default handler would kill the process with the pidfile still
+    # in place. SIGINT keeps raising KeyboardInterrupt until the loop starts,
+    # so a hand-run Ctrl-C still aborts a hung login at once.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
     if args.codes:
         watchlist = [{"code": c.strip(), "name": c.strip()} for c in args.codes.split(",") if c.strip()]
@@ -1250,8 +1254,19 @@ def main() -> None:
     for code in futures_codes:
         ensure_futures_contract(code)
 
+    # the loop stops at its next check instead: a tick is never cut off
+    # halfway through writing its files
+    def stop(*_):
+        nonlocal running
+        running = False
+
+    running = True
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+
     first_tick = True
     failed_ticks = 0  # consecutive ticks where every snapshot attempted raised
+    give_up_at = failed_ticks_limit(args.interval)
     last_futures_positions: list = []  # kept across ticks the same way `positions` is - see below
     try:
         while running:
@@ -1389,7 +1404,7 @@ def main() -> None:
             # files just go stale. Give up instead: exiting frees the pidfile,
             # and the band's next tick respawns a fresh login.
             failed_ticks = failed_ticks + 1 if attempted and failed == attempted else 0
-            if failed_ticks >= MAX_FAILED_TICKS:
+            if failed_ticks >= give_up_at:
                 print(f"連續 {failed_ticks} 輪快照全部失敗，結束讓 band 重新登入", file=sys.stderr)
                 sys.exit(1)
 

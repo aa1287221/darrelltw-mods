@@ -1,8 +1,8 @@
 """
 release_pidfile in both fetchers: the pidfile goes away on exit only while it
 still names this process, so a successor that already claimed it (after this
-one was judged dead) keeps its claim. Also pins MAX_FAILED_TICKS staying
-inside the band's 120 s staleness window at the default 10 s interval.
+one was judged dead) keeps its claim. Also pins failed_ticks_limit(): the
+give-up lands inside the band's 120 s staleness window at any --interval.
 """
 import importlib.util
 import os
@@ -60,7 +60,16 @@ def test_release_twice_is_safe(fetcher, tmp_path):
     assert not pidfile.exists()
 
 
-def test_give_up_lands_before_the_band_calls_the_file_stale(fetcher):
-    default_interval_s = 10
+@pytest.mark.parametrize("interval", [1, 2, 10, 30, 60])
+def test_give_up_is_time_based_and_inside_the_band_staleness(fetcher, interval):
     band_stale_s = 120
-    assert fetcher.MAX_FAILED_TICKS * default_interval_s < band_stale_s
+    ticks = fetcher.failed_ticks_limit(interval)
+    assert ticks * interval >= fetcher.GIVE_UP_AFTER_S  # a blip never forces a re-login
+    assert ticks * interval < band_stale_s + interval  # nor does a dead session outlive the band's patience by a tick
+
+
+def test_give_up_limit_counts_ticks(fetcher):
+    assert fetcher.failed_ticks_limit(10) == 6
+    assert fetcher.failed_ticks_limit(1) == 60
+    assert fetcher.failed_ticks_limit(30) == 2
+    assert fetcher.failed_ticks_limit(0) == 1  # --interval 0 writes once and exits

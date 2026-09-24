@@ -9,6 +9,8 @@
 //   (3) a Yahoo back-off does not hold 證交所 (per-host back-off)
 //   (4) a request that never settles does not latch the feed forever: past
 //       IN_FLIGHT_STUCK_MS the next tick goes ahead
+//   (5) ...and when that abandoned request finally answers, its older
+//       prices do not replace what the newer tick already published
 //
 // Usage: node feed-errors.mjs <register.js>
 import { pathToFileURL } from 'node:url'
@@ -108,6 +110,7 @@ async function boot(twSources, answer) {
         const r = answer(host, n)
         if (r === 'throw') throw new Error(`getaddrinfo ENOTFOUND (${host})`)
         if (r === 'hang') return new Promise(() => {})
+        if (r && typeof r.then === 'function') return r // a deferred answer the case resolves itself
         return { ok: r.status >= 200 && r.status < 300, headers: {}, text: '', ...r }
       },
     },
@@ -182,6 +185,29 @@ async function boot(twSources, answer) {
   await tick(STUCK_MS)
   ok(count('yahoo') === 2, `(4) past IN_FLIGHT_STUCK_MS the next tick goes ahead (got ${count('yahoo')})`)
   ok(logs.some(l => /never settled/.test(l)), '(4) the abandoned tick is logged')
+}
+
+// --- (5) a late answer from the abandoned tick is dropped -------------------
+{
+  let answerLate
+  const late = new Promise(resolve => {
+    answerLate = resolve
+  })
+  const sparkAt = price =>
+    JSON.stringify({
+      spark: {
+        result: [{ symbol: '2330.TW', response: [{ meta: { regularMarketPrice: price, previousClose: 1000, regularMarketTime: TW_OPEN / 1000 } }] }],
+      },
+    })
+  const { probe, tick, count } = await boot(['yahoo'], (host, n) => (n === 0 ? late : { status: 200, text: sparkAt(1200) }))
+  await tick(STUCK_MS + FEED_MS)
+  let p = await probe()
+  const row = () => p?.quotes?.find(q => q.code === '2330')
+  ok(count('yahoo') === 2 && row()?.price === 1200, `(5) the newer tick published 1200 (requests=${count('yahoo')}, price=${row()?.price})`)
+  answerLate({ ok: true, status: 200, headers: {}, text: sparkAt(900) })
+  await new Promise(r => setTimeout(r, 100))
+  p = await probe()
+  ok(row()?.price === 1200, `(5) the abandoned tick's late 900 did not replace it (price=${row()?.price})`)
 }
 
 done()
