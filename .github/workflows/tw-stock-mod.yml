@@ -25,13 +25,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install pytest and ripgrep
+      - name: Install pytest, ripgrep and the claude CLI
         run: |
           python -m pip install --quiet pytest
+          # `claude plugin validate` runs the engine's own load-time scan; no login needed
+          npm install -g --silent @anthropic-ai/claude-code
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends ripgrep
-      # esbuild build, every offline harness, pytest, engine rules and the
-      # personal-data scan; the two Yahoo-dependent harnesses are skipped
+      # esbuild build, every offline harness, pytest, engine rules, the
+      # engine's own plugin validation and the personal-data scan; the two
+      # Yahoo-dependent harnesses are skipped
       - name: run-checks.sh
         run: bash scripts/dev/run-checks.sh
         env:
