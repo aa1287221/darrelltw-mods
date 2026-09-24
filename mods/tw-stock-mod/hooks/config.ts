@@ -360,11 +360,13 @@ export function feedMarkets(cfg: Config, market: MarketId): MarketId[] {
 }
 
 /**
- * Symbols the feed fetches per market on top of the watchlist: the holdings
- * that are not on it (register.tsx's feedList / holdingExtras). They ride the
- * same batched requests, so they can tip a list into a second batch.
+ * What a tick really fetches, beyond the config: `tw`/`us` count the
+ * holdings not on each watchlist (register.tsx's feedList / holdingExtras) -
+ * they ride the same batched requests, so they can tip a list into a second
+ * batch - and `down` names the HTTP routes currently backed off, which a tw
+ * tick falls through past.
  */
-export type FeedExtras = Partial<Record<MarketId, number>>
+export type FeedExtras = { tw?: number; us?: number; down?: TwSourceName[] }
 
 /** what one market costs per tick, before the chart view's own bar fetch is added */
 function marketRequests(cfg: Config, market: MarketId, extras: FeedExtras = {}): number {
@@ -375,18 +377,16 @@ function marketRequests(cfg: Config, market: MarketId, extras: FeedExtras = {}):
   // 2026-09-18, see PIONEX_TICKERS_URL) so feedCrypto pulls everything and
   // filters locally instead of paying per symbol.
   if (market === 'crypto') return 1
-  // A tick tries `twSources` in order and can fall through to any of them,
-  // so it costs the dearest route listed: Yahoo pays per batch of the
-  // watchlist plus holdings plus the index; MIS answers the whole list and
-  // both indices in one call whatever its length; a broker route (shioaji,
-  // capital) costs this module no HTTP request at all.
-  const cost = (source: TwSourceName): number =>
-    source === 'yahoo'
-      ? Math.ceil((cfg.lists.tw.length + (extras.tw ?? 0) + 1) / SPARK_BATCH)
-      : source === 'mis'
-        ? 1
-        : 0
-  return Math.max(0, ...cfg.twSources.map(cost))
+  // A tick walks `twSources` in order, and the HTTP route it lands on is the
+  // first one not backed off: that one is what the tick pays for. A broker
+  // route (shioaji, capital) costs this module no HTTP request, but it can
+  // fall through, so the HTTP route behind it is still what is budgeted.
+  // Yahoo pays per batch of the watchlist plus holdings plus the index; MIS
+  // answers the whole list and both indices in one call whatever its length.
+  const http = cfg.twSources.filter(source => source === 'yahoo' || source === 'mis')
+  const route = http.find(source => !extras.down?.includes(source)) ?? http[0]
+  if (route === 'yahoo') return Math.ceil((cfg.lists.tw.length + (extras.tw ?? 0) + 1) / SPARK_BATCH)
+  return route === 'mis' ? 1 : 0
 }
 
 /**

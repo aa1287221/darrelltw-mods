@@ -81,11 +81,17 @@ function feedList(market: MarketId): Ticker[] {
   return [...config.lists[market], ...holdingExtras(market, config.lists[market], config)]
 }
 
-/** the symbols holdings add on top of each watchlist - what the request budget has to pay for too */
-function feedExtras(): FeedExtras {
+/**
+ * What the request budget has to pay for beyond the config: the symbols
+ * holdings add on top of each watchlist, and (given `now`) the HTTP routes
+ * backed off right now, which a tw tick falls through past.
+ */
+function feedExtras(now?: number): FeedExtras {
+  const down = now === undefined ? [] : (['yahoo', 'mis'] as const).filter(host => now < feedBackoff[host].skipUntil)
   return {
     tw: holdingExtras('tw', config.lists.tw, config).length,
     us: holdingExtras('us', config.lists.us, config).length,
+    down: [...down],
   }
 }
 
@@ -679,19 +685,14 @@ let nextFeedAt = 0 // when the next request is due; the board counts down to it
 // cannot be re-armed), and when it last fired. The request budget
 // (feedInterval) can outgrow that period later - holdings added mid-session
 // widen what a tick fetches - so the budgeted requests (Yahoo, 證交所) keep
-// their own clock: a tick sends them only once the CURRENT interval has
-// passed since the last tick that did (httpTickAt). Everything else a tick
-// does - the broker heartbeat, tf's respawn, crypto - runs every tick.
+// their own clock: they go out on every `steps`-th timer period, steps =
+// ceil(interval / period), counted from the last tick that sent them
+// (httpTickAt). While the budget fits the timer, steps is 1: every tick.
+// Everything else a tick does - the broker heartbeat, tf's respawn, crypto -
+// runs every tick regardless.
 let feedEvery = 0
 let lastTimerAt = 0
 let httpTickAt = 0
-// whether this tick may send the budgeted requests - decided once at the
-// tick's start, so a second budgeted market in the same tick (feed "both")
-// is not held back by the first one restarting httpTickAt
-let httpDue = true
-// a timer tick can land a hair before its period; this keeps a due tick from
-// being skipped for it, without letting a shorter period through
-const FEED_JITTER_MS = 250
 // when the K-bar request in flight started, 0 when none is - a time rather
 // than a flag so a request that never settles cannot latch it forever (see
 // IN_FLIGHT_STUCK_MS)
@@ -1318,8 +1319,8 @@ export const register: Register = on => {
       return { quotes, tradedAt }
     }
 
-    const feedUs = async (now: number) => {
-      if (!httpDue || backedOff('yahoo', now)) return
+    const feedUs = async (now: number, due: boolean) => {
+      if (!due || backedOff('yahoo', now)) return
       const list = feedList('us')
       const symbols = [...list.map(t => t.code), ...US_INDICES.map(i => i.symbol)]
       httpTickAt = now // this tick sends: the budget's clock restarts here
@@ -1555,10 +1556,14 @@ export const register: Register = on => {
     // Taiwan via Yahoo. Returns whether it produced a usable snapshot THIS
     // tick - the dispatcher below (feedTw) reads that to decide whether to
     // fall through to the next entry in `config.twSources`.
-    const feedTwYahoo = async (now: number): Promise<boolean> => {
-      // backed off, or the budget has not come round yet: "no snapshot this
-      // tick", so feedTw falls through to the next `twSources` entry
-      if (!httpDue || backedOff('yahoo', now)) return false
+    const feedTwYahoo = async (now: number, due: boolean): Promise<boolean | 'held'> => {
+      // the budget has not come round yet: hold this tick, never fall through
+      // to the next route for it (a healthy Yahoo would otherwise hand the
+      // tick to a broker login)
+      if (!due) return 'held'
+      // backed off: "no snapshot this tick", so feedTw falls through to the
+      // next `twSources` entry
+      if (backedOff('yahoo', now)) return false
       const list = feedList('tw')
       if (list.length === 0) return false
       const symbols = [...list.map(t => yahooSymbol('tw', t)), TW_YAHOO_INDEX]
@@ -1590,8 +1595,9 @@ export const register: Register = on => {
      * one does, whichever `twSources` entry prices the table. Same return
      * convention as feedTwYahoo.
      */
-    const feedTwMis = async (now: number): Promise<boolean> => {
-      if (!httpDue || backedOff('mis', now)) return false
+    const feedTwMis = async (now: number, due: boolean): Promise<boolean | 'held'> => {
+      if (!due) return 'held' // see feedTwYahoo
+      if (backedOff('mis', now)) return false
       const list = feedList('tw')
       if (list.length === 0) return false
       // the first entry is the one the market is read by, so an empty list
@@ -1880,9 +1886,9 @@ export const register: Register = on => {
      * falls back to defaultConfig's `["yahoo"]`), so this always attempts
      * at least Yahoo.
      */
-    const feedTw = async (now: number) => {
+    const feedTw = async (now: number, due: boolean) => {
       for (const source of config.twSources) {
-        let ok = false
+        let ok: boolean | 'held' = false
         try {
           ok =
             source === 'shioaji'
@@ -1890,13 +1896,13 @@ export const register: Register = on => {
               : source === 'capital'
                 ? await feedTwCapital(now)
                 : source === 'mis'
-                  ? await feedTwMis(now)
-                  : await feedTwYahoo(now)
+                  ? await feedTwMis(now, due)
+                  : await feedTwYahoo(now, due)
         } catch (err) {
           // one broken route falls through to the next, like one that answered nothing
           $.ui.log(`tw-stock-mod: 台股 ${source} failed: ${err}`)
         }
-        if (ok) return
+        if (ok) return // priced, or held back by the budget
       }
     }
 
@@ -1927,29 +1933,42 @@ export const register: Register = on => {
       }
     }
 
+    /** timer periods between two sends of the budgeted requests */
+    const budgetSteps = (interval: number): number => (feedEvery ? Math.max(1, Math.ceil(interval / feedEvery)) : 1)
+    /**
+     * When a timer tick may send the budgeted requests again: `steps` periods
+     * after the last send, less half a period so a tick landing a little early
+     * or late still counts - a period is the unit, so nothing shorter than
+     * `steps` whole periods gets through, and a budget that fits (steps 1)
+     * never holds a timer tick back.
+     */
+    const httpDueAt = (interval: number): number =>
+      httpTickAt ? httpTickAt + (budgetSteps(interval) - 0.5) * feedEvery : 0
+
     /**
      * When the board's countdown should land: the next timer tick, and for a
-     * market whose requests are budgeted (us, tw on Yahoo/證交所) the first
-     * such tick that clears the current interval since the last one that sent.
+     * market whose requests are budgeted (us, tw) the first such tick past
+     * httpDueAt - the tick that will actually send.
      */
     const nextFeedTickAt = (now: number, market: MarketId): number => {
-      const interval = feedInterval(config, feedExtras())
+      const interval = feedInterval(config, feedExtras(now))
       if (!feedEvery || !lastTimerAt) return now + interval
-      const earliest = market === 'us' || market === 'tw' ? httpTickAt + interval - FEED_JITTER_MS : 0
+      const earliest = market === 'us' || market === 'tw' ? httpDueAt(interval) : 0
       let at = lastTimerAt + feedEvery
       while (at <= now || at < earliest) at += feedEvery
       return at
     }
 
-    let loggedInterval = 0
-    /** logs once per new interval that outgrew the timer's period */
-    const noteOutgrown = (interval: number) => {
-      if (interval <= feedEvery || interval === loggedInterval) return
-      loggedInterval = interval
-      const every = Math.ceil((interval - FEED_JITTER_MS) / feedEvery) * feedEvery
+    let loggedSteps = 1
+    /** logs once each time the budget outgrows the timer by a new number of periods */
+    const noteOutgrown = (interval: number, now: number) => {
+      const steps = budgetSteps(interval)
+      if (steps === loggedSteps) return
+      loggedSteps = steps
+      if (steps === 1) return
       $.ui.log(
-        `tw-stock-mod: the feed now costs ${requestsPerTick(config, feedExtras())} requests per tick, ` +
-          `so Yahoo/證交所 are asked every ${Math.round(every / 1000)}s (budget ${REQUESTS_PER_HOUR}/hour)`,
+        `tw-stock-mod: the feed now costs ${requestsPerTick(config, feedExtras(now))} requests per tick, ` +
+          `so Yahoo/證交所 are asked every ${Math.round((steps * feedEvery) / 1000)}s (budget ${REQUESTS_PER_HOUR}/hour)`,
       )
     }
 
@@ -1962,33 +1981,43 @@ export const register: Register = on => {
       // says it is never coming. Back-off (feedBackoff) is per host, inside
       // each feed: it holds that host's requests only, never the heartbeat.
       if (config.feed === 'off' || now < snoozedUntil) return
+      const onScreen = pickMarket(now, modeOverride ?? config.market, hasFutures(config)).market
+      const markets = feedMarkets(config, onScreen).filter(market => marketNeedsFeed(now, market))
+      // The heartbeat goes out ahead of the in-flight latch: a hung request
+      // can hold the latch for IN_FLIGHT_STUCK_MS (120 s), longer than a
+      // broker fetcher's 90 s patience, and must not make it quit.
+      const brokerTw = config.twSources.includes('shioaji') || config.twSources.includes('capital')
+      const wanted = markets.filter(m => m === 'tf' || (m === 'tw' && brokerTw))
+      if (wanted.length > 0) await writeHeartbeat(now, wanted)
       if (feedInFlightSince && now - feedInFlightSince < IN_FLIGHT_STUCK_MS) return
       if (feedInFlightSince) $.ui.log('tw-stock-mod: the last feed tick never settled; starting a new one')
       const mine = now
       feedInFlightSince = mine
       try {
-        await feedOnce(now, force)
+        await feedOnce(now, markets, force)
       } finally {
         // a stuck tick that finally settles must not clear its successor's latch
         if (feedInFlightSince === mine) feedInFlightSince = 0
       }
     }
 
-    const feedOnce = async (now: number, force: boolean) => {
-      const interval = feedInterval(config, feedExtras())
-      noteOutgrown(interval)
-      httpDue = force || !httpTickAt || now >= httpTickAt + interval - FEED_JITTER_MS
-      const onScreen = pickMarket(now, modeOverride ?? config.market, hasFutures(config)).market
-      const markets = feedMarkets(config, onScreen).filter(market => marketNeedsFeed(now, market))
-      const brokerTw = config.twSources.includes('shioaji') || config.twSources.includes('capital')
-      const wanted = markets.filter(m => m === 'tf' || (m === 'tw' && brokerTw))
-      if (wanted.length > 0) await writeHeartbeat(now, wanted)
+    /**
+     * One tick over `markets`. Whether it may send the budgeted requests is
+     * decided once, here, and handed to each feed - a tick abandoned past
+     * IN_FLIGHT_STUCK_MS that resumes later keeps its own answer. A tab switch
+     * (`force`) always may: it wants prices for the board it just landed on,
+     * and it restarts the budget's clock like any send.
+     */
+    const feedOnce = async (now: number, markets: MarketId[], force: boolean) => {
+      const interval = feedInterval(config, feedExtras(now))
+      noteOutgrown(interval, now)
+      const due = force || now >= httpDueAt(interval)
       for (const market of markets) {
         // one market throwing must not skip the ones after it (a tw failure
         // used to leave tf's fetcher un-respawned for that tick)
         try {
           if (market === 'tf') await feedTf(now)
-          else if (market === 'us') await feedUs(now)
+          else if (market === 'us') await feedUs(now, due)
           else if (market === 'crypto') {
             // Pionex's own flat cooldown, not feedBackoff's - a Pionex 429
             // must not also stop tw/us, nor a Yahoo one crypto.
@@ -1998,7 +2027,7 @@ export const register: Register = on => {
             // own comment) - its own TTL/cooldown make this a no-op on almost
             // every tick, so riding the same cadence costs nothing extra.
             await fetchCryptoSupply(now)
-          } else await feedTw(now)
+          } else await feedTw(now, due)
         } catch (err) {
           $.ui.log(`tw-stock-mod: ${market} feed failed: ${err}`)
         }
@@ -2052,6 +2081,9 @@ export const register: Register = on => {
       // httpTickAt for holdings that widen the feed later
       const every = feedInterval(config, feedExtras())
       feedEvery = every
+      // a module that outlives a session must not carry the last one's clock
+      lastTimerAt = 0
+      httpTickAt = 0
       if (every > config.feedMs) {
         $.ui.log(
           `tw-stock-mod: ${requestsPerTick(config, feedExtras())} requests per tick, so the feed ticks every ` +

@@ -14,8 +14,11 @@
 //   (4) the budget holds back only the budgeted requests: with futures
 //       listed, the broker heartbeat is still written every timer tick, so
 //       the 永豐 fetcher never reads the gated gaps as "nobody is watching"
-//   (5) a feedMs just under the widened interval (23.5 s vs 24 s) still
-//       stays inside the budget - the gate cannot round it through
+//   (5) a feedMs just under the widened interval (23.5 s, 23.8 s vs 24 s)
+//       still stays inside the budget - the gate cannot round it through
+//   (6) a tw tick the budget holds back stops there: it never falls through
+//       to a broker route (which would spawn a 永豐 login) while Yahoo is fine
+//   (7) a request that hangs holds the in-flight latch, but not the heartbeat
 //
 // Usage: node feed-budget.mjs <register.js>
 import { pathToFileURL } from 'node:url'
@@ -34,17 +37,17 @@ const WATCHLIST = Array.from({ length: 15 }, (_, i) => ({ code: `W${i}`, name: `
 const HELD = Array.from({ length: 6 }, (_, i) => ({ code: `H${i}`, qty: 10, cost: 50 }))
 const configText = (holdings, extra = {}) =>
   JSON.stringify({
-    ...extra,
     market: 'us',
     // `us`, not `auto`: auto budgets the dearest market, and the built-in
     // 20-symbol tw list would cost two requests on its own
     feed: 'us',
-    feedMs: extra.feedMs ?? 15000,
+    feedMs: 15000,
     refreshMs: 3000,
     pageMs: 0,
     us: WATCHLIST,
     tw: [],
-    ...(holdings ? { holdings: { us: holdings } } : {}),
+    ...extra,
+    ...(holdings ? { holdings: { [extra.market ?? 'us']: holdings } } : {}),
   })
 
 const SPARK_BODY = JSON.stringify({
@@ -73,6 +76,8 @@ async function boot(holdings, extra = {}) {
   const files = { '.claude/stock-band.json': configText(holdings, extra) }
   const sparks = []
   const heartbeats = []
+  const spawns = []
+  let hang = false
   const timers = []
   const logs = []
   let clock = US_OPEN
@@ -90,7 +95,12 @@ async function boot(holdings, extra = {}) {
     },
     env: { get: async name => (name === 'HOME' ? '/fake-home' : undefined) },
     session: { cwd: async () => '/fake-project' },
-    process: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
+    process: {
+      run: async args => {
+        spawns.push(args)
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    },
     plugin: { root: '/fake-plugin-root' },
     ui: {
       log: m => logs.push(m),
@@ -100,6 +110,7 @@ async function boot(holdings, extra = {}) {
     http: {
       fetch: async u => {
         if (u.includes('/v7/finance/spark')) sparks.push(clock)
+        if (hang) return new Promise(() => {})
         return { ok: true, status: 200, headers: {}, text: SPARK_BODY }
       },
     },
@@ -128,7 +139,11 @@ async function boot(holdings, extra = {}) {
   const setHoldings = h => {
     files['.claude/stock-band.json'] = configText(h, extra)
   }
-  return { run, probe, sparks, heartbeats, logs, feedTimer, setHoldings, poll, get clock() { return clock } }
+  return {
+    run, probe, sparks, heartbeats, spawns, logs, feedTimer, setHoldings, poll,
+    get clock() { return clock },
+    hangFromNowOn() { hang = true },
+  }
 }
 
 const inHour = (sparks, from) => sparks.filter(t => t > from && t <= from + HOUR).length
@@ -193,6 +208,41 @@ const inHour = (sparks, from) => sparks.filter(t => t > from && t <= from + HOUR
   await s.run(HOUR)
   const n = inHour(s.sparks, start)
   ok(n <= REQUESTS_PER_HOUR, `(5) an hour at a 23.5 s timer against a 24 s interval sends ${n} (budget ${REQUESTS_PER_HOUR})`)
+}
+{
+  const s = await boot(undefined, { feedMs: 23800 })
+  s.setHoldings(HELD)
+  await s.poll.fn()
+  const start = s.clock
+  await s.run(HOUR)
+  const n = inHour(s.sparks, start)
+  ok(n <= REQUESTS_PER_HOUR, `(5) ...and at a 23.8 s timer: ${n} (budget ${REQUESTS_PER_HOUR})`)
+}
+
+// --- (6) a held tw tick never falls through to a broker ------------------------
+{
+  // 15 tw + 6 held = 21 symbols + the index: two Yahoo batches, a 24 s
+  // interval against a 15 s timer - every other tick is held. Taiwan is shut
+  // at this hour, but the stub's answer never prices a tw code, so the
+  // market never gets a snapshot and marketNeedsFeed keeps every tick live.
+  const tw = WATCHLIST.map(t => ({ ...t, code: String(1000 + Number(t.code.slice(1))) }))
+  const held = HELD.map((h, i) => ({ ...h, code: String(9000 + i) }))
+  const s = await boot(held, { market: 'tw', feed: 'tw', tw, us: [], twSources: ['yahoo', 'shioaji'] })
+  await s.run(10 * 60_000)
+  ok(s.sparks.length > 0, `(6) sanity: Yahoo was asked (${s.sparks.length} spark requests)`)
+  ok(s.spawns.length === 0, `(6) no broker fetcher was spawned on a held tick (${s.spawns.length} spawns)`)
+}
+
+// --- (7) a hung request does not hold the heartbeat -----------------------------
+{
+  const s = await boot(undefined, { futures: [{ code: 'TXFR1', name: '台指近' }], twSources: ['shioaji'] })
+  s.hangFromNowOn()
+  const before = s.heartbeats.length
+  await s.run(4 * 60_000) // past IN_FLIGHT_STUCK_MS (120 s) and the fetcher's 90 s patience
+  const beats = s.heartbeats.slice(before)
+  const gaps = beats.map((t, i) => (i ? t - beats[i - 1] : 0)).slice(1)
+  ok(beats.length >= 15, `(7) ${beats.length} heartbeats in 4 minutes with every request hanging`)
+  ok(Math.max(...gaps) <= s.feedTimer.ms, `(7) the widest heartbeat gap is ${Math.max(...gaps) / 1000}s`)
 }
 
 done()
