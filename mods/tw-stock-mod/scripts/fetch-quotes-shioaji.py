@@ -190,6 +190,8 @@ def build_payload(api, contracts: dict, index_contracts: list, watchlist_names: 
     # meters API usage), split back apart by code. Index codes (001/101) never
     # look like a stock's, but if one ever did, the two go in separate calls
     # rather than one row silently standing in for the other.
+    if not contracts:
+        return None  # nothing to price: not even the indices are worth a call
     indexes = {c.code: c for _, c in index_contracts}
     if indexes.keys() & contracts.keys():
         quotes = snapshot_rows(api, contracts, watchlist_names)

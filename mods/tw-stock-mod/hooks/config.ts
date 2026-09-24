@@ -375,13 +375,18 @@ function marketRequests(cfg: Config, market: MarketId, extras: FeedExtras = {}):
   // 2026-09-18, see PIONEX_TICKERS_URL) so feedCrypto pulls everything and
   // filters locally instead of paying per symbol.
   if (market === 'crypto') return 1
-  // The preferred route's own cost - shioaji costs this module no HTTP
-  // requests at all, so it is estimated as Yahoo's (the likely fallback,
-  // and a safe overestimate for the budget floor below).
-  // MIS answers the whole list plus both indices in one call, whatever the
-  // list length - there is no sparkline column left to pay Yahoo for on top.
-  if (cfg.twSources[0] === 'mis') return 1
-  return Math.ceil((cfg.lists.tw.length + (extras.tw ?? 0) + 1) / SPARK_BATCH)
+  // A tick tries `twSources` in order and can fall through to any of them,
+  // so it costs the dearest route listed: Yahoo pays per batch of the
+  // watchlist plus holdings plus the index; MIS answers the whole list and
+  // both indices in one call whatever its length; a broker route (shioaji,
+  // capital) costs this module no HTTP request at all.
+  const cost = (source: TwSourceName): number =>
+    source === 'yahoo'
+      ? Math.ceil((cfg.lists.tw.length + (extras.tw ?? 0) + 1) / SPARK_BATCH)
+      : source === 'mis'
+        ? 1
+        : 0
+  return Math.max(0, ...cfg.twSources.map(cost))
 }
 
 /**

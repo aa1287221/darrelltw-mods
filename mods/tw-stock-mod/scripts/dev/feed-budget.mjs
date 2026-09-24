@@ -11,6 +11,11 @@
 //       request a tick): the next hour still stays inside the budget
 //   (3) the countdown (props.nextFeedAt) names a tick that will actually
 //       send, never one the budget will skip
+//   (4) the budget holds back only the budgeted requests: with futures
+//       listed, the broker heartbeat is still written every timer tick, so
+//       the 永豐 fetcher never reads the gated gaps as "nobody is watching"
+//   (5) a feedMs just under the widened interval (23.5 s vs 24 s) still
+//       stays inside the budget - the gate cannot round it through
 //
 // Usage: node feed-budget.mjs <register.js>
 import { pathToFileURL } from 'node:url'
@@ -27,13 +32,14 @@ const US_OPEN = Date.UTC(2026, 8, 22, 15, 0)
 
 const WATCHLIST = Array.from({ length: 15 }, (_, i) => ({ code: `W${i}`, name: `W${i}`, prevClose: 100 }))
 const HELD = Array.from({ length: 6 }, (_, i) => ({ code: `H${i}`, qty: 10, cost: 50 }))
-const configText = holdings =>
+const configText = (holdings, extra = {}) =>
   JSON.stringify({
+    ...extra,
     market: 'us',
     // `us`, not `auto`: auto budgets the dearest market, and the built-in
     // 20-symbol tw list would cost two requests on its own
     feed: 'us',
-    feedMs: 15000,
+    feedMs: extra.feedMs ?? 15000,
     refreshMs: 3000,
     pageMs: 0,
     us: WATCHLIST,
@@ -58,14 +64,15 @@ function findClient(node) {
 }
 
 let moduleTick = 0
-async function boot(holdings) {
+async function boot(holdings, extra = {}) {
   moduleTick += 1
   const url = pathToFileURL(modPath)
   url.search = `?case=${moduleTick}`
   const { register } = await import(url.href)
 
-  const files = { '.claude/stock-band.json': configText(holdings) }
+  const files = { '.claude/stock-band.json': configText(holdings, extra) }
   const sparks = []
+  const heartbeats = []
   const timers = []
   const logs = []
   let clock = US_OPEN
@@ -77,6 +84,7 @@ async function boot(holdings) {
         throw new Error('ENOENT ' + path)
       },
       write: async (path, text) => {
+        if (path.includes('heartbeat')) heartbeats.push(clock)
         files[path] = text
       },
     },
@@ -118,9 +126,9 @@ async function boot(holdings) {
     }
   }
   const setHoldings = h => {
-    files['.claude/stock-band.json'] = configText(h)
+    files['.claude/stock-band.json'] = configText(h, extra)
   }
-  return { run, probe, sparks, logs, feedTimer, setHoldings, poll, get clock() { return clock } }
+  return { run, probe, sparks, heartbeats, logs, feedTimer, setHoldings, poll, get clock() { return clock } }
 }
 
 const inHour = (sparks, from) => sparks.filter(t => t > from && t <= from + HOUR).length
@@ -154,6 +162,37 @@ const inHour = (sparks, from) => sparks.filter(t => t > from && t <= from + HOUR
   ok(typeof due === 'number' && due > s.clock, `(3) nextFeedAt is in the future (${due - s.clock}ms ahead)`)
   while (s.clock < due) await s.run(s.feedTimer.ms)
   ok(s.sparks.length > before, '(3) the tick the countdown named did send')
+}
+
+// --- (4) the heartbeat is never held back by the budget --------------------------
+{
+  // 23:00 Taipei is inside the 夜盤, so a futures list keeps tf - and its
+  // heartbeat - live all hour
+  const s = await boot(undefined, { futures: [{ code: 'TXFR1', name: '台指近' }], twSources: ['shioaji'] })
+  s.setHoldings(HELD)
+  await s.poll.fn()
+  const start = s.clock
+  const ticksBefore = s.heartbeats.length
+  await s.run(10 * 60_000)
+  const ticks = Math.floor((10 * 60_000) / s.feedTimer.ms)
+  const beats = s.heartbeats.length - ticksBefore
+  ok(beats >= ticks - 1, `(4) ${beats} heartbeats over ${ticks} timer ticks while Yahoo is budget-gated`)
+  const gaps = s.heartbeats.slice(ticksBefore).map((t, i, a) => (i ? t - a[i - 1] : 0)).slice(1)
+  const widest = Math.max(...gaps)
+  ok(widest <= s.feedTimer.ms, `(4) the widest heartbeat gap is ${widest / 1000}s - never past the fetcher's 90 s patience`)
+  ok(inHour(s.sparks, start) * 6 <= REQUESTS_PER_HOUR + 6, '(4) ...while the spark requests still keep to the budget')
+}
+
+// --- (5) a feedMs just under the widened interval --------------------------------
+{
+  const s = await boot(undefined, { feedMs: 23500 })
+  ok(s.feedTimer.ms === 23500, `(5) sanity: the timer is 23.5 s (got ${s.feedTimer.ms / 1000}s)`)
+  s.setHoldings(HELD) // two requests a tick now: a 24 s interval
+  await s.poll.fn()
+  const start = s.clock
+  await s.run(HOUR)
+  const n = inHour(s.sparks, start)
+  ok(n <= REQUESTS_PER_HOUR, `(5) an hour at a 23.5 s timer against a 24 s interval sends ${n} (budget ${REQUESTS_PER_HOUR})`)
 }
 
 done()

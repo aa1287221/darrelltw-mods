@@ -91,3 +91,9 @@ def test_positions_clock_retries_next_tick_after_a_failed_fetch():
     # the fetch raised: fetched() never ran, so the very next tick tries again
     now[0] += 10.0
     assert clock.due() is True
+
+
+def test_no_stock_contracts_costs_no_call_at_all():
+    api = CountingApi({"001": 20100.0, "101": 252.5})
+    assert fetcher.build_payload(api, {}, INDEXES, {}) is None
+    assert api.calls == []

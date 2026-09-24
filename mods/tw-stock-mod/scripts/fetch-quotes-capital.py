@@ -871,14 +871,9 @@ def main() -> None:
     parser.add_argument("--detach", action="store_true", help="re-launch self detached and return at once (what the band spawns with; there is no nohup on Windows)")
     parser.add_argument("--check", action="store_true", help="diagnose the environment (platform, bitness, comtypes, SKCOM registration, env file, a real login, the quote host, every code, the 證券 account) and exit")
     args = parser.parse_args()
-
-    # Everything this script prints is Chinese, and --check prints ✅/❌ on
-    # top of that. A detached child's stdout is a plain file handle, so
-    # Python would otherwise encode it with the console codepage (cp950
-    # here), which has no room for those glyphs and raises mid-message.
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+    # (stdout/stderr are UTF-8 already: utf8_stdio() at the top of main,
+    # before argparse, so --help and --check's ✅/❌ survive a detached
+    # child's plain file handle too)
 
     # Not `.resolve()`: that would follow symlinks and could reshape this
     # string differently than $.session.cwd() does on the TS side, landing a
