@@ -53,10 +53,15 @@ Three ways to run it:
       - `--heartbeat FILE`: the band rewrites this file on every tick it
         wants the 群益 route. Once FILE is missing or more than 90s old this
         process exits by itself - the band closed, or moved to the US board,
-        and nothing is watching anymore.
+        and nothing is watching anymore. It also exits (1) once the quote
+        host has been down (or every snapshot has raised) for
+        MAX_FAILED_TICKS ticks in a row, so the band's respawn logs in again;
+        while the host is down it writes no quotes at all, since SKCOM's
+        cache would otherwise pass frozen prices off as fresh.
       - `--pidfile FILE`: if FILE already holds another live process's pid,
         this run exits at once (0) rather than double-fetching for the same
-        project. Two Claude Code sessions on the same project then share one
+        project; otherwise it writes its own pid there and removes it on
+        every way out. Two Claude Code sessions on the same project then share one
         fetcher instead of racing two logins - which matters more here than
         it does for 永豐, because SKCOM counts concurrent quote connections
         per account.
@@ -79,6 +84,7 @@ What you need:
 from __future__ import annotations  # defers `X | None` annotations so --check's own probe of "is this Python new enough" can run first
 
 import argparse
+import atexit
 import calendar
 import ctypes
 import json
@@ -90,6 +96,10 @@ import time
 from pathlib import Path
 
 HEARTBEAT_MAX_AGE_MS = 90_000
+# Consecutive ticks the quote link may read as down (or every snapshot raise)
+# before the fetcher exits so the band respawns a fresh login - 6 x the
+# default 10 s interval, about a minute, inside the band's 120 s staleness.
+MAX_FAILED_TICKS = 6
 
 RUNTIME_DIR_ROOT = ".claude/stock-band"
 
@@ -740,6 +750,16 @@ def claim_pidfile(pidfile: Path) -> bool:
     return True
 
 
+def release_pidfile(pidfile: Path) -> None:
+    """Unlink the pidfile only while it still names this process: a successor
+    that already claimed it (after this one was judged dead) keeps its claim."""
+    try:
+        if pidfile.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            pidfile.unlink()
+    except (OSError, ValueError):
+        pass
+
+
 def heartbeat_ts(text: str) -> float | None:
     """The heartbeat's timestamp (ms), from either shape the band writes: a
     bare number, or `{"ts": ms, "markets": [...]}` (what hooks/register.tsx
@@ -1051,6 +1071,26 @@ def main() -> None:
         return
     heartbeat_path = Path(args.heartbeat).expanduser().resolve() if args.heartbeat else None
 
+    # From here on every way out - a sys.exit below, a failed login, a
+    # connect timeout - logs out and gives the pidfile back. The loop's own
+    # `finally` covers the normal path; atexit covers everything before it,
+    # which used to leave the pidfile behind.
+    api = None
+
+    def cleanup() -> None:
+        nonlocal api
+        if api is not None:
+            try:
+                api.logout()
+            except Exception:  # noqa: BLE001 - logout failing on the way out changes nothing
+                pass
+            api = None
+            print("群益 已離線", file=sys.stderr)
+        if pidfile:
+            release_pidfile(pidfile)
+
+    atexit.register(cleanup)
+
     load_env(Path(args.env))
     for key in ("CAPITAL_USER_ID", "CAPITAL_PASSWORD"):
         if not os.environ.get(key):
@@ -1102,10 +1142,10 @@ def main() -> None:
 
     resubscribe(codes + [c for c, _ in indices])
 
-    running = True
     first_tick = True
+    failed_ticks = 0  # consecutive ticks with the quote link down or the snapshot raising
     try:
-        while running:
+        while True:
             # Heartbeat check first, before doing any work this tick: a stale
             # heartbeat means nobody is watching Taiwan anymore (band closed,
             # or on the US board). The very first tick is exempt because the
@@ -1126,11 +1166,26 @@ def main() -> None:
             # requested just above arrive during the same window.
             api.pump(max(args.interval, 1.0) if args.interval > 0 else 3.0)
 
-            try:
-                payload = build_payload(api, codes, indices, watchlist_names)
-            except Exception as err:  # noqa: BLE001 - any COM error is the same story here
-                print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
-                payload = None
+            # SKCOM keeps answering from its cache after the quote host drops
+            # (OnConnection 3002/3021), so a snapshot taken now would stamp a
+            # frozen price with a fresh asOf and the band would keep calling
+            # it 群益 即時. Write nothing while the link is down: the file goes
+            # stale, the band says so, and past MAX_FAILED_TICKS this exits so
+            # the band's respawn logs in again.
+            payload = None
+            if api.quote_state() != QUOTE_STATE_READY:
+                print(f"報價主機斷線（保留上一份檔案）{api.connection_error}", file=sys.stderr)
+                failed_ticks += 1
+            else:
+                try:
+                    payload = build_payload(api, codes, indices, watchlist_names)
+                    failed_ticks = 0
+                except Exception as err:  # noqa: BLE001 - any COM error is the same story here
+                    print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    failed_ticks += 1
+            if failed_ticks >= MAX_FAILED_TICKS:
+                print(f"連續 {failed_ticks} 輪沒有報價，結束讓 band 重新登入", file=sys.stderr)
+                sys.exit(1)
             if payload:
                 write_atomic(out_path, payload)
                 stamp = time.strftime("%H:%M:%S", time.localtime(payload["dataAt"] / 1000))
@@ -1159,15 +1214,9 @@ def main() -> None:
             if args.interval <= 0:
                 break
     except KeyboardInterrupt:
-        running = False
+        pass
     finally:
-        api.logout()
-        if pidfile:
-            try:
-                pidfile.unlink(missing_ok=True)
-            except OSError:
-                pass
-        print("群益 已離線", file=sys.stderr)
+        cleanup()
 
 
 if __name__ == "__main__":
