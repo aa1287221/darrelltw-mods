@@ -48,8 +48,9 @@ Three ways to run it:
         a pre-T4 band wrote - still reads as both markets, for one release.
         Once FILE is missing or its `ts` is more than 90s old, this process
         exits by itself - the band closed, or stopped wanting either market,
-        and nothing is watching anymore. It also exits (1) once every
-        snapshot has raised for GIVE_UP_AFTER_S (60 s) - a dead session - so
+        and nothing is watching anymore. It also exits (1) once no snapshot
+        has produced a usable payload (raised, or priced nothing) for
+        GIVE_UP_AFTER_S (60 s) - a dead session - so
         the band's respawn logs in again.
       - `--pidfile FILE`: if FILE already holds another live process's pid,
         this run exits at once (0) rather than double-fetching for the same
@@ -1141,7 +1142,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
 
     first_tick = True
-    failed_ticks = 0  # consecutive ticks where every snapshot attempted raised
+    failed_ticks = 0  # consecutive ticks where no snapshot attempted produced a usable payload
     give_up_at = failed_ticks_limit(args.interval)
     last_futures_positions: list = []  # kept across ticks the same way `positions` is - see below
     try:
@@ -1206,13 +1207,16 @@ def main() -> None:
                         if code not in watchlist_codes and not any(s["code"] == code for s in symbols):
                             symbols.append({"code": code, "name": code})
 
-                attempted += 1
+                # an empty contract list has nothing to price, which is not a
+                # dead session - only a tick with codes to price counts
+                attempted += 1 if contracts else 0
                 try:
                     payload = build_payload(api, contracts, index_contracts, watchlist_names)
                 except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
                     print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                     payload = None
-                    failed += 1
+                # raised or answered nothing priced: a dead session can do either
+                failed += 1 if contracts and not payload else 0
                 if payload:
                     write_atomic(out_path, tw_overlay.absorb(payload, int(time.time() * 1000)))
                     rows = len(payload["quotes"])
@@ -1242,8 +1246,8 @@ def main() -> None:
                 except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
                     print(f"期貨快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                     futures_rows = {}
-                    failed += 1
                 futures_payload = build_futures_payload(futures_rows)
+                failed += 0 if futures_payload else 1
                 if futures_payload:
                     write_atomic(futures_out_path, tf_overlay.absorb(futures_payload, int(time.time() * 1000)))
                     print(f"{len(futures_payload['quotes'])} 檔期貨 -> {futures_out_path}", file=sys.stderr)
@@ -1275,13 +1279,14 @@ def main() -> None:
                     print(f"{len(futures_holdings_payload['holdings'])} 檔期貨庫存 -> {futures_holdings_path}", file=sys.stderr)
 
             # A session that died (token expired, connection dropped for good)
-            # fails every snapshot while the heartbeat keeps this process -
+            # fails every snapshot - raising, or answering nothing priced -
+            # while the heartbeat keeps this process -
             # and its pidfile - alive, so the band never respawns it and the
             # files just go stale. Give up instead: exiting frees the pidfile,
             # and the band's next tick respawns a fresh login.
             failed_ticks = failed_ticks + 1 if attempted and failed == attempted else 0
             if failed_ticks >= give_up_at:
-                print(f"連續 {failed_ticks} 輪快照全部失敗，結束讓 band 重新登入", file=sys.stderr)
+                print(f"連續 {failed_ticks} 輪快照都沒有可用報價，結束讓 band 重新登入", file=sys.stderr)
                 sys.exit(1)
 
             # Ticks follow the worked set: subscribe what this tick served,

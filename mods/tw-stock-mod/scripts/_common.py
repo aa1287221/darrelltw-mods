@@ -121,53 +121,87 @@ def field(obj, name, default=None):
 # --- pidfile -----------------------------------------------------------------
 
 
-def _windows_pid_alive(pid: int) -> bool:
+# A pidfile is written by its owner after the owner starts, so the owner's
+# creation time is never later than the file's mtime. One created more than
+# this after it is a process that got the pid later (Windows reuses them
+# soon) - the slack only covers the two clocks' granularity.
+PID_REUSE_SLACK_S = 2.0
+
+
+def _windows_kernel32():
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    return kernel32
+
+
+def _windows_pid_alive(pid: int, since: float | None = None, kernel32=None) -> bool:
     """
     Windows has no `kill -0`: os.kill(pid, 0) there is not a probe at all -
     signal 0 is CTRL_C_EVENT, so it calls GenerateConsoleCtrlEvent, which
     either fails from a console-less (DETACHED_PROCESS) fetcher or sends the
-    target a Ctrl-C. Ask the kernel instead: a process we may not open
-    (ERROR_ACCESS_DENIED) exists; one we can open is alive until it has an
-    exit code.
+    target a Ctrl-C. Ask the kernel instead, and answer "not ours" whenever
+    the process cannot be ours:
+      - it cannot be opened: gone, or another user's or a protected process
+        (ERROR_ACCESS_DENIED) - a fetcher this user started always opens,
+        the same reasoning as EPERM on POSIX;
+      - it has exited (WaitForSingleObject signalled);
+      - it was created after `since`, the pidfile's mtime: a reboot or hard
+        kill left the pidfile behind and Windows handed the pid to someone
+        else (see PID_REUSE_SLACK_S).
+    `kernel32` is injectable so tests can stand in for the kernel.
     """
-    import ctypes
+    from ctypes import byref
     from ctypes import wintypes
 
+    synchronize = 0x00100000
     process_query_limited_information = 0x1000
-    error_access_denied = 5
-    still_active = 259
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
-    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    wait_timeout = 0x102
+    filetime_epoch = 116444736000000000  # 1601-01-01 -> 1970-01-01, in 100 ns ticks
+
+    if kernel32 is None:
+        kernel32 = _windows_kernel32()
+    handle = kernel32.OpenProcess(synchronize | process_query_limited_information, False, pid)
     if not handle:
-        return ctypes.get_last_error() == error_access_denied
+        return False
     try:
-        code = wintypes.DWORD()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return True  # opened it, so it exists; an unreadable exit code is not proof it ended
-        return code.value == still_active
+        if kernel32.WaitForSingleObject(handle, 0) != wait_timeout:
+            return False
+        if since is None:
+            return True
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not kernel32.GetProcessTimes(handle, byref(created), byref(exited), byref(kernel), byref(user)):
+            return True  # running, and no creation time to prove the pid was reused
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        created_at = (ticks - filetime_epoch) / 10_000_000
+        return created_at <= since + PID_REUSE_SLACK_S
     finally:
         kernel32.CloseHandle(handle)
 
 
-def pid_alive(pid: int) -> bool:
+def pid_alive(pid: int, since: float | None = None) -> bool:
     """
-    Whether the pid a pidfile names is a fetcher still feeding. Windows asks
-    the kernel (see _windows_pid_alive). Elsewhere kill -0 answers, and any
-    error - no such process, or EPERM for a pid a reboot handed to another
-    user's process - means it is not ours and not feeding. A stopped (T/t) or
-    zombie owner is not feeding either: kill -0 still says alive, so the band
-    would skip respawning for as long as it stays that way (a Ctrl-Z'd claude
-    session drags the fetcher down with it). Kill a stopped one so it cannot
-    wake later and double-write the runtime dir. No /proc (macOS) reads as
-    alive, as kill -0 said.
+    Whether the pid a pidfile names is a fetcher still feeding; `since` is the
+    pidfile's mtime, used on Windows to spot a reused pid (see
+    _windows_pid_alive). Elsewhere kill -0 answers, and any error - no such
+    process, or EPERM for a pid a reboot handed to another user's process -
+    means it is not ours and not feeding. A stopped (T/t) or zombie owner is
+    not feeding either: kill -0 still says alive, so the band would skip
+    respawning for as long as it stays that way (a Ctrl-Z'd claude session
+    drags the fetcher down with it). Kill a stopped one so it cannot wake
+    later and double-write the runtime dir. No /proc (macOS) reads as alive,
+    as kill -0 said.
     """
     if os.name == "nt":
         try:
-            return _windows_pid_alive(pid)
+            return _windows_pid_alive(pid, since)
         except (OSError, AttributeError, ValueError):
             return False  # no answer from the kernel: take the pidfile over rather than never respawn
     try:
@@ -197,9 +231,10 @@ def claim_pidfile(pidfile: Path) -> bool:
     if pidfile.exists():
         try:
             existing = int(pidfile.read_text(encoding="utf-8").strip())
+            written = pidfile.stat().st_mtime
         except (ValueError, OSError):
             existing = None
-        if existing and existing != os.getpid() and pid_alive(existing):
+        if existing and existing != os.getpid() and pid_alive(existing, written):
             return False
     pidfile.parent.mkdir(parents=True, exist_ok=True)
     pidfile.write_text(str(os.getpid()), encoding="utf-8")

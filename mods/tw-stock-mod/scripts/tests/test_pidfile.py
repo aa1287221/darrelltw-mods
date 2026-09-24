@@ -146,3 +146,88 @@ def test_write_atomic_is_compact_and_leaves_no_tmp(tmp_path):
     _common.write_atomic(out, {"quotes": {"2330": {"name": "台積電", "bars": [1, 2]}}})
     assert out.read_text(encoding="utf-8") == '{"quotes":{"2330":{"name":"台積電","bars":[1,2]}}}'
     assert not (tmp_path / "stock-quotes.json.tmp").exists()
+
+
+# --- Windows: _windows_pid_alive against a stubbed kernel32 -------------------
+# Runs on any OS: the kernel is a fake that answers the three questions the
+# probe asks (can the pid be opened, has it exited, when was it created).
+
+WAIT_OBJECT_0 = 0x0
+WAIT_TIMEOUT = 0x102
+FILETIME_EPOCH = 116444736000000000  # 1601-01-01 -> 1970-01-01, in 100 ns ticks
+
+
+class FakeKernel32:
+    """One process table entry: `pid` -> (created epoch seconds, exited?)."""
+
+    def __init__(self, processes, openable=True):
+        self.processes = processes
+        self.openable = openable
+        self.closed = []
+
+    def OpenProcess(self, access, inherit, pid):
+        if not self.openable or pid not in self.processes:
+            return 0  # ERROR_INVALID_PARAMETER / ERROR_ACCESS_DENIED: no handle either way
+        return 1000 + pid
+
+    def WaitForSingleObject(self, handle, ms):
+        _, exited = self.processes[handle - 1000]
+        return WAIT_OBJECT_0 if exited else WAIT_TIMEOUT
+
+    def GetProcessTimes(self, handle, created, exited, kernel, user):
+        ticks = int(self.processes[handle - 1000][0] * 10_000_000) + FILETIME_EPOCH
+        created._obj.dwLowDateTime = ticks & 0xFFFFFFFF
+        created._obj.dwHighDateTime = ticks >> 32
+        return 1
+
+    def CloseHandle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+PIDFILE_WRITTEN = 1_790_000_000.0  # the pidfile's mtime
+
+
+def test_windows_owner_running_since_before_its_pidfile_is_alive():
+    k = FakeKernel32({42: (PIDFILE_WRITTEN - 5, False)})
+    assert _common._windows_pid_alive(42, PIDFILE_WRITTEN, kernel32=k) is True
+    assert k.closed == [1042]
+
+
+def test_windows_pid_reused_after_the_pidfile_was_written_is_not_ours():
+    # a reboot or hard kill left the pidfile; Windows handed 42 to svchost later
+    k = FakeKernel32({42: (PIDFILE_WRITTEN + 3600, False)})
+    assert _common._windows_pid_alive(42, PIDFILE_WRITTEN, kernel32=k) is False
+    assert k.closed == [1042]
+
+
+def test_windows_exited_owner_is_dead():
+    k = FakeKernel32({42: (PIDFILE_WRITTEN - 5, True)})
+    assert _common._windows_pid_alive(42, PIDFILE_WRITTEN, kernel32=k) is False
+
+
+def test_windows_pid_that_cannot_be_opened_is_not_ours():
+    # gone, or another user's / a protected process: our own fetcher always opens
+    assert _common._windows_pid_alive(42, PIDFILE_WRITTEN, kernel32=FakeKernel32({})) is False
+    k = FakeKernel32({42: (PIDFILE_WRITTEN - 5, False)}, openable=False)
+    assert _common._windows_pid_alive(42, PIDFILE_WRITTEN, kernel32=k) is False
+
+
+def test_windows_without_a_pidfile_time_only_asks_whether_it_runs():
+    k = FakeKernel32({42: (PIDFILE_WRITTEN + 3600, False)})
+    assert _common._windows_pid_alive(42, None, kernel32=k) is True
+
+
+def test_claim_passes_the_pidfile_mtime_to_pid_alive(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_alive(pid, since=None):
+        seen["args"] = (pid, since)
+        return True
+
+    monkeypatch.setattr(_common, "pid_alive", fake_alive)
+    pidfile = tmp_path / "stock.pid"
+    pidfile.write_text("4242", encoding="utf-8")
+    os.utime(pidfile, (PIDFILE_WRITTEN, PIDFILE_WRITTEN))
+    assert _common.claim_pidfile(pidfile) is False
+    assert seen["args"] == (4242, PIDFILE_WRITTEN)
