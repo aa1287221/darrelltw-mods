@@ -75,6 +75,7 @@ import json
 import math
 import os
 import queue
+import re
 import signal
 import sys
 import time
@@ -109,17 +110,18 @@ RUNTIME_DIR_ROOT = ".claude/stock-band"
 def runtime_dir(home: str, project: str) -> Path:
     """
     Same rule as hooks/register.tsx's runtimeDir(): RUNTIME_DIR_ROOT plus the
-    project path with its leading "/" dropped and every remaining "/" turned
-    into "-" (e.g. `/Users/x/app` -> `Users-x-app`). `project` must already
+    project path with its leading separators dropped and every remaining
+    `/`, `\\` or `:` turned into "-" (`/Users/x/app` -> `Users-x-app`,
+    `D:\\app` -> `D--app`, the same as fetch-quotes-capital.py). `project` must already
     be the same normalized absolute string register.tsx would compute (see
     main()'s use of this) - a symlink-resolved or otherwise reshaped string
     here would land manual runs and the band in two different directories.
-    `home` falls back to the project's own `.claude/` only when $HOME is
-    unset, matching the TS side.
+    `home` falls back to the project's own `.claude/` only when neither
+    HOME nor USERPROFILE is set, matching the TS side.
     """
     if not home:
         return Path(project) / ".claude"
-    slug = project.lstrip("/").replace("/", "-")
+    slug = re.sub(r"[/\\:]", "-", project.lstrip("/\\"))
     return Path(home) / RUNTIME_DIR_ROOT / slug
 
 
@@ -1050,7 +1052,8 @@ def main() -> None:
     # normalizes "." / ".." / a trailing slash, same as Node's path.resolve.
     project_str = os.path.abspath(os.path.expanduser(args.project))
     project = Path(project_str)
-    home = os.environ.get("HOME", "")
+    # Windows sets USERPROFILE, not HOME - the band's own fallback order
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
 
     # --env not given: read the same shioaji.env the band itself would spawn
     # this script with (user-level file, then project file - project wins),

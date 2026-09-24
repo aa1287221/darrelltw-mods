@@ -291,10 +291,16 @@ run_check() {
 # pytest.ini/conftest), but the documented invocation is run from here.
 run_pytest() { (cd "$MOD_DIR" && "$PYTHON" -m pytest scripts/tests -q); }
 
-run_check "feed-idle"      node "$SCRIPT_DIR/feed-idle.mjs"   "$OUT/register.js" "$FIXTURES/feed-idle"
+# SKIP_NETWORK=1 (CI) leaves out the two checks that hit the real Yahoo
+# endpoint: a runner's IP gets 429'd or blocked often enough that a red
+# there says nothing about this repo.
+skip_check() { echo; echo "== $1 =="; echo "skipped (SKIP_NETWORK=1)"; results+=("SKIP  $1"); }
+net_check() { if [[ "${SKIP_NETWORK:-0}" == 1 ]]; then skip_check "$1"; else run_check "$@"; fi; }
+
+net_check "feed-idle"      node "$SCRIPT_DIR/feed-idle.mjs"   "$OUT/register.js" "$FIXTURES/feed-idle"
 run_check "chart-nav"      node "$SCRIPT_DIR/chart-nav.mjs"   "$OUT/register.js" "$FIXTURES/chart-nav"
 run_check "rank-cross"     node "$SCRIPT_DIR/rank-cross.mjs"  "$OUT/board.js" "$OUT/register.js" "$FIXTURES/rank-cross"
-run_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/file-bars"
+net_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/file-bars"
 run_check "tf-market"      node "$SCRIPT_DIR/tf-market.mjs"   "$OUT/register.js" "$FIXTURES/tf-market" "$FIXTURES/tf-plain"
 run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-quotes" "$FIXTURES/tf-override"
 run_check "tf-feed"        node "$SCRIPT_DIR/tf-feed.mjs"     "$OUT/register.js" "$FIXTURES/tf-feed"

@@ -152,6 +152,14 @@ regression. `feed-errors`, `crypto-feed`, `crypto-sort` and `market-select`
 hit no network at all (their own `$.http.fetch` stub answers canned responses), so a `FAIL`
 in any one of them is never a network fluke.
 
+`SKIP_NETWORK=1 bash run-checks.sh` prints `SKIP` for `feed-idle` and
+`file-bars` instead of running them - what CI does
+(`.github/workflows/tw-stock-mod.yml`, on every push or PR touching this mod),
+since a runner's IP gets 429'd by Yahoo often enough that a red there would
+say nothing about the change. CI installs `pytest` and `ripgrep`;
+`check-engine-rules.sh` fails outright without `rg` rather than reporting
+clean on a check it never ran.
+
 ## The stub host cannot answer everything
 
 `real-click.py` opens a real Claude Code in a pty, waits for the band, sends a
