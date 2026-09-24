@@ -88,21 +88,26 @@ import atexit
 import calendar
 import ctypes
 import json
-import math
 import os
-import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-HEARTBEAT_MAX_AGE_MS = 90_000
-# How long every snapshot may keep failing before the fetcher gives up and
-# exits for a fresh login - well inside the band's own 120 s staleness window,
-# so the band's respawn finds the pidfile free. See failed_ticks_limit().
-GIVE_UP_AFTER_S = 60
+# the helpers every script here shares - scripts/_common.py, next to this file
+from _common import (
+    claim_pidfile,
+    failed_ticks_limit,
+    load_env,
+    read_env_file,
+    read_watchlist,
+    release_pidfile,
+    runtime_dir,
+    user_home,
+    write_atomic,
+)
 
-RUNTIME_DIR_ROOT = ".claude/stock-band"
+HEARTBEAT_MAX_AGE_MS = 90_000
 
 # What the band's footer calls this route, and what the 損益 view calls the
 # positions. Both travel through the files as `source`.
@@ -175,77 +180,6 @@ PL_CHANGE = 6  # 今日市價漲跌
 PL_COST = 10  # 平均買進(券賣)成本
 PL_TRADE_TYPE = 26  # 交易種類代號
 PL_MIN_FIELDS = 27
-
-
-def user_home() -> str:
-    """
-    Same rule as hooks/register.tsx: `HOME` first, then `USERPROFILE`. Windows
-    does not set `HOME` for a normal process, and this route is Windows-only,
-    so without the second one every runtime file would fall back into the
-    project's own `.claude/` - exactly what the runtime dir exists to avoid.
-    """
-    return os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
-
-
-def runtime_slug(project: str) -> str:
-    """
-    Same rule as hooks/register.tsx's runtimeDir(): the project path with its
-    leading separators dropped and every remaining separator turned into "-".
-    `\\` and `:` count as separators alongside `/` so a Windows path becomes a
-    legal directory name (`D:\\app` -> `D--app`); a POSIX path is unaffected by
-    those two characters, so this stays byte-identical to the old rule there
-    (`/Users/x/app` -> `Users-x-app`) and no existing runtime dir moves.
-    """
-    return re.sub(r"[/\\:]", "-", project.lstrip("/\\"))
-
-
-def runtime_dir(home: str, project: str) -> Path:
-    """
-    `home` falls back to the project's own `.claude/` only when neither HOME
-    nor USERPROFILE is set, matching the TS side. `project` must already be
-    the same normalized absolute string register.tsx would compute (see
-    main()'s use of this) - a symlink-resolved or otherwise reshaped string
-    here would land manual runs and the band in two different directories.
-    """
-    if not home:
-        return Path(project) / ".claude"
-    return Path(home) / RUNTIME_DIR_ROOT / runtime_slug(project)
-
-
-def read_env_file(path: Path) -> dict:
-    """key=value lines, `#` comments and blanks skipped. Values are never printed."""
-    values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-    return values
-
-
-def load_env(path: Path) -> None:
-    if not path.exists():
-        sys.exit(f"ERROR: {path} 不存在（要有 CAPITAL_USER_ID / CAPITAL_PASSWORD）")
-    for key, value in read_env_file(path).items():
-        os.environ.setdefault(key, value)
-
-
-def read_watchlist(config_path: Path) -> list[dict]:
-    """The band's own config is the list, so there is only ever one watchlist."""
-    if not config_path.exists():
-        return []
-    try:
-        root = json.loads(config_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as err:
-        sys.exit(f"ERROR: {config_path} 不是合法 JSON: {err}")
-    rows = root.get("tw") if isinstance(root, dict) else None
-    out = []
-    for row in rows or []:
-        code = str(row.get("code", "")).strip()
-        if code:
-            out.append({"code": code, "name": row.get("name") or code})
-    return out
 
 
 def read_config_capital(*config_paths: Path) -> dict:
@@ -716,60 +650,6 @@ def build_holdings_payload(rows: list[str], quotes: dict) -> dict | None:
 # --- process plumbing (shared shape with fetch-quotes-shioaji.py) -----------
 
 
-def pid_alive(pid: int) -> bool:
-    """
-    Windows has no `kill -0`: os.kill(pid, 0) raises PermissionError for a
-    live process owned by someone else and OSError for a dead one, so a
-    PermissionError counts as alive. OpenProcess would be exact, but a
-    false "alive" only ever costs one skipped respawn.
-    """
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def claim_pidfile(pidfile: Path) -> bool:
-    """
-    True: this process owns the pidfile and should run. False: another live
-    process already owns it for this project, so the caller exits quietly
-    (0) rather than double-fetching - see the module docstring's `--pidfile`
-    section.
-    """
-    if pidfile.exists():
-        try:
-            existing = int(pidfile.read_text(encoding="utf-8").strip())
-        except (ValueError, OSError):
-            existing = None
-        if existing and existing != os.getpid() and pid_alive(existing):
-            return False
-    pidfile.parent.mkdir(parents=True, exist_ok=True)
-    pidfile.write_text(str(os.getpid()), encoding="utf-8")
-    return True
-
-
-def failed_ticks_limit(interval: float) -> int:
-    """How many failed ticks in a row mean the session is dead: GIVE_UP_AFTER_S
-    worth at whatever --interval this run uses, never less than one tick. A
-    fixed tick count gave up after 3 minutes at interval 30 (past the band's
-    120 s staleness, so its respawns all bounced off our pidfile) and after
-    6 s at interval 1 (a blip forcing a full re-login)."""
-    return max(1, math.ceil(GIVE_UP_AFTER_S / interval)) if interval > 0 else 1
-
-
-def release_pidfile(pidfile: Path) -> None:
-    """Unlink the pidfile only while it still names this process: a successor
-    that already claimed it (after this one was judged dead) keeps its claim."""
-    try:
-        if pidfile.read_text(encoding="utf-8").strip() == str(os.getpid()):
-            pidfile.unlink()
-    except (OSError, ValueError):
-        pass
-
-
 def heartbeat_ts(text: str) -> float | None:
     """The heartbeat's timestamp (ms), from either shape the band writes: a
     bare number, or `{"ts": ms, "markets": [...]}` (what hooks/register.tsx
@@ -800,20 +680,6 @@ def heartbeat_stale(path: Path) -> bool:
     if ts is None:
         return True
     return (time.time() * 1000 - ts) > HEARTBEAT_MAX_AGE_MS
-
-
-def write_atomic(path: Path, payload: dict) -> None:
-    """
-    Write through a temp file and replace: the band polls this file every few
-    seconds and a half-written JSON would read as malformed and drop it back
-    to demo prices.
-    """
-    tmp = path.with_suffix(".json.tmp")
-    # compact: futures-quotes.json carries every K bar and is rewritten up to
-    # once a second, and indent=1 put each bar number on its own line (~40%
-    # of the bytes). `python -m json.tool FILE` reads it back for a human.
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    tmp.replace(path)
 
 
 def relaunch_detached(log_path: Path) -> None:
@@ -1104,7 +970,7 @@ def main() -> None:
 
     atexit.register(cleanup)
 
-    load_env(Path(args.env))
+    load_env(Path(args.env), "CAPITAL_USER_ID / CAPITAL_PASSWORD")
     for key in ("CAPITAL_USER_ID", "CAPITAL_PASSWORD"):
         if not os.environ.get(key):
             sys.exit(f"ERROR: {key} 沒設")

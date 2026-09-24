@@ -75,7 +75,6 @@ import json
 import math
 import os
 import queue
-import re
 import signal
 import sys
 import time
@@ -83,12 +82,22 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+# the helpers every script here shares - scripts/_common.py, next to this file
+from _common import (
+    claim_pidfile,
+    failed_ticks_limit,
+    field,
+    load_env,
+    read_env_file,
+    read_watchlist,
+    release_pidfile,
+    runtime_dir,
+    user_home,
+    write_atomic,
+)
+
 HEARTBEAT_MAX_AGE_MS = 90_000
 HEARTBEAT_MARKETS = frozenset({"tw", "tf"})  # the markets a heartbeat can ask this fetcher to work
-# How long every snapshot may keep failing before the fetcher gives up and
-# exits for a fresh login - well inside the band's own 120 s staleness window,
-# so the band's respawn finds the pidfile free. See failed_ticks_limit().
-GIVE_UP_AFTER_S = 60
 
 # 發行量加權股價指數 / 櫃買指數. Latin names because the board flaps one
 # character at a time and a Chinese character has no drum to riffle through.
@@ -103,54 +112,6 @@ INDICES = [
 # because the band prints this as 更新.
 TAIPEI_OFFSET_MS = 8 * 3600 * 1000
 
-
-RUNTIME_DIR_ROOT = ".claude/stock-band"
-
-
-def runtime_dir(home: str, project: str) -> Path:
-    """
-    Same rule as hooks/register.tsx's runtimeDir(): RUNTIME_DIR_ROOT plus the
-    project path with its leading separators dropped and every remaining
-    `/`, `\\` or `:` turned into "-" (`/Users/x/app` -> `Users-x-app`,
-    `D:\\app` -> `D--app`, the same as fetch-quotes-capital.py). `project` must already
-    be the same normalized absolute string register.tsx would compute (see
-    main()'s use of this) - a symlink-resolved or otherwise reshaped string
-    here would land manual runs and the band in two different directories.
-    `home` falls back to the project's own `.claude/` only when neither
-    HOME nor USERPROFILE is set, matching the TS side.
-    """
-    if not home:
-        return Path(project) / ".claude"
-    slug = re.sub(r"[/\\:]", "-", project.lstrip("/\\"))
-    return Path(home) / RUNTIME_DIR_ROOT / slug
-
-
-def load_env(path: Path) -> None:
-    if not path.exists():
-        sys.exit(f"ERROR: {path} 不存在（要有 SINOBON_API_KEY / SINOBON_SECRET_KEY）")
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-
-def read_watchlist(config_path: Path) -> list[dict]:
-    """The band's own config is the list, so there is only ever one watchlist."""
-    if not config_path.exists():
-        return []
-    try:
-        root = json.loads(config_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as err:
-        sys.exit(f"ERROR: {config_path} 不是合法 JSON: {err}")
-    rows = root.get("tw") if isinstance(root, dict) else None
-    out = []
-    for row in rows or []:
-        code = str(row.get("code", "")).strip()
-        if code:
-            out.append({"code": code, "name": row.get("name") or code})
-    return out
 
 
 def read_config_shioaji_env(*config_paths: Path) -> str | None:
@@ -173,11 +134,6 @@ def read_config_shioaji_env(*config_paths: Path) -> str | None:
         if isinstance(shioaji, dict) and shioaji.get("env"):
             env_value = str(shioaji["env"])
     return env_value
-
-
-def field(obj, name, default=None):
-    value = getattr(obj, name, default)
-    return default if value is None else value
 
 
 def resolve_name(code: str, contracts: dict, watchlist_names: dict) -> str:
@@ -828,66 +784,6 @@ def build_holdings_payload(positions: list, contracts: dict, quotes: dict, watch
     return {"asOf": int(time.time() * 1000), "market": "tw", "source": "永豐 庫存", "holdings": holdings}
 
 
-def pid_alive(pid: int) -> bool:
-    """A stopped (T/t) or zombie owner is not feeding: kill -0 still says
-    alive, so the band would skip respawning for as long as it stays that
-    way (a Ctrl-Z'd claude session drags the fetcher down with it). Kill a
-    stopped one so it cannot wake later and double-write the runtime dir."""
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except (OSError, IndexError):
-        return True
-    if state in ("T", "t", "Z"):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-        return False
-    return True
-
-
-def claim_pidfile(pidfile: Path) -> bool:
-    """
-    True: this process owns the pidfile and should run. False: another live
-    process already owns it for this project, so the caller exits quietly
-    (0) rather than double-fetching - see the module docstring's `--pidfile`
-    section.
-    """
-    if pidfile.exists():
-        try:
-            existing = int(pidfile.read_text(encoding="utf-8").strip())
-        except (ValueError, OSError):
-            existing = None
-        if existing and existing != os.getpid() and pid_alive(existing):
-            return False
-    pidfile.parent.mkdir(parents=True, exist_ok=True)
-    pidfile.write_text(str(os.getpid()), encoding="utf-8")
-    return True
-
-
-def failed_ticks_limit(interval: float) -> int:
-    """How many failed ticks in a row mean the session is dead: GIVE_UP_AFTER_S
-    worth at whatever --interval this run uses, never less than one tick. A
-    fixed tick count gave up after 3 minutes at interval 30 (past the band's
-    120 s staleness, so its respawns all bounced off our pidfile) and after
-    6 s at interval 1 (a blip forcing a full re-login)."""
-    return max(1, math.ceil(GIVE_UP_AFTER_S / interval)) if interval > 0 else 1
-
-
-def release_pidfile(pidfile: Path) -> None:
-    """Unlink the pidfile only while it still names this process: a successor
-    that already claimed it (after this one was judged dead) keeps its claim."""
-    try:
-        if pidfile.read_text(encoding="utf-8").strip() == str(os.getpid()):
-            pidfile.unlink()
-    except (OSError, ValueError):
-        pass
-
-
 def parse_heartbeat(text: str, now_ms: float) -> tuple[bool, frozenset[str]]:
     """(stale, markets the band wants worked). A bare ms number (pre-T4
     band) reads as every market for one release; anything else unparseable
@@ -918,20 +814,6 @@ def read_heartbeat(path: Path) -> tuple[bool, frozenset[str]]:
     except OSError:
         return True, frozenset()
     return parse_heartbeat(text, time.time() * 1000)
-
-
-def write_atomic(path: Path, payload: dict) -> None:
-    """
-    Write through a temp file and rename: the band polls this file every few
-    seconds and a half-written JSON would read as malformed and drop it back
-    to demo prices.
-    """
-    tmp = path.with_suffix(".json.tmp")
-    # compact: futures-quotes.json carries every K bar and is rewritten up to
-    # once a second, and indent=1 put each bar number on its own line (~40%
-    # of the bytes). `python -m json.tool FILE` reads it back for a human.
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    tmp.replace(path)
 
 
 def fetch_positions(api) -> list:
@@ -971,13 +853,7 @@ def check_env_file(env_path: Path) -> tuple[bool, dict]:
         print(f"❌ env 檔不存在：{env_path}")
         return False, {}
     print(f"✅ env 檔存在：{env_path}")
-    values: dict[str, str] = {}
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    values = read_env_file(env_path)
     ok = True
     for key in ("SINOBON_API_KEY", "SINOBON_SECRET_KEY"):
         has_value = bool(values.get(key))
@@ -1062,7 +938,7 @@ def main() -> None:
     project_str = os.path.abspath(os.path.expanduser(args.project))
     project = Path(project_str)
     # Windows sets USERPROFILE, not HOME - the band's own fallback order
-    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
+    home = user_home()
 
     # --env not given: read the same shioaji.env the band itself would spawn
     # this script with (user-level file, then project file - project wins),
@@ -1140,7 +1016,7 @@ def main() -> None:
     else:
         watchlist = read_watchlist(project / ".claude" / "stock-band.json")
 
-    load_env(Path(args.env).expanduser())
+    load_env(Path(args.env).expanduser(), "SINOBON_API_KEY / SINOBON_SECRET_KEY")
     for key in ("SINOBON_API_KEY", "SINOBON_SECRET_KEY"):
         if not os.environ.get(key):
             sys.exit(f"ERROR: {key} 沒設")

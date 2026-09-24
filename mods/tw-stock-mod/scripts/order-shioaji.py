@@ -10,16 +10,13 @@ import time
 import warnings
 from pathlib import Path
 
+# the helpers every script here shares - scripts/_common.py, next to this file
+from _common import field, load_env
+
 DEFAULT_MAX_QTY = 1
 RUNTIME_DIR = Path.home() / ".claude" / "stock-band"
 ORDERS_LOG = RUNTIME_DIR / "orders.log"
 USER_CONFIG_PATH = Path.home() / ".claude" / "stock-band.json"
-
-
-def field(obj, name, default=None):
-    """Same helper as fetch-quotes-shioaji.py - getattr with a None-safe default."""
-    value = getattr(obj, name, default)
-    return default if value is None else value
 
 
 def now_ms() -> int:
@@ -35,19 +32,6 @@ def read_json_config(path: Path) -> dict:
     except json.JSONDecodeError:
         return {}
     return root if isinstance(root, dict) else {}
-
-
-def load_env(path: Path) -> None:
-    """Same shape as fetch-quotes-shioaji.py's load_env - setdefault, so an
-    already-exported env var wins over the file."""
-    if not path.exists():
-        sys.exit(f"ERROR: {path} 不存在（要有 SINOBON_API_KEY / SINOBON_SECRET_KEY）")
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def resolve_env_path(args, user_cfg: dict) -> Path:
@@ -343,7 +327,7 @@ def enter_session(args, user_cfg: dict, project_cfg: dict, action: str, extra: d
         return None
 
     env_path = resolve_env_path(args, user_cfg)
-    load_env(env_path)
+    load_env(env_path, "SINOBON_API_KEY / SINOBON_SECRET_KEY")
     api_key, secret_key = require_keys()
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
