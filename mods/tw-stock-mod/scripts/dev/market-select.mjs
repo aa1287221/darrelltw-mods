@@ -206,10 +206,9 @@ async function boot({
           return { status: r.status, ok: r.status >= 200 && r.status < 300, text: r.text, headers: r.headers ?? {} }
         }
         // tw/us (Yahoo spark/chart) are not under test here - an empty but
-        // VALID body, not a failure: a failure would set the shared
-        // feedSkipUntil (see backOff in register.tsx), which gates every
-        // market's next feed() call, including the crypto request this
-        // harness is proving fires immediately.
+        // VALID body, not a failure: a failure would back Yahoo off (see
+        // backOff in register.tsx) and log, which is noise for a harness
+        // about the crypto request firing immediately.
         return { status: 200, ok: true, text: '{}' }
       },
     },

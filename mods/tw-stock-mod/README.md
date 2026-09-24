@@ -509,8 +509,9 @@ instead of leaving it on demo prices until the next tick.
   Yahoo's per-symbol chart call regardless of which `twSources` route prices
   the table.
 - **Rate limits are real.** A request with no browser `User-Agent` gets 429 on
-  the first try, and the ban lasts minutes. Every non-2xx doubles the wait, up
-  to 5 minutes.
+  the first try, and the ban lasts minutes. Every non-2xx or network error
+  doubles the wait, up to 5 minutes — per host, so a Yahoo ban does not stop
+  證交所, Pionex or the broker fetchers.
 - **Repeated URLs come back cached** — measured: six ticks over 80 seconds
   returned a byte-identical body and a frozen price — so every request carries a
   `_=<timestamp>` and no-cache headers.
