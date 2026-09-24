@@ -17,6 +17,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOD_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 fail=0
 
+# every rule below greps with rg, and a missing rg reads as "no hits" -
+# which would print "clean" without having checked anything
+if ! command -v rg >/dev/null 2>&1; then
+  echo "check-engine-rules: rg (ripgrep) not found - install it, nothing was checked" >&2
+  exit 1
+fi
+
 report() {
   echo "check-engine-rules: $1" >&2
   fail=1

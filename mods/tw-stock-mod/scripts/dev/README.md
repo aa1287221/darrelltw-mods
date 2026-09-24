@@ -15,8 +15,8 @@ harness's printed output into a real pass/fail: `ok` prints `ok `/`FAIL ` and
 sets `process.exitCode = 1` on a miss, `done()` prints the final tally.
 `feed-idle.mjs`, `chart-nav.mjs`, `rank-cross.mjs`, the four `tf-*.mjs`
 harnesses (`tf-market`, `tf-quotes`, `tf-feed`, `tf-pnl`), `tabs.mjs`,
-`chart-view.mjs`, `fit-rows.mjs`, `crypto-feed.mjs`, `crypto-sort.mjs` and
-`market-select.mjs` use it - they are the harnesses this exits non-zero on a
+`chart-view.mjs`, `fit-rows.mjs`, `feed-errors.mjs`, `crypto-feed.mjs`,
+`crypto-sort.mjs` and `market-select.mjs` use it - they are the harnesses this exits non-zero on a
 real regression, alongside `pytest` for the fetcher's own pure functions.
 `board-harness.mjs`, `frames.mjs`, `file-bars.mjs` and the rest still just
 print for a human to read; `run-checks.sh` below runs `file-bars.mjs` too but
@@ -72,6 +72,7 @@ copy theirs if you add a new harness.
 | `chart-view.mjs` | the chart view (#12): 16 rows by default, `chartRows` config and the `maxRows − 2` clamp (the harness passes `maxRows` as the AbovePrompt props, which the stubs other than `fit-rows.mjs` leave `{}`), y labels unique and strictly decreasing with the 昨結 dotted line + label and the filled last-price tag (a 2-point range at 0 decimals pins the rounded-duplicate case), x labels from bar timestamps (no 15:00/05:00 for 19:40–23:00 bars; first/last/round ticks; 60 分 bars across two sessions draw the boundary rules), stride 2 → 1 at 120 bars, volume rows at 16 and none at 8, `1分 5分 15分 60分` switching bars + label, `曲線` braille + shade remembered per market, the title readout, a row without `barsBy` and a stock row with old `[o, h, l, c]` bars (session axis, no timeframe buttons), and the control row unchanged with no bars **(asserts)**. Writes both quotes files itself (six-element bars + `barsBy` into the tf runtime dir, four-element into the tw project) | `node chart-view.mjs $OUT/register.js $OUT/board.js <tf-proj> <tw-proj>` |
 | `fit-rows.mjs` | the band fitting itself to the host (#13): with `maxRows` 20/9/7/5/4/3 the tree (button row + Client) fits in every view - the table's quote rows shrink 5 → 3, the 5/4-row compact layout puts the titles on the rule and the clock + source tag in the button row, 3 rows is the one-line ticker (`趨勢圖` gone, `翻頁` kept) that rotates on `pageMs` with `was.code` on every cell; 損益 pages by its reduced rows and falls to the ticker under 4, the chart keeps its 8-row floor and falls to the ticker under it; `columns: "auto"` picks 4/3/2/1 columns at `bodyColumns` 190/130/100/74 (76 → 1, 77 → 2) with 20 symbols, an explicit `columns: 2` still forces 2, a 3-symbol list stays single-column at 190; and a stub host with no `maxRows` keeps today's 8-row two-column board **(asserts)**. Passes `maxRows`/`bodyColumns` as the AbovePrompt props and no viewport, so `bodyColumns` has to be what sizes the band | `node fit-rows.mjs $OUT/register.js $OUT/board.js <proj>` |
 | `tabs.mjs` | the market tab row (#9): three tabs without futures/US holdings, five with a futures list + tf positions, six with US holdings too (keys `stock-band:tab:<market>[:pnl]`, plain, the selected one `[label]` and the rest dim); does each tab land on its own market + view in one press, does the mark move with it, does the tab row stay in chart view and a tab leave the chart; a 130→60 column sweep showing sessionNote → taipeiNote → badge give way before any tab **(asserts)** | `node tabs.mjs $OUT/register.js <holdings-proj> <plain-proj>` |
+| `feed-errors.mjs` | does a failing host stay contained: a thrown Yahoo request backs Yahoo off (no retry inside it, doubling after), a thrown `twSources` route falls through to the next one in the same tick, a Yahoo back-off leaves 證交所 feeding, and a request that never settles stops holding the feed after `IN_FLIGHT_STUCK_MS`, and its late answer never replaces a newer snapshot **(asserts, no fixture directory, no network)** | `node feed-errors.mjs $OUT/register.js` |
 | `crypto-feed.mjs` | does Pionex's ticker endpoint get parsed right: `result:false` treated as failure (never a price), a 429 holding off for the cooldown with no retry inside it, and a ten-coin watchlist costing one request a tick **(asserts, no fixture directory needed - builds its own stub config in-process)** | `node crypto-feed.mjs $OUT/register.js` |
 | `crypto-sort.mjs` | the `'volume'`/`'marketcap'` sort keys: `'volume'` ranks by Pionex's `amount` (USDT turnover), never the coin-count `volume` field; `'marketcap'` ranks by CoinGecko's cached circulating supply x live price, with a rank flip that proves it is not just amount in disguise; a CoinGecko failure still publishes quotes live and falls back to volume, logged once; crypto defaults to `'marketcap'`, tw/us still default to `'change'`, and `'marketcap'`/`'volume'` picked on tw falls back to `'change'` rather than drawing unsorted **(asserts, no fixture directory needed - builds its own stub config in-process)** | `node crypto-sort.mjs $OUT/register.js` |
 | `market-select.mjs` | the market control itself: terminal draws a `Select` (five options now - 台股/台股庫存/美股/美股庫存/加密貨幣, the holdings/pnl stop folds into the same dropdown instead of a separate Button, value packs market+view together) rather than the old cycle `Button`; picking crypto switches the board AND fires its fetch immediately, not on the next tick; a resolved table with no `Select` falls back to the cycle `Button` and it still cycles; no independent holdings Button exists anywhere, on any market **(asserts, no fixture directory needed - builds its own stub config in-process)** | `node market-select.mjs $OUT/register.js` |
@@ -138,7 +139,7 @@ your real project or `~/.claude`); runs `feed-idle.mjs` → `chart-nav.mjs` →
 `rank-cross.mjs` → `file-bars.mjs` → `tf-market.mjs` → `tf-quotes.mjs` →
 `tf-feed.mjs` → `tf-pnl.mjs` → `tabs.mjs` → `chart-view.mjs` → `fit-rows.mjs`
 → `pytest` (`scripts/tests`, via `~/.claude/stock-band-venv/bin/python` when
-present, else `python3`) → `crypto-feed.mjs` → `crypto-sort.mjs` →
+present, else `python3`) → `feed-errors.mjs` → `crypto-feed.mjs` → `crypto-sort.mjs` →
 `market-select.mjs` → `check-engine-rules.sh` → `check-personal.sh` in that
 order, and prints a `PASS`/`FAIL` line per check. Exits non-zero if any of
 them did.
@@ -147,9 +148,17 @@ Every check here is expected to `PASS` - PR-a above was the one standing
 exception and is now fixed. `feed-idle` and `file-bars` hit the real Yahoo
 endpoint (see "The clock is yours to drive" above), so a `FAIL` on either one
 there is worth checking against the network before assuming it's a real
-regression. `crypto-feed`, `crypto-sort` and `market-select` hit no network
-at all (their own `$.http.fetch` stub answers canned responses), so a `FAIL`
+regression. `feed-errors`, `crypto-feed`, `crypto-sort` and `market-select`
+hit no network at all (their own `$.http.fetch` stub answers canned responses), so a `FAIL`
 in any one of them is never a network fluke.
+
+`SKIP_NETWORK=1 bash run-checks.sh` prints `SKIP` for `feed-idle` and
+`file-bars` instead of running them - what CI does
+(`.github/workflows/tw-stock-mod.yml`, on every push or PR touching this mod),
+since a runner's IP gets 429'd by Yahoo often enough that a red there would
+say nothing about the change. CI installs `pytest` and `ripgrep`;
+`check-engine-rules.sh` fails outright without `rg` rather than reporting
+clean on a check it never ran.
 
 ## The stub host cannot answer everything
 

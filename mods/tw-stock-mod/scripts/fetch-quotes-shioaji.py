@@ -48,11 +48,14 @@ Three ways to run it:
         a pre-T4 band wrote - still reads as both markets, for one release.
         Once FILE is missing or its `ts` is more than 90s old, this process
         exits by itself - the band closed, or stopped wanting either market,
-        and nothing is watching anymore.
+        and nothing is watching anymore. It also exits (1) once every
+        snapshot has raised for GIVE_UP_AFTER_S (60 s) - a dead session - so
+        the band's respawn logs in again.
       - `--pidfile FILE`: if FILE already holds another live process's pid,
         this run exits at once (0) rather than double-fetching for the same
-        project; otherwise it writes its own pid there and removes it on the
-        way out. Two Claude Code sessions on the same project then share one
+        project; otherwise it writes its own pid there and removes it on
+        every way out (a failed login included), unless a successor has
+        already claimed it. Two Claude Code sessions on the same project then share one
         fetcher instead of racing two logins.
 
 What you need:
@@ -67,10 +70,12 @@ What you need:
 from __future__ import annotations  # defers `X | None` annotations so --check's own probe of "is this Python new enough" can run first, even on Python 3.9
 
 import argparse
+import atexit
 import json
 import math
 import os
 import queue
+import re
 import signal
 import sys
 import time
@@ -80,6 +85,10 @@ from typing import NamedTuple
 
 HEARTBEAT_MAX_AGE_MS = 90_000
 HEARTBEAT_MARKETS = frozenset({"tw", "tf"})  # the markets a heartbeat can ask this fetcher to work
+# How long every snapshot may keep failing before the fetcher gives up and
+# exits for a fresh login - well inside the band's own 120 s staleness window,
+# so the band's respawn finds the pidfile free. See failed_ticks_limit().
+GIVE_UP_AFTER_S = 60
 
 # 發行量加權股價指數 / 櫃買指數. Latin names because the board flaps one
 # character at a time and a Chinese character has no drum to riffle through.
@@ -101,17 +110,18 @@ RUNTIME_DIR_ROOT = ".claude/stock-band"
 def runtime_dir(home: str, project: str) -> Path:
     """
     Same rule as hooks/register.tsx's runtimeDir(): RUNTIME_DIR_ROOT plus the
-    project path with its leading "/" dropped and every remaining "/" turned
-    into "-" (e.g. `/Users/x/app` -> `Users-x-app`). `project` must already
+    project path with its leading separators dropped and every remaining
+    `/`, `\\` or `:` turned into "-" (`/Users/x/app` -> `Users-x-app`,
+    `D:\\app` -> `D--app`, the same as fetch-quotes-capital.py). `project` must already
     be the same normalized absolute string register.tsx would compute (see
     main()'s use of this) - a symlink-resolved or otherwise reshaped string
     here would land manual runs and the band in two different directories.
-    `home` falls back to the project's own `.claude/` only when $HOME is
-    unset, matching the TS side.
+    `home` falls back to the project's own `.claude/` only when neither
+    HOME nor USERPROFILE is set, matching the TS side.
     """
     if not home:
         return Path(project) / ".claude"
-    slug = project.lstrip("/").replace("/", "-")
+    slug = re.sub(r"[/\\:]", "-", project.lstrip("/\\"))
     return Path(home) / RUNTIME_DIR_ROOT / slug
 
 
@@ -859,6 +869,25 @@ def claim_pidfile(pidfile: Path) -> bool:
     return True
 
 
+def failed_ticks_limit(interval: float) -> int:
+    """How many failed ticks in a row mean the session is dead: GIVE_UP_AFTER_S
+    worth at whatever --interval this run uses, never less than one tick. A
+    fixed tick count gave up after 3 minutes at interval 30 (past the band's
+    120 s staleness, so its respawns all bounced off our pidfile) and after
+    6 s at interval 1 (a blip forcing a full re-login)."""
+    return max(1, math.ceil(GIVE_UP_AFTER_S / interval)) if interval > 0 else 1
+
+
+def release_pidfile(pidfile: Path) -> None:
+    """Unlink the pidfile only while it still names this process: a successor
+    that already claimed it (after this one was judged dead) keeps its claim."""
+    try:
+        if pidfile.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            pidfile.unlink()
+    except (OSError, ValueError):
+        pass
+
+
 def parse_heartbeat(text: str, now_ms: float) -> tuple[bool, frozenset[str]]:
     """(stale, markets the band wants worked). A bare ms number (pre-T4
     band) reads as every market for one release; anything else unparseable
@@ -898,7 +927,10 @@ def write_atomic(path: Path, payload: dict) -> None:
     to demo prices.
     """
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    # compact: futures-quotes.json carries every K bar and is rewritten up to
+    # once a second, and indent=1 put each bar number on its own line (~40%
+    # of the bytes). `python -m json.tool FILE` reads it back for a human.
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     tmp.replace(path)
 
 
@@ -1029,7 +1061,8 @@ def main() -> None:
     # normalizes "." / ".." / a trailing slash, same as Node's path.resolve.
     project_str = os.path.abspath(os.path.expanduser(args.project))
     project = Path(project_str)
-    home = os.environ.get("HOME", "")
+    # Windows sets USERPROFILE, not HOME - the band's own fallback order
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
 
     # --env not given: read the same shioaji.env the band itself would spawn
     # this script with (user-level file, then project file - project wins),
@@ -1076,6 +1109,32 @@ def main() -> None:
         return
     heartbeat_path = Path(args.heartbeat).expanduser().resolve() if args.heartbeat else None
 
+    # From here on every way out - a sys.exit below, a failed login, an
+    # unresolvable contract - logs out and gives the pidfile back. The loop's
+    # own `finally` covers the normal path; atexit covers everything before
+    # it, which used to leave the pidfile behind and the session logged in.
+    api = None
+
+    def cleanup() -> None:
+        nonlocal api
+        if api is not None:
+            try:
+                api.logout()
+            except Exception:  # noqa: BLE001 - logout failing on the way out changes nothing
+                pass
+            api = None
+            print("永豐 已登出", file=sys.stderr)
+        if pidfile:
+            release_pidfile(pidfile)
+
+    atexit.register(cleanup)
+
+    # SIGTERM exits through atexit's cleanup even during the (slow) login,
+    # where the default handler would kill the process with the pidfile still
+    # in place. SIGINT keeps raising KeyboardInterrupt until the loop starts,
+    # so a hand-run Ctrl-C still aborts a hung login at once.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+
     if args.codes:
         watchlist = [{"code": c.strip(), "name": c.strip()} for c in args.codes.split(",") if c.strip()]
     else:
@@ -1095,12 +1154,6 @@ def main() -> None:
         secret_key=os.environ["SINOBON_SECRET_KEY"],
         subscribe_trade=False,  # quotes only: this script never places an order
     )
-
-    def stop(*_):
-        nonlocal running
-        running = False
-
-    running = True
 
     # Ticks arrive on an SDK thread: the callbacks only queue a plain tuple,
     # the main loop applies them every 0.2 s of its sleep (drain_ticks).
@@ -1201,10 +1254,19 @@ def main() -> None:
     for code in futures_codes:
         ensure_futures_contract(code)
 
+    # the loop stops at its next check instead: a tick is never cut off
+    # halfway through writing its files
+    def stop(*_):
+        nonlocal running
+        running = False
+
+    running = True
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
     first_tick = True
+    failed_ticks = 0  # consecutive ticks where every snapshot attempted raised
+    give_up_at = failed_ticks_limit(args.interval)
     last_futures_positions: list = []  # kept across ticks the same way `positions` is - see below
     try:
         while running:
@@ -1254,6 +1316,7 @@ def main() -> None:
             if subscribed:
                 print(format_tick_stats(tick_stats), file=sys.stderr)
             tick_stats = new_tick_stats()
+            attempted = failed = 0
 
             if work_tw:
                 try:
@@ -1267,11 +1330,13 @@ def main() -> None:
                         if code not in watchlist_codes and not any(s["code"] == code for s in symbols):
                             symbols.append({"code": code, "name": code})
 
+                attempted += 1
                 try:
                     payload = build_payload(api, contracts, index_contracts, watchlist_names)
                 except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
                     print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                     payload = None
+                    failed += 1
                 if payload:
                     write_atomic(out_path, tw_overlay.absorb(payload, int(time.time() * 1000)))
                     rows = len(payload["quotes"])
@@ -1293,6 +1358,7 @@ def main() -> None:
                     print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
 
             if work_tf:
+                attempted += 1
                 try:
                     futures_rows = fetch_futures_rows(
                         api, futures_contracts, tick_futures_codes, date.today().isoformat(), kbars_cache=futures_kbars_cache
@@ -1300,6 +1366,7 @@ def main() -> None:
                 except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
                     print(f"期貨快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                     futures_rows = {}
+                    failed += 1
                 futures_payload = build_futures_payload(futures_rows)
                 if futures_payload:
                     write_atomic(futures_out_path, tf_overlay.absorb(futures_payload, int(time.time() * 1000)))
@@ -1330,6 +1397,16 @@ def main() -> None:
                 if futures_holdings_payload:
                     write_atomic(futures_holdings_path, futures_holdings_payload)
                     print(f"{len(futures_holdings_payload['holdings'])} 檔期貨庫存 -> {futures_holdings_path}", file=sys.stderr)
+
+            # A session that died (token expired, connection dropped for good)
+            # fails every snapshot while the heartbeat keeps this process -
+            # and its pidfile - alive, so the band never respawns it and the
+            # files just go stale. Give up instead: exiting frees the pidfile,
+            # and the band's next tick respawns a fresh login.
+            failed_ticks = failed_ticks + 1 if attempted and failed == attempted else 0
+            if failed_ticks >= give_up_at:
+                print(f"連續 {failed_ticks} 輪快照全部失敗，結束讓 band 重新登入", file=sys.stderr)
+                sys.exit(1)
 
             # Ticks follow the worked set: subscribe what this tick served,
             # unsubscribe what it no longer does, and only keep an overlay
@@ -1366,16 +1443,7 @@ def main() -> None:
                 drain_ticks(tick_queue, overlays, code_maps, futures_kbars_cache, tick_stats)
                 flush_overlays(overlays, int(time.time() * 1000), tick_stats)
     finally:
-        try:
-            api.logout()
-        except Exception:  # noqa: BLE001 - logout failing on the way out changes nothing
-            pass
-        if pidfile:
-            try:
-                pidfile.unlink(missing_ok=True)
-            except OSError:
-                pass
-        print("永豐 已登出", file=sys.stderr)
+        cleanup()
 
 
 if __name__ == "__main__":

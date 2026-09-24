@@ -182,6 +182,13 @@ type State = {
    * costs two repaints a second to draw a character that did not change.
    */
   blinks: boolean
+  /**
+   * whether the footer's index card has more than one index to flip through.
+   * With one (tf, or a crypto config with no indices) the card never moves,
+   * and counting its slot/flap into the frame id repainted every row ~20
+   * times a second through each 1.45 s flip for no visible change.
+   */
+  flipsIndex: boolean
 }
 
 // --- colors (prototype/stock-band-demo.py) ---------------------------------
@@ -489,7 +496,8 @@ function secondsToFeed(t: number, nextFeedAt: number): number {
 function frameId(t: number, st: State): string {
   const a = animState(t)
   const blink = st.blinks ? a.blink % 2 : 0
-  return `${a.slot}:${a.flap}:${blink}:${rowFlap(t, st.since, st.flipMs)}:${secondsToFeed(t, st.nextFeedAt)}`
+  const card = st.flipsIndex ? `${a.slot}:${a.flap}` : '-'
+  return `${card}:${blink}:${rowFlap(t, st.since, st.flipMs)}:${secondsToFeed(t, st.nextFeedAt)}`
 }
 
 /** the same id with every animation stilled: only the countdown moves it */
@@ -576,15 +584,22 @@ type Cell = { ch: string; fg?: string; bg?: string }
 // --- a row of the band: cells with independent fg/bg, column-addressed -----
 class Row {
   cells: Cell[] = []
+  // display width so far, kept as cells go in: summing every cell on each
+  // width() call made padTo/put quadratic on the 50ms animation frame
+  private w = 0
+  private add(c: Cell) {
+    this.cells.push(c)
+    this.w += charWidth(c.ch)
+  }
   width(): number {
-    return this.cells.reduce((w, c) => w + charWidth(c.ch), 0)
+    return this.w
   }
   padTo(col: number) {
-    while (this.width() < col) this.cells.push({ ch: ' ' })
+    while (this.w < col) this.add({ ch: ' ' })
   }
   put(col: number, text: string, fg?: string, bg?: string) {
     this.padTo(Math.max(0, col))
-    for (const ch of Array.from(text)) this.cells.push({ ch, fg, bg })
+    for (const ch of Array.from(text)) this.add({ ch, fg, bg })
   }
   putRight(right: number, text: string, fg?: string, bg?: string) {
     this.put(right - dispWidth(text), text, fg, bg)
@@ -597,7 +612,7 @@ class Row {
   }
   putCells(col: number, cells: Cell[]) {
     this.padTo(Math.max(0, col))
-    for (const c of cells) this.cells.push(c)
+    for (const c of cells) this.add(c)
   }
   // paint the whole line's background (the selected row in the reference
   // screenshot); cells that carry their own bg - the logo badges - keep it
@@ -1231,6 +1246,8 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
   const still = props.animation === 'off'
   // the dot only pulses on demo prices; on real ones it steps per snapshot
   const blinks = props.phase === 'open' && props.source === 'demo'
+  // the footer's card flips only across two or more indices (see the footer below)
+  const flipsIndex = props.indices.length > 1
 
   // The animation is driven off the wall clock, not off a tick count, so a
   // late timer callback cannot drift the flip. The timer only asks for a
@@ -1246,6 +1263,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
       flipMs: FLIP_MS,
       nextFeedAt: props.nextFeedAt,
       blinks,
+      flipsIndex,
     }
     surface.setState({ ...seed, frame: still ? stillFrameId(Date.now(), seed) : frameId(Date.now(), seed) })
   }
@@ -1289,10 +1307,11 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
       flipMs: isPageTurn ? PAGE_FLIP_MS : FLIP_MS,
       nextFeedAt: props.nextFeedAt,
       blinks,
+      flipsIndex,
     }
     surface.setState(turning)
-  } else if (st && (props.nextFeedAt !== st.nextFeedAt || blinks !== st.blinks)) {
-    turning = { ...st, nextFeedAt: props.nextFeedAt, blinks }
+  } else if (st && (props.nextFeedAt !== st.nextFeedAt || blinks !== st.blinks || flipsIndex !== st.flipsIndex)) {
+    turning = { ...st, nextFeedAt: props.nextFeedAt, blinks, flipsIndex }
     surface.setState(turning)
   }
   const anim = still ? { slot: 0, flap: RESTING, blink: 0 } : animState(Date.now())
@@ -1823,7 +1842,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
 
   // an empty <Text> collapses to zero height, so blank rows hold a
   // non-breaking space to keep their line
-  for (const r of rows) if (r.cells.length === 0) r.cells.push({ ch: '\u00a0' })
+  for (const r of rows) if (r.cells.length === 0) r.put(0, '\u00a0')
   return (
     <Box flexDirection="column">
       {rows.map(r => (

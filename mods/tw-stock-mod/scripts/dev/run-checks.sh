@@ -3,8 +3,8 @@
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
 # file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view /
-# fit-rows / pytest / crypto-feed / crypto-sort / market-select against them
-# (crypto-feed, crypto-sort and market-select build their own stub config
+# fit-rows / pytest / feed-errors / crypto-feed / crypto-sort / market-select
+# against them (feed-errors, crypto-feed, crypto-sort and market-select build their own stub config
 # in-process instead, so they need no fixture directory) plus
 # check-engine-rules.sh and check-personal.sh, and prints a PASS/FAIL line
 # per check. Exits non-zero if any of them did.
@@ -291,10 +291,16 @@ run_check() {
 # pytest.ini/conftest), but the documented invocation is run from here.
 run_pytest() { (cd "$MOD_DIR" && "$PYTHON" -m pytest scripts/tests -q); }
 
-run_check "feed-idle"      node "$SCRIPT_DIR/feed-idle.mjs"   "$OUT/register.js" "$FIXTURES/feed-idle"
+# SKIP_NETWORK=1 (CI) leaves out the two checks that hit the real Yahoo
+# endpoint: a runner's IP gets 429'd or blocked often enough that a red
+# there says nothing about this repo.
+skip_check() { echo; echo "== $1 =="; echo "skipped (SKIP_NETWORK=1)"; results+=("SKIP  $1"); }
+net_check() { if [[ "${SKIP_NETWORK:-0}" == 1 ]]; then skip_check "$1"; else run_check "$@"; fi; }
+
+net_check "feed-idle"      node "$SCRIPT_DIR/feed-idle.mjs"   "$OUT/register.js" "$FIXTURES/feed-idle"
 run_check "chart-nav"      node "$SCRIPT_DIR/chart-nav.mjs"   "$OUT/register.js" "$FIXTURES/chart-nav"
 run_check "rank-cross"     node "$SCRIPT_DIR/rank-cross.mjs"  "$OUT/board.js" "$OUT/register.js" "$FIXTURES/rank-cross"
-run_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/file-bars"
+net_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/file-bars"
 run_check "tf-market"      node "$SCRIPT_DIR/tf-market.mjs"   "$OUT/register.js" "$FIXTURES/tf-market" "$FIXTURES/tf-plain"
 run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-quotes" "$FIXTURES/tf-override"
 run_check "tf-feed"        node "$SCRIPT_DIR/tf-feed.mjs"     "$OUT/register.js" "$FIXTURES/tf-feed"
@@ -303,6 +309,7 @@ run_check "tabs"           node "$SCRIPT_DIR/tabs.mjs"        "$OUT/register.js"
 run_check "chart-view"     node "$SCRIPT_DIR/chart-view.mjs"  "$OUT/register.js" "$OUT/board.js" "$FIXTURES/chart-view" "$FIXTURES/chart-view-tw"
 run_check "fit-rows"       node "$SCRIPT_DIR/fit-rows.mjs"    "$OUT/register.js" "$OUT/board.js" "$FIXTURES/fit-rows"
 run_check "pytest"         run_pytest
+run_check "feed-errors"    node "$SCRIPT_DIR/feed-errors.mjs" "$OUT/register.js"
 run_check "crypto-feed"    node "$SCRIPT_DIR/crypto-feed.mjs" "$OUT/register.js"
 run_check "crypto-sort"    node "$SCRIPT_DIR/crypto-sort.mjs" "$OUT/register.js"
 run_check "market-select"  node "$SCRIPT_DIR/market-select.mjs" "$OUT/register.js"

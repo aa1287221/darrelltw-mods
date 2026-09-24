@@ -14,6 +14,13 @@ order = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = order
 spec.loader.exec_module(order)
 
+# These build real sj order/Account objects, so they need the SDK itself. A
+# machine without it skips them instead of reporting 13 failures that say
+# nothing about order-shioaji.py's own logic.
+needs_shioaji = pytest.mark.skipif(
+    importlib.util.find_spec("shioaji") is None, reason="shioaji SDK not installed"
+)
+
 
 @pytest.fixture(autouse=True)
 def _chdir_tmp(tmp_path, monkeypatch):
@@ -50,6 +57,7 @@ def make_accounts():
 # build_order: intent -> (real sj order object, printable confirmation dict)
 # ---------------------------------------------------------------------------
 
+@needs_shioaji
 def test_build_order_stock_buy_common_lot():
     import shioaji as sj
 
@@ -70,6 +78,7 @@ def test_build_order_stock_buy_common_lot():
     assert confirmation["side"] == "買進"
 
 
+@needs_shioaji
 def test_build_order_stock_sell_odd_lot_selects_odd_and_share_unit():
     import shioaji as sj
 
@@ -84,6 +93,7 @@ def test_build_order_stock_sell_odd_lot_selects_odd_and_share_unit():
     assert confirmation["side"] == "賣出"
 
 
+@needs_shioaji
 @pytest.mark.parametrize("octype,expected", [("auto", "Auto"), ("new", "New"), ("cover", "Cover")])
 def test_build_order_futures_octype_maps_to_sdk_enum(octype, expected):
     import shioaji as sj
@@ -99,6 +109,7 @@ def test_build_order_futures_octype_maps_to_sdk_enum(octype, expected):
     assert confirmation["unit"] == "口"
 
 
+@needs_shioaji
 def test_build_order_futures_alias_shows_resolved_month():
     accounts = make_accounts()
     intent = {"code": "TXFR1", "side": "buy", "price": 17000.0, "qty": 1, "kind": "futures", "lot": "common", "octype": "auto"}
@@ -109,6 +120,7 @@ def test_build_order_futures_alias_shows_resolved_month():
     assert confirmation["resolved_code"] == "TXFJ6"
 
 
+@needs_shioaji
 def test_build_order_stock_has_no_resolved_code():
     accounts = make_accounts()
     intent = {"code": "2330", "side": "buy", "price": 1188.0, "qty": 1, "kind": "stock", "lot": "common", "octype": "auto"}
@@ -291,6 +303,7 @@ def make_trade(order_id, code, action, price, qty, status, deal_qty):
     )
 
 
+@needs_shioaji
 def test_find_trade_by_id_matches():
     import shioaji as sj
 
@@ -306,6 +319,7 @@ def test_find_trade_by_id_missing_returns_none():
     assert order.find_trade_by_id([], "nope") is None
 
 
+@needs_shioaji
 def test_format_trade_line_stock_buy_filled():
     import shioaji as sj
 
@@ -316,6 +330,7 @@ def test_format_trade_line_stock_buy_filled():
     assert "已成 1" in line
 
 
+@needs_shioaji
 def test_format_trade_line_futures_sell_submitted():
     import shioaji as sj
 
@@ -350,6 +365,7 @@ def test_format_status_lines_empty_says_no_orders():
     assert order.format_status_lines([], "sim") == ["沒有委託（模擬）"]
 
 
+@needs_shioaji
 def test_format_status_lines_lists_each_trade():
     import shioaji as sj
 
@@ -358,6 +374,7 @@ def test_format_status_lines_lists_each_trade():
     assert len(lines) == 1 and "A1" in lines[0] and "Filled" in lines[0]
 
 
+@needs_shioaji
 def test_settle_after_cancel_returns_first_non_pending_snapshot():
     import shioaji as sj
 
@@ -373,6 +390,7 @@ def test_settle_after_cancel_returns_first_non_pending_snapshot():
     assert len(calls) == 2  # slept twice, then the third snapshot settled
 
 
+@needs_shioaji
 def test_settle_after_cancel_gives_up_after_tries_and_says_so():
     import shioaji as sj
 

@@ -120,6 +120,11 @@ const FEED_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'
 const FEED_MS_DEFAULT = 30_000
 const FEED_MS_MIN = 15_000 // a floor, so a bad config cannot get the host banned
 const FEED_BACKOFF_MAX_MS = 300_000
+// $.http.fetch takes no timeout and the hooks module has no timer to race it
+// against, so a request that never settles would hold feed()/feedBars()'s
+// in-flight latch for the rest of the session. Past this age the latch is
+// treated as abandoned and the next tick goes ahead anyway.
+const IN_FLIGHT_STUCK_MS = 120_000
 const BARS_MAX_AGE_MS = 120_000 // a 5-minute bar refetched sooner than this says nothing new
 const BARS_STALE_MS = 900_000 // past this a bar set is dropped rather than drawn
 const US_INDEX_SYMBOL = '^IXIC' // NASDAQ Composite, what MARKETS.us calls its index
@@ -1520,8 +1525,31 @@ function parseBarsBy(value: unknown): Partial<Record<Timeframe, Bar[]>> | undefi
 // `market: "tf"`, plus multiplier/decimals/resolved per quote); see
 // stock-band.example.json for the shape. Anything stale or malformed is
 // ignored and the band falls back to demo prices (no-data rows for tf).
-function parseQuotes(text: string | undefined, now: number): QuotesFile | undefined {
+// The poll re-reads every quotes file each refreshMs, and a file that has
+// not been rewritten since returns the same text - re-parsing it (a futures
+// file carries every K bar) is work for nothing. One entry per file slot, the
+// last text it read and what that parsed to: a rewritten file parses fresh,
+// an unchanged one is a string compare. The result is never mutated
+// downstream (buildProps copies rows out of it), so sharing it is safe.
+type QuotesSlot = 'runtime' | 'project' | 'futures'
+const quotesParseCache: Partial<Record<QuotesSlot, { text: string; file: QuotesFile | undefined }>> = {}
+
+function parseQuotes(text: string | undefined, now: number, slot?: QuotesSlot): QuotesFile | undefined {
   if (!text) return undefined
+  let file: QuotesFile | undefined
+  const hit = slot ? quotesParseCache[slot] : undefined
+  if (hit && hit.text === text) {
+    file = hit.file
+  } else {
+    file = parseQuotesUncached(text)
+    if (slot) quotesParseCache[slot] = { text, file }
+  }
+  // staleness is the one part that depends on `now`, so it stays outside the cache
+  if (!file || now - file.asOf > QUOTE_STALE_MS) return undefined
+  return file
+}
+
+function parseQuotesUncached(text: string): QuotesFile | undefined {
   let root: Record<string, unknown> | undefined
   try {
     root = asRecord(JSON.parse(text) as unknown)
@@ -1530,7 +1558,7 @@ function parseQuotes(text: string | undefined, now: number): QuotesFile | undefi
   }
   if (!root) return undefined
   const asOf = num(root.asOf, 0)
-  if (!asOf || now - asOf > QUOTE_STALE_MS) return undefined
+  if (!asOf) return undefined
   const quotesRaw = asRecord(root.quotes)
   if (!quotesRaw) return undefined
   const quotes: Record<string, FileQuote> = {}
@@ -2436,9 +2464,16 @@ function noteFileSnapshots(): void {
 }
 // keyed `<market>:<code>`, since a Taiwan code and a US ticker share a namespace
 let liveBars: Record<string, { bars: Bar[]; at: number }> = {}
-let feedSkipUntil = 0 // set by a 429 or a network error, doubling each time
-let feedFailures = 0
-// Crypto's own cooldown, separate from feedSkipUntil/feedFailures above:
+// One exponential back-off per HTTP host, set by a failed answer or a network
+// error and doubling each time. Per host, not shared: a Yahoo 429 must not
+// stop 證交所 (or the reverse), and neither may hold the broker fetchers'
+// respawn, which makes no HTTP request at all.
+type FeedHost = 'yahoo' | 'mis'
+const feedBackoff: Record<FeedHost, { skipUntil: number; failures: number }> = {
+  yahoo: { skipUntil: 0, failures: 0 },
+  mis: { skipUntil: 0, failures: 0 },
+}
+// Crypto's own cooldown, separate from feedBackoff above:
 // Pionex's 429 is a flat 60s block (see CRYPTO_COOLDOWN_MS), not something
 // that should share Yahoo's exponential-doubling curve, and a Pionex outage
 // must not stop tw/us from fetching (or the reverse) since they are
@@ -2459,14 +2494,17 @@ let cryptoSupplyWarned = false // this session's one-time "falling back to volum
 let cryptoUnmappedWarned = false // this session's one-time "no CoinGecko id for ..." log
 let feedSeq = 0 // one per snapshot the feed accepted; drives the board's live dot
 let nextFeedAt = 0 // when the next request is due; the board counts down to it
-let barsInFlight = false
+// when the K-bar request in flight started, 0 when none is - a time rather
+// than a flag so a request that never settles cannot latch it forever (see
+// IN_FLIGHT_STUCK_MS)
+let barsInFlightSince = 0
 // the render hook asks for the chart view's K bars; the feed owns the request
 let requestBars: ((market: MarketId, code: string) => void) | undefined
 // ...and asks for a whole tick when a tab lands on a market the
 // feed has no snapshot for, so a switch does not sit on 示範資料 until the
 // next scheduled tick comes round
 let requestFeed: (() => void) | undefined
-let feedInFlight = false
+let feedInFlightSince = 0 // same convention as barsInFlightSince
 let config: Config = defaultConfig()
 let modeOverride: MarketMode | undefined
 let snoozedUntil = 0
@@ -3080,13 +3118,13 @@ export const register: Register = on => {
         loggedDroppedFutures = true
         $.ui.log(`tw-stock-mod: futures 有 ${config.droppedFutures.length} 筆沒有 code，已略過：${config.droppedFutures.join(', ')}`)
       }
-      const runtimeQuotes = parseQuotes(runtimeQuotesText, now)
+      const runtimeQuotes = parseQuotes(runtimeQuotesText, now, 'runtime')
       runtimeQuotesFresh = runtimeQuotes !== undefined
       quotesFiles = {}
       // the stock file drives crypto too (a file naming no market drove every
       // market before the tf split), so a hand-written override reaches it
-      fillQuoteSlots(runtimeQuotes ?? parseQuotes(projectQuotesText, now), ['tw', 'us', 'crypto'])
-      const futuresQuotes = parseQuotes(futuresQuotesText, now)
+      fillQuoteSlots(runtimeQuotes ?? parseQuotes(projectQuotesText, now, 'project'), ['tw', 'us', 'crypto'])
+      const futuresQuotes = parseQuotes(futuresQuotesText, now, 'futures')
       futuresQuotesFresh = futuresQuotes !== undefined
       fillQuoteSlots(futuresQuotes, ['tf'])
       noteFileSnapshots()
@@ -3126,12 +3164,40 @@ export const register: Register = on => {
     // A failed request must never become a made-up price: the feed keeps the
     // last good snapshot, the snapshot goes stale after QUOTE_STALE_MS, and the
     // band then falls back to the demo walk with the footer saying so.
-    const backOff = (now: number, why: string) => {
-      feedFailures += 1
-      const wait = Math.min(config.feedMs * 2 ** feedFailures, FEED_BACKOFF_MAX_MS)
-      feedSkipUntil = now + wait
+    const backOff = (host: FeedHost, now: number, why: string) => {
+      const b = feedBackoff[host]
+      b.failures += 1
+      const wait = Math.min(config.feedMs * 2 ** b.failures, FEED_BACKOFF_MAX_MS)
+      // an abandoned tick (see IN_FLIGHT_STUCK_MS) can fail long after a
+      // newer one started - its old `now` must not pull the back-off earlier
+      b.skipUntil = Math.max(b.skipUntil, now + wait)
       $.ui.log(`tw-stock-mod: feed ${why}, next try in ${Math.round(wait / 1000)}s`)
     }
+    const backedOff = (host: FeedHost, now: number) => now < feedBackoff[host].skipUntil
+    const recovered = (host: FeedHost) => {
+      feedBackoff[host].failures = 0
+    }
+
+    /**
+     * $.http.fetch, except a thrown request (DNS, refused connection, reset)
+     * comes back as an Error instead of unwinding the whole tick - a throw
+     * used to skip every market after the failing one and the next
+     * `twSources` entry, and to leave the host un-backed-off. The caller logs
+     * it, once, alongside what it does about it.
+     */
+    const safeFetch = async (
+      url: string,
+      init?: { headers?: Record<string, string> },
+    ): Promise<Awaited<ReturnType<typeof $.http.fetch>> | Error> => {
+      try {
+        return await $.http.fetch(url, init)
+      } catch (err) {
+        return err instanceof Error ? err : new Error(String(err))
+      }
+    }
+    /** the `why` a failed safeFetch answer gets in the back-off log line */
+    const failure = (res: Awaited<ReturnType<typeof $.http.fetch>> | Error, what: string) =>
+      res instanceof Error ? `network error${what}: ${res.message}` : `HTTP ${res.status}${what}`
 
     /**
      * Hand one market's parsed snapshot to the board. Everything above this
@@ -3153,6 +3219,10 @@ export const register: Register = on => {
       sourceLabel: string
       barLabel: string
     }): void => {
+      // An abandoned tick (see IN_FLIGHT_STUCK_MS) that finally answers must
+      // not replace what a newer tick already published with older prices.
+      const have = liveBy[opts.market]
+      if (have && have.file.asOf > opts.now) return
       const quotes: Record<string, FileQuote> = {}
       for (const sym of opts.list) {
         const q = opts.parsed[opts.keyOf(sym)]
@@ -3224,9 +3294,9 @@ export const register: Register = on => {
       let tradedAt = 0
       for (let i = 0; i < symbols.length; i += SPARK_BATCH) {
         const batch = symbols.slice(i, i + SPARK_BATCH)
-        const res = await $.http.fetch(sparkUrl(batch, now + i), { headers: FEED_HEADERS })
-        if (!res.ok) {
-          backOff(now, `HTTP ${res.status}${what}`)
+        const res = await safeFetch(sparkUrl(batch, now + i), { headers: FEED_HEADERS })
+        if (res instanceof Error || !res.ok) {
+          backOff('yahoo', now, failure(res, what))
           return undefined
         }
         const part = parseSpark(res.text)
@@ -3237,11 +3307,12 @@ export const register: Register = on => {
     }
 
     const feedUs = async (now: number) => {
+      if (backedOff('yahoo', now)) return
       const list = [...config.lists.us, ...holdingExtras('us', config.lists.us, config)]
       const symbols = [...list.map(t => t.code), ...US_INDICES.map(i => i.symbol)]
       const answer = await fetchSpark(symbols, now, '')
       if (!answer) return
-      feedFailures = 0
+      recovered('yahoo')
       publish({
         market: 'us',
         list,
@@ -3282,7 +3353,13 @@ export const register: Register = on => {
       }
       const list = [...config.lists.crypto, ...holdingExtras('crypto', config.lists.crypto, config)]
       if (list.length === 0) return
-      const res = await $.http.fetch(PIONEX_TICKERS_URL)
+      const res = await safeFetch(PIONEX_TICKERS_URL)
+      // a network error keeps the last snapshot like any other failure; no
+      // cooldown, the same as a non-429 HTTP error below
+      if (res instanceof Error) {
+        $.ui.log(`tw-stock-mod: crypto feed network error (${res.message}), keeping the last snapshot`)
+        return
+      }
       const tokensHeader = res.headers?.['x-ratelimit-tokens']
       if (tokensHeader !== undefined) {
         const tokens = parseFloat(tokensHeader)
@@ -3466,12 +3543,15 @@ export const register: Register = on => {
     // tick - the dispatcher below (feedTw) reads that to decide whether to
     // fall through to the next entry in `config.twSources`.
     const feedTwYahoo = async (now: number): Promise<boolean> => {
+      // backed off counts as "no snapshot this tick", so feedTw falls
+      // through to the next `twSources` entry instead of stopping here
+      if (backedOff('yahoo', now)) return false
       const list = [...config.lists.tw, ...holdingExtras('tw', config.lists.tw, config)]
       if (list.length === 0) return false
       const symbols = [...list.map(t => yahooSymbol('tw', t)), TW_YAHOO_INDEX]
       const answer = await fetchSpark(symbols, now, ' (台股)')
       if (!answer) return false
-      feedFailures = 0
+      recovered('yahoo')
       publish({
         market: 'tw',
         list,
@@ -3497,6 +3577,7 @@ export const register: Register = on => {
      * convention as feedTwYahoo.
      */
     const feedTwMis = async (now: number): Promise<boolean> => {
+      if (backedOff('mis', now)) return false
       const list = [...config.lists.tw, ...holdingExtras('tw', config.lists.tw, config)]
       if (list.length === 0) return false
       // the first entry is the one the market is read by, so an empty list
@@ -3504,17 +3585,17 @@ export const register: Register = on => {
       // never returns one
       const indices = config.twIndices
       const channels = [...list.map(misChannel), ...indices.map(misChannel)]
-      const res = await $.http.fetch(misUrl(channels, now), { headers: FEED_HEADERS })
-      if (!res.ok) {
-        backOff(now, `HTTP ${res.status} (證交所)`)
+      const res = await safeFetch(misUrl(channels, now), { headers: FEED_HEADERS })
+      if (res instanceof Error || !res.ok) {
+        backOff('mis', now, failure(res, ' (證交所)'))
         return false
       }
       const { quotes: parsed, tradedAt } = parseMis(res.text)
       if (Object.keys(parsed).length === 0) {
-        backOff(now, '證交所 answered nothing usable')
+        backOff('mis', now, '證交所 answered nothing usable')
         return false
       }
-      feedFailures = 0
+      recovered('mis')
       publish({
         market: 'tw',
         list,
@@ -3786,14 +3867,20 @@ export const register: Register = on => {
      */
     const feedTw = async (now: number) => {
       for (const source of config.twSources) {
-        const ok =
-          source === 'shioaji'
-            ? await feedTwShioaji(now)
-            : source === 'capital'
-              ? await feedTwCapital(now)
-              : source === 'mis'
-                ? await feedTwMis(now)
-                : await feedTwYahoo(now)
+        let ok = false
+        try {
+          ok =
+            source === 'shioaji'
+              ? await feedTwShioaji(now)
+              : source === 'capital'
+                ? await feedTwCapital(now)
+                : source === 'mis'
+                  ? await feedTwMis(now)
+                  : await feedTwYahoo(now)
+        } catch (err) {
+          // one broken route falls through to the next, like one that answered nothing
+          $.ui.log(`tw-stock-mod: 台股 ${source} failed: ${err}`)
+        }
         if (ok) return
       }
     }
@@ -3828,15 +3915,20 @@ export const register: Register = on => {
     const feed = async () => {
       const now = await $.clock.now()
       // Snoozed means the table is not on screen at all, so the 30 minutes it
-      // covers need no prices; feedInFlight keeps a slow answer from stacking
-      // a second request on top of it. A 429 back-off (feedSkipUntil) is
-      // feedOnce's: it holds the HTTP markets only, never the heartbeat.
-      if (config.feed === 'off' || now < snoozedUntil || feedInFlight) return
-      feedInFlight = true
+      // covers need no prices; feedInFlightSince keeps a slow answer from
+      // stacking a second request on top of it, until IN_FLIGHT_STUCK_MS
+      // says it is never coming. Back-off (feedBackoff) is per host, inside
+      // each feed: it holds that host's requests only, never the heartbeat.
+      if (config.feed === 'off' || now < snoozedUntil) return
+      if (feedInFlightSince && now - feedInFlightSince < IN_FLIGHT_STUCK_MS) return
+      if (feedInFlightSince) $.ui.log('tw-stock-mod: the last feed tick never settled; starting a new one')
+      const mine = now
+      feedInFlightSince = mine
       try {
         await feedOnce(now)
       } finally {
-        feedInFlight = false
+        // a stuck tick that finally settles must not clear its successor's latch
+        if (feedInFlightSince === mine) feedInFlightSince = 0
       }
     }
 
@@ -3847,19 +3939,24 @@ export const register: Register = on => {
       const wanted = markets.filter(m => m === 'tf' || (m === 'tw' && brokerTw))
       if (wanted.length > 0) await writeHeartbeat(now, wanted)
       for (const market of markets) {
-        if (market === 'tf') await feedTf(now)
-        else if (now < feedSkipUntil) continue
-        else if (market === 'us') await feedUs(now)
-        else if (market === 'crypto') {
-          // Pionex's own cooldown on top of the shared feedSkipUntil above
-          // (that one is Yahoo's) - a Pionex 429 must not also stop tw/us.
-          if (now < cryptoSkipUntil) continue
-          await feedCrypto(now)
-          // Independent of feedCrypto's own result (see fetchCryptoSupply's
-          // own comment) - its own TTL/cooldown make this a no-op on almost
-          // every tick, so riding the same cadence costs nothing extra.
-          await fetchCryptoSupply(now)
-        } else await feedTw(now)
+        // one market throwing must not skip the ones after it (a tw failure
+        // used to leave tf's fetcher un-respawned for that tick)
+        try {
+          if (market === 'tf') await feedTf(now)
+          else if (market === 'us') await feedUs(now)
+          else if (market === 'crypto') {
+            // Pionex's own flat cooldown, not feedBackoff's - a Pionex 429
+            // must not also stop tw/us, nor a Yahoo one crypto.
+            if (now < cryptoSkipUntil) continue
+            await feedCrypto(now)
+            // Independent of feedCrypto's own result (see fetchCryptoSupply's
+            // own comment) - its own TTL/cooldown make this a no-op on almost
+            // every tick, so riding the same cadence costs nothing extra.
+            await fetchCryptoSupply(now)
+          } else await feedTw(now)
+        } catch (err) {
+          $.ui.log(`tw-stock-mod: ${market} feed failed: ${err}`)
+        }
       }
     }
 
@@ -3876,22 +3973,24 @@ export const register: Register = on => {
       // for any other market whose live feed has not produced bars yet.
       if (market === 'crypto') return
       const now = await $.clock.now()
-      if (config.feed === 'off' || now < feedSkipUntil || barsInFlight) return
+      if (config.feed === 'off' || backedOff('yahoo', now)) return
+      if (barsInFlightSince && now - barsInFlightSince < IN_FLIGHT_STUCK_MS) return
       const key = `${market}:${code}`
       const have = liveBars[key]
       if (have && now - have.at < BARS_MAX_AGE_MS) return
       const sym = config.lists[market].find(t => t.code === code)
       if (!sym) return
-      barsInFlight = true
+      const mine = now
+      barsInFlightSince = mine
       try {
-        const res = await $.http.fetch(chartUrl(yahooSymbol(market, sym), now), { headers: FEED_HEADERS })
-        if (!res.ok) return backOff(now, `HTTP ${res.status} (${code} K 棒)`)
+        const res = await safeFetch(chartUrl(yahooSymbol(market, sym), now), { headers: FEED_HEADERS })
+        if (res instanceof Error || !res.ok) return backOff('yahoo', now, failure(res, ` (${code} K 棒)`))
         const bars = parseChartBars(res.text)
         if (!bars) return
         liveBars[key] = { bars, at: now }
         $.ui.invalidate('ui.render')
       } finally {
-        barsInFlight = false
+        if (barsInFlightSince === mine) barsInFlightSince = 0
       }
     }
 
@@ -3912,10 +4011,12 @@ export const register: Register = on => {
             `(budget ${REQUESTS_PER_HOUR}/hour)`,
         )
       }
-      await feed().catch(err => $.ui.log(`tw-stock-mod: feed failed: ${err}`))
+      // the timer goes in before the boot tick: a boot request that never
+      // settles would otherwise leave the session with no feed timer at all
       $.clock.every(every, () => {
         feed().catch(err => $.ui.log(`tw-stock-mod: feed failed: ${err}`))
       })
+      await feed().catch(err => $.ui.log(`tw-stock-mod: feed failed: ${err}`))
     }
 
     return r
