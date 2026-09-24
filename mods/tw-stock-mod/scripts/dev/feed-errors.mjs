@@ -8,9 +8,11 @@
 //       same tick instead of unwinding the whole tick
 //   (3) a Yahoo back-off does not hold 證交所 (per-host back-off)
 //   (4) a request that never settles does not latch the feed forever: past
-//       IN_FLIGHT_STUCK_MS the next tick goes ahead
+//       IN_FLIGHT_STUCK_MS its host is backed off like an error, and the
+//       first tick after the back-off goes ahead
 //   (5) ...and when that abandoned request finally answers, its older
 //       prices do not replace what the newer tick already published
+//   (6) ...nor does its late FAILURE back off a host that has answered since
 //
 // Usage: node feed-errors.mjs <register.js>
 import { pathToFileURL } from 'node:url'
@@ -24,6 +26,7 @@ globalThis.Fragment = 'Fragment'
 const TW_OPEN = Date.UTC(2026, 8, 22, 2, 0)
 const FEED_MS = 30_000
 const STUCK_MS = 120_000 // hooks/constants.ts's IN_FLIGHT_STUCK_MS
+const BACKOFF_MS = 60_000 // the first back-off: feedMs x 2
 
 const hostOf = u =>
   u.includes('finance.yahoo.com') ? 'yahoo' : u.includes('mis.twse.com.tw') ? 'mis' : u.includes('pionex') ? 'pionex' : 'other'
@@ -183,8 +186,11 @@ async function boot(twSources, answer) {
   await tick(FEED_MS)
   ok(count('yahoo') === 1, `(4) +30s: the hung request still holds the latch (got ${count('yahoo')})`)
   await tick(STUCK_MS)
-  ok(count('yahoo') === 2, `(4) past IN_FLIGHT_STUCK_MS the next tick goes ahead (got ${count('yahoo')})`)
+  ok(count('yahoo') === 1, `(4) past IN_FLIGHT_STUCK_MS the unanswered host is backed off, not retried at once (got ${count('yahoo')})`)
+  ok(logs.some(l => /no answer in 120s, next try in 60s/.test(l)), '(4) the hang is logged as a failure with a 60s back-off')
   ok(logs.some(l => /never settled/.test(l)), '(4) the abandoned tick is logged')
+  await tick(BACKOFF_MS)
+  ok(count('yahoo') === 2, `(4) once the back-off is over the next tick goes ahead (got ${count('yahoo')})`)
 }
 
 // --- (5) a late answer from the abandoned tick is dropped -------------------
@@ -200,7 +206,8 @@ async function boot(twSources, answer) {
       },
     })
   const { probe, tick, count } = await boot(['yahoo'], (host, n) => (n === 0 ? late : { status: 200, text: sparkAt(1200) }))
-  await tick(STUCK_MS + FEED_MS)
+  await tick(STUCK_MS + FEED_MS) // the hang backs Yahoo off for 60s from here
+  await tick(BACKOFF_MS)
   let p = await probe()
   const row = () => p?.quotes?.find(q => q.code === '2330')
   ok(count('yahoo') === 2 && row()?.price === 1200, `(5) the newer tick published 1200 (requests=${count('yahoo')}, price=${row()?.price})`)
@@ -208,6 +215,24 @@ async function boot(twSources, answer) {
   await new Promise(r => setTimeout(r, 100))
   p = await probe()
   ok(row()?.price === 1200, `(5) the abandoned tick's late 900 did not replace it (price=${row()?.price})`)
+}
+
+// --- (6) a late failure after a success does not back the host off again ------
+{
+  let failLate
+  const late = new Promise(resolve => {
+    failLate = resolve
+  })
+  const { tick, count, logs } = await boot(['yahoo'], (host, n) => (n === 0 ? late : { status: 200, text: SPARK_BODY }))
+  await tick(STUCK_MS + FEED_MS)
+  await tick(BACKOFF_MS)
+  ok(count('yahoo') === 2, `(6) after the back-off a newer tick got a good answer (requests=${count('yahoo')})`)
+  const backoffsBefore = logs.filter(l => /next try in/.test(l)).length
+  failLate({ ok: false, status: 500, headers: {}, text: '' })
+  await new Promise(r => setTimeout(r, 100))
+  ok(logs.filter(l => /next try in/.test(l)).length === backoffsBefore, '(6) the abandoned tick\'s late HTTP 500 is not a new back-off')
+  await tick(FEED_MS)
+  ok(count('yahoo') === 3, `(6) the next tick sends as usual (requests=${count('yahoo')})`)
 }
 
 done()

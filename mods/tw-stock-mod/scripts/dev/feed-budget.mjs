@@ -19,6 +19,10 @@
 //   (6) a tw tick the budget holds back stops there: it never falls through
 //       to a broker route (which would spawn a 永豐 login) while Yahoo is fine
 //   (7) a request that hangs holds the in-flight latch, but not the heartbeat
+//   (8) a budget that is expensive at boot (8 requests a tick: a 96 s
+//       interval) does not stretch the timer past the broker fetcher's 90 s
+//       heartbeat patience - the timer stays short and the budget gates the
+//       requests instead
 //
 // Usage: node feed-budget.mjs <register.js>
 import { pathToFileURL } from 'node:url'
@@ -243,6 +247,22 @@ const inHour = (sparks, from) => sparks.filter(t => t > from && t <= from + HOUR
   const gaps = beats.map((t, i) => (i ? t - beats[i - 1] : 0)).slice(1)
   ok(beats.length >= 15, `(7) ${beats.length} heartbeats in 4 minutes with every request hanging`)
   ok(Math.max(...gaps) <= s.feedTimer.ms, `(7) the widest heartbeat gap is ${Math.max(...gaps) / 1000}s`)
+}
+
+// --- (8) an expensive boot budget does not stretch the heartbeat -----------------
+{
+  const many = Array.from({ length: 140 }, (_, i) => ({ code: `M${i}`, qty: 1, cost: 10 }))
+  // 15 + 140 + 3 indices = 158 symbols: 8 spark batches a tick, a 96 s interval
+  const s = await boot(many, { futures: [{ code: 'TXFR1', name: '台指近' }], twSources: ['shioaji'] })
+  ok(s.feedTimer.ms < 90_000, `(8) the feed timer stays under the fetcher's 90 s patience (${s.feedTimer.ms / 1000}s)`)
+  const before = s.heartbeats.length
+  const start = s.clock
+  await s.run(HOUR)
+  const beats = s.heartbeats.slice(before)
+  const gaps = beats.map((t, i) => (i ? t - beats[i - 1] : 0)).slice(1)
+  ok(Math.max(...gaps) < 90_000, `(8) the widest heartbeat gap is ${Math.max(...gaps) / 1000}s`)
+  const n = inHour(s.sparks, start)
+  ok(n <= REQUESTS_PER_HOUR, `(8) ...and the hour's spark requests still keep to the budget (${n})`)
 }
 
 done()

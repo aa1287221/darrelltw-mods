@@ -656,10 +656,17 @@ let liveBars: Record<string, { bars: Bar[]; at: number }> = {}
 // stop 證交所 (or the reverse), and neither may hold the broker fetchers'
 // respawn, which makes no HTTP request at all.
 type FeedHost = 'yahoo' | 'mis'
-const feedBackoff: Record<FeedHost, { skipUntil: number; failures: number }> = {
-  yahoo: { skipUntil: 0, failures: 0 },
-  mis: { skipUntil: 0, failures: 0 },
+// `okAt` is the tick of the host's last good answer: a failure reported by an
+// older tick (one abandoned past IN_FLIGHT_STUCK_MS that errors late) says
+// nothing about the host now and must not back it off again.
+const feedBackoff: Record<FeedHost, { skipUntil: number; failures: number; okAt: number }> = {
+  yahoo: { skipUntil: 0, failures: 0, okAt: 0 },
+  mis: { skipUntil: 0, failures: 0, okAt: 0 },
 }
+// Requests out on each host, by the tick that sent them: one that has not
+// answered in IN_FLIGHT_STUCK_MS backs its host off like an error would -
+// a request that hangs without erroring used to leave the host un-backed-off.
+const hostsInFlight = new Set<{ host: FeedHost; since: number }>()
 // Crypto's own cooldown, separate from feedBackoff above:
 // Pionex's 429 is a flat 60s block (see CRYPTO_COOLDOWN_MS), not something
 // that should share Yahoo's exponential-doubling curve, and a Pionex outage
@@ -693,6 +700,11 @@ let nextFeedAt = 0 // when the next request is due; the board counts down to it
 let feedEvery = 0
 let lastTimerAt = 0
 let httpTickAt = 0
+// The timer also carries the broker heartbeat, once a tick, and a broker
+// fetcher quits once that is 90 s old (HEARTBEAT_MAX_AGE_MS in
+// scripts/_common.py) - so however expensive the budget, the timer stays
+// under this and the budget's steps space the requests out instead.
+const FEED_TIMER_MAX_MS = 60_000
 // when the K-bar request in flight started, 0 when none is - a time rather
 // than a flag so a request that never settles cannot latch it forever (see
 // IN_FLIGHT_STUCK_MS)
@@ -1179,6 +1191,7 @@ export const register: Register = on => {
     // band then falls back to the demo walk with the footer saying so.
     const backOff = (host: FeedHost, now: number, why: string) => {
       const b = feedBackoff[host]
+      if (now < b.okAt) return // a stale tick's failure: the host has answered since
       b.failures += 1
       const wait = Math.min(config.feedMs * 2 ** b.failures, FEED_BACKOFF_MAX_MS)
       // an abandoned tick (see IN_FLIGHT_STUCK_MS) can fail long after a
@@ -1187,8 +1200,17 @@ export const register: Register = on => {
       $.ui.log(`tw-stock-mod: feed ${why}, next try in ${Math.round(wait / 1000)}s`)
     }
     const backedOff = (host: FeedHost, now: number) => now < feedBackoff[host].skipUntil
-    const recovered = (host: FeedHost) => {
+    const recovered = (host: FeedHost, now: number) => {
       feedBackoff[host].failures = 0
+      feedBackoff[host].okAt = Math.max(feedBackoff[host].okAt, now)
+    }
+    /** backs off every host with a request out longer than IN_FLIGHT_STUCK_MS - once per request */
+    const backOffHung = (now: number) => {
+      for (const req of hostsInFlight) {
+        if (now - req.since < IN_FLIGHT_STUCK_MS) continue
+        hostsInFlight.delete(req)
+        backOff(req.host, now, `no answer in ${Math.round(IN_FLIGHT_STUCK_MS / 1000)}s`)
+      }
     }
 
     /**
@@ -1201,11 +1223,16 @@ export const register: Register = on => {
     const safeFetch = async (
       url: string,
       init?: { headers?: Record<string, string> },
+      track?: { host: FeedHost; now: number },
     ): Promise<Awaited<ReturnType<typeof $.http.fetch>> | Error> => {
+      const req = track ? { host: track.host, since: track.now } : undefined
+      if (req) hostsInFlight.add(req)
       try {
         return await $.http.fetch(url, init)
       } catch (err) {
         return err instanceof Error ? err : new Error(String(err))
+      } finally {
+        if (req) hostsInFlight.delete(req)
       }
     }
     /** the `why` a failed safeFetch answer gets in the back-off log line */
@@ -1307,7 +1334,7 @@ export const register: Register = on => {
       let tradedAt = 0
       for (let i = 0; i < symbols.length; i += SPARK_BATCH) {
         const batch = symbols.slice(i, i + SPARK_BATCH)
-        const res = await safeFetch(sparkUrl(batch, now + i), { headers: FEED_HEADERS })
+        const res = await safeFetch(sparkUrl(batch, now + i), { headers: FEED_HEADERS }, { host: 'yahoo', now })
         if (res instanceof Error || !res.ok) {
           backOff('yahoo', now, failure(res, what))
           return undefined
@@ -1326,7 +1353,7 @@ export const register: Register = on => {
       httpTickAt = now // this tick sends: the budget's clock restarts here
       const answer = await fetchSpark(symbols, now, '')
       if (!answer) return
-      recovered('yahoo')
+      recovered('yahoo', now)
       publish({
         market: 'us',
         list,
@@ -1570,7 +1597,7 @@ export const register: Register = on => {
       httpTickAt = now // this tick sends: the budget's clock restarts here
       const answer = await fetchSpark(symbols, now, ' (台股)')
       if (!answer) return false
-      recovered('yahoo')
+      recovered('yahoo', now)
       publish({
         market: 'tw',
         list,
@@ -1606,7 +1633,7 @@ export const register: Register = on => {
       const indices = config.twIndices
       const channels = [...list.map(misChannel), ...indices.map(misChannel)]
       httpTickAt = now // this tick sends: the budget's clock restarts here
-      const res = await safeFetch(misUrl(channels, now), { headers: FEED_HEADERS })
+      const res = await safeFetch(misUrl(channels, now), { headers: FEED_HEADERS }, { host: 'mis', now })
       if (res instanceof Error || !res.ok) {
         backOff('mis', now, failure(res, ' (證交所)'))
         return false
@@ -1616,7 +1643,7 @@ export const register: Register = on => {
         backOff('mis', now, '證交所 answered nothing usable')
         return false
       }
-      recovered('mis')
+      recovered('mis', now)
       publish({
         market: 'tw',
         list,
@@ -1989,6 +2016,7 @@ export const register: Register = on => {
       const brokerTw = config.twSources.includes('shioaji') || config.twSources.includes('capital')
       const wanted = markets.filter(m => m === 'tf' || (m === 'tw' && brokerTw))
       if (wanted.length > 0) await writeHeartbeat(now, wanted)
+      backOffHung(now)
       if (feedInFlightSince && now - feedInFlightSince < IN_FLIGHT_STUCK_MS) return
       if (feedInFlightSince) $.ui.log('tw-stock-mod: the last feed tick never settled; starting a new one')
       const mine = now
@@ -2047,6 +2075,7 @@ export const register: Register = on => {
       // for any other market whose live feed has not produced bars yet.
       if (market === 'crypto') return
       const now = await $.clock.now()
+      backOffHung(now)
       if (config.feed === 'off' || backedOff('yahoo', now)) return
       if (barsInFlightSince && now - barsInFlightSince < IN_FLIGHT_STUCK_MS) return
       const key = `${market}:${code}`
@@ -2057,10 +2086,12 @@ export const register: Register = on => {
       const mine = now
       barsInFlightSince = mine
       try {
-        const res = await safeFetch(chartUrl(yahooSymbol(market, sym), now), { headers: FEED_HEADERS })
+        const res = await safeFetch(chartUrl(yahooSymbol(market, sym), now), { headers: FEED_HEADERS }, { host: 'yahoo', now })
         if (res instanceof Error || !res.ok) return backOff('yahoo', now, failure(res, ` (${code} K 棒)`))
         const bars = parseChartBars(res.text)
         if (!bars) return
+        // an abandoned request answering late must not replace newer bars
+        if ((liveBars[key]?.at ?? 0) > now) return
         liveBars[key] = { bars, at: now }
         $.ui.invalidate('ui.render')
       } finally {
@@ -2079,15 +2110,17 @@ export const register: Register = on => {
     if (config.feed !== 'off') {
       // sized off the holdings the boot poll above already read; see
       // httpTickAt for holdings that widen the feed later
-      const every = feedInterval(config, feedExtras())
+      const interval = feedInterval(config, feedExtras())
+      const every = Math.min(interval, FEED_TIMER_MAX_MS)
       feedEvery = every
       // a module that outlives a session must not carry the last one's clock
       lastTimerAt = 0
       httpTickAt = 0
-      if (every > config.feedMs) {
+      loggedSteps = budgetSteps(interval)
+      if (interval > config.feedMs) {
         $.ui.log(
-          `tw-stock-mod: ${requestsPerTick(config, feedExtras())} requests per tick, so the feed ticks every ` +
-            `${Math.round(every / 1000)}s instead of ${Math.round(config.feedMs / 1000)}s ` +
+          `tw-stock-mod: ${requestsPerTick(config, feedExtras())} requests per tick, so Yahoo/證交所 are asked every ` +
+            `${Math.round((loggedSteps * every) / 1000)}s instead of ${Math.round(config.feedMs / 1000)}s ` +
             `(budget ${REQUESTS_PER_HOUR}/hour)`,
         )
       }
