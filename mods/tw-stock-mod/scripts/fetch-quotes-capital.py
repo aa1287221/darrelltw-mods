@@ -100,6 +100,7 @@ from _common import (
     claim_pidfile,
     failed_ticks_limit,
     load_env,
+    log,
     read_env_file,
     read_watchlist,
     release_pidfile,
@@ -461,7 +462,7 @@ class Capital:
             raise RuntimeError(f"SKOrderLib_Initialize 失敗: {self.message(code)}")
         cert = self.order.ReadCertByID(user_id)
         if cert != 0:
-            print(f"ReadCertByID: {self.message(cert)}（只有下單一定要憑證，庫存查詢先照樣試）", file=sys.stderr)
+            log(f"ReadCertByID: {self.message(cert)}（只有下單一定要憑證，庫存查詢先照樣試）")
         self.accounts = []
         code = self.order.GetUserAccount()
         if code != 0:
@@ -501,11 +502,11 @@ class Capital:
 def connect_progress(state: int, elapsed: float) -> None:
     """What `enter_monitor` prints while the 商品檔 download runs."""
     if state == QUOTE_STATE_DOWNLOADING:
-        print(f"連上報價主機了，正在下載商品檔…（{elapsed:.0f} 秒）", file=sys.stderr)
+        log(f"連上報價主機了，正在下載商品檔…（{elapsed:.0f} 秒）")
     elif state == QUOTE_STATE_READY:
-        print(f"報價主機就緒（{elapsed:.0f} 秒）", file=sys.stderr)
+        log(f"報價主機就緒（{elapsed:.0f} 秒）")
     elif state == QUOTE_STATE_DISCONNECTED:
-        print(f"還沒連上報價主機…（{elapsed:.0f} 秒）", file=sys.stderr)
+        log(f"還沒連上報價主機…（{elapsed:.0f} 秒）")
 
 
 def to_float(value: str) -> float:
@@ -976,7 +977,7 @@ def main() -> None:
 
     pidfile = Path(args.pidfile).expanduser().resolve() if args.pidfile else None
     if pidfile and not claim_pidfile(pidfile):
-        print(f"另一個 fetcher 已經在跑這個專案（{pidfile} 裡的 pid 還活著），這次略過", file=sys.stderr)
+        log(f"另一個 fetcher 已經在跑這個專案（{pidfile} 裡的 pid 還活著），這次略過")
         return
     heartbeat_path = Path(args.heartbeat).expanduser().resolve() if args.heartbeat else None
 
@@ -994,7 +995,7 @@ def main() -> None:
             except Exception:  # noqa: BLE001 - logout failing on the way out changes nothing
                 pass
             api = None
-            print("群益 已離線", file=sys.stderr)
+            log("群益 已離線")
         if pidfile:
             release_pidfile(pidfile)
 
@@ -1014,7 +1015,7 @@ def main() -> None:
             "多半是元件沒註冊：用系統管理員身分在 SDK 的 元件\\x64 資料夾跑 regsvr32 SKCOM.dll"
         )
 
-    print("群益 登入中…", file=sys.stderr)
+    log("群益 登入中…")
     api.login(os.environ["CAPITAL_USER_ID"], os.environ["CAPITAL_PASSWORD"])
     api.enter_monitor(timeout=args.connect_timeout, progress=connect_progress)
 
@@ -1025,9 +1026,9 @@ def main() -> None:
     try:
         account = api.init_order(os.environ["CAPITAL_USER_ID"])
         if not account:
-            print("查不到證券帳號（市場別 TS），這次只出報價", file=sys.stderr)
+            log("查不到證券帳號（市場別 TS），這次只出報價")
     except Exception as err:  # noqa: BLE001
-        print(f"下單元件初始化失敗（只影響庫存）: {type(err).__name__}: {err}", file=sys.stderr)
+        log(f"下單元件初始化失敗（只影響庫存）: {type(err).__name__}: {err}")
 
     if not codes and not account:
         sys.exit(
@@ -1065,7 +1066,7 @@ def main() -> None:
             # or on the US board). The very first tick is exempt because the
             # band writes the heartbeat moments BEFORE spawning this process.
             if heartbeat_path and not first_tick and heartbeat_stale(heartbeat_path):
-                print(f"心跳逾時（{heartbeat_path} 沒人更新），結束", file=sys.stderr)
+                log(f"心跳逾時（{heartbeat_path} 沒人更新），結束")
                 break
             first_tick = False
 
@@ -1073,7 +1074,7 @@ def main() -> None:
                 try:
                     api.request_holdings(os.environ["CAPITAL_USER_ID"], account)
                 except Exception as err:  # noqa: BLE001 - keep pumping; the quotes half of the tick still works
-                    print(f"庫存查詢送出失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"庫存查詢送出失敗（保留上一份）: {type(err).__name__}: {err}")
 
             # The pump IS the tick: SKCOM only moves prices into its cache
             # while messages are being dispatched, and the holdings rows
@@ -1091,23 +1092,23 @@ def main() -> None:
             # missed costs one clean respawn, never a frozen price.
             payload = None
             if not api.connected or api.quote_state() != QUOTE_STATE_READY:
-                print(f"報價主機斷線（保留上一份檔案）{api.connection_error}", file=sys.stderr)
+                log(f"報價主機斷線（保留上一份檔案）{api.connection_error}")
             else:
                 try:
                     payload = build_payload(api, codes, indices, watchlist_names)
                 except Exception as err:  # noqa: BLE001 - any COM error is the same story here
-                    print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
             # only a written file counts as alive: a link that reads READY but
             # prices nothing (subscriptions lost on a silent reconnect) is as
             # dead as one that is down
             failed_ticks = 0 if payload else failed_ticks + 1
             if failed_ticks >= give_up_at:
-                print(f"連續 {failed_ticks} 輪沒有報價，結束讓 band 重新登入", file=sys.stderr)
+                log(f"連續 {failed_ticks} 輪沒有報價，結束讓 band 重新登入")
                 sys.exit(1)
             if payload:
                 write_atomic(out_path, payload)
                 stamp = time.strftime("%H:%M:%S", time.localtime(payload["dataAt"] / 1000))
-                print(f"{stamp}  {len(payload['quotes'])} 檔 -> {out_path}", file=sys.stderr)
+                log(f"{len(payload['quotes'])} 檔 -> {out_path}（資料 {stamp}）")
             # a failed snapshot leaves the file alone: the band drops a file
             # older than 120 s by itself and says so, which beats a stale
             # price that still looks live
@@ -1115,16 +1116,16 @@ def main() -> None:
             if account:
                 problem = pl_report_problem(api.pl_status, api.pl_rows)
                 if problem != last_pl_problem:
-                    print(problem or "庫存查詢恢復正常", file=sys.stderr)
+                    log(problem or "庫存查詢恢復正常")
                     last_pl_problem = problem
                 try:
                     holdings_payload = build_holdings_payload(api.pl_rows, payload["quotes"] if payload else {})
                 except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
-                    print(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
                     holdings_payload = None
                 if holdings_payload:
                     write_atomic(holdings_path, holdings_payload)
-                    print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
+                    log(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}")
                     # a held code that never made the watchlist still needs a
                     # live price, and a sold one no longer does: the
                     # subscription follows the file just written, and the
