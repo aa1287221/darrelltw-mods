@@ -281,3 +281,44 @@ def test_held_outside_drops_a_sold_code():
     after = capital.held_outside(watch, holdings("0050"))  # 2454 sold
     assert before == ["2454", "0050"]
     assert after == ["0050"]
+
+
+def test_held_codes_take_a_new_code_at_once():
+    held = capital.HeldCodes()
+    assert held.update(["2454"]) is True
+    assert held.update(["2454", "0050"]) is True
+    assert held.codes == ["2454", "0050"]
+
+
+def test_held_codes_drop_only_when_two_answers_agree():
+    held = capital.HeldCodes()
+    held.update(["2454", "0050"])
+    assert held.update(["0050"]) is False  # one answer: maybe partial
+    assert held.codes == ["2454", "0050"]
+    assert held.update(["0050"]) is True
+    assert held.codes == ["0050"]
+
+
+def test_held_codes_partial_answer_between_two_full_ones_changes_nothing():
+    held = capital.HeldCodes()
+    held.update(["2454", "0050"])
+    assert held.update(["2454"]) is False
+    assert held.update(["2454", "0050"]) is False
+    assert held.update(["2454"]) is False  # a lone partial again: still not agreed
+    assert held.codes == ["2454", "0050"]
+
+
+def test_held_codes_a_drop_that_also_adds_takes_the_new_code_now():
+    held = capital.HeldCodes()
+    held.update(["2454"])
+    assert held.update(["0050"]) is True
+    assert held.codes == ["2454", "0050"]  # 0050 now; 2454 waits for a second answer
+    assert held.update(["0050"]) is True
+    assert held.codes == ["0050"]
+
+
+def test_pl_answered_empty_needs_a_success_status():
+    assert capital.pl_answered_empty("000,查詢成功", []) is True
+    assert capital.pl_answered_empty("", []) is False
+    assert capital.pl_answered_empty("601,x", []) is False
+    assert capital.pl_answered_empty("000,查詢成功", ["row"]) is False
