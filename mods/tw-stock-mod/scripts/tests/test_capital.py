@@ -199,3 +199,44 @@ def test_build_payload_drops_unpriced_codes_and_falls_back_on_names():
 
 def test_build_payload_nothing_priced_is_none():
     assert capital.build_payload(FakeApi({}), ["2330"], [], {}) is None
+
+
+# ---------------------------------------------------------------------------
+# the message pump is the fetcher's tick: its wait runs on the monotonic
+# clock, so a wall clock stepped back (NTP, resume from sleep) cannot stretch it
+# ---------------------------------------------------------------------------
+
+
+class SteppedClock:
+    """time.monotonic advances with every sleep; time.time is stuck, the way
+    it reads while a wall clock stepped back catches up."""
+
+    def __init__(self):
+        self.mono = 0.0
+        self.sleeps = 0
+
+    def monotonic(self):
+        return self.mono
+
+    def time(self):
+        return 1_790_000_000.0
+
+    def sleep(self, seconds):
+        self.sleeps += 1
+        if self.sleeps > 10_000:
+            raise AssertionError("pump never returned - is it timed off the wall clock?")
+        self.mono += seconds
+
+
+def test_pump_waits_on_the_monotonic_clock_not_the_wall_clock(monkeypatch):
+    import ctypes
+
+    clock = SteppedClock()
+    monkeypatch.setattr(capital, "time", clock)
+    api = capital.Capital.__new__(capital.Capital)  # no SKCOM: only the pump's own fields
+    api._msg = ctypes.c_int()
+    api._user32 = types.SimpleNamespace(PeekMessageW=lambda *a: 0, TranslateMessage=None, DispatchMessageW=None)
+
+    api.pump(3.0)
+
+    assert 3.0 <= clock.mono < 3.1  # returned once 3 s of monotonic time had passed

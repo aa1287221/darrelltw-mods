@@ -1363,10 +1363,11 @@ def main() -> None:
             if args.interval <= 0:
                 break
             sync_subscriptions(api, sj, desired, subscribed)
-            slept = 0.0
-            while running and slept < args.interval:
+            # a monotonic deadline: counting 0.2 s sleeps left out the drain
+            # and flush work between them, and the wall clock can step
+            wait_until = time.monotonic() + args.interval
+            while running and time.monotonic() < wait_until:
                 time.sleep(0.2)
-                slept += 0.2
                 drain_ticks(tick_queue, overlays, code_maps, futures_kbars_cache, tick_stats)
                 flush_overlays(overlays, int(time.time() * 1000), tick_stats)
     finally:

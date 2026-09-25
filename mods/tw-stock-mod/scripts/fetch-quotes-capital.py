@@ -361,13 +361,16 @@ class Capital:
         on the same machine. 群益's own examples never hit this because they
         run inside Tkinter's `mainloop()`, which is exactly this loop.
         """
-        deadline = time.time() + max(seconds, 0.0)
+        # monotonic, not time.time(): this wait IS the fetcher's tick, and a
+        # wall clock stepped back (NTP, a manual fix, resume from sleep)
+        # would stretch it by the size of the step
+        deadline = time.monotonic() + max(seconds, 0.0)
         msg = self._msg
         while True:
             while self._user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
                 self._user32.TranslateMessage(ctypes.byref(msg))
                 self._user32.DispatchMessageW(ctypes.byref(msg))
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 return
             # a short sleep rather than a spin: the callbacks that matter here
             # arrive on the order of seconds, not microseconds
@@ -401,19 +404,20 @@ class Capital:
         code = self.quote.SKQuoteLib_EnterMonitorLONG()
         if code != 0:
             raise RuntimeError(f"SKQuoteLib_EnterMonitorLONG 失敗: {self.message(code)}")
-        deadline = time.time() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
         state = QUOTE_STATE_DISCONNECTED
         last_reported = None
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             self.pump(0.5)
             state = self.quote_state()
             if self.connected or state == QUOTE_STATE_READY:
                 self.connected = True
                 if progress and last_reported is not None:
-                    progress(state, time.time() - (deadline - timeout))
+                    progress(state, time.monotonic() - started)
                 return
             if progress and state != last_reported:
-                progress(state, time.time() - (deadline - timeout))
+                progress(state, time.monotonic() - started)
                 last_reported = state
         seen = ",".join(str(k) for k in self.connection_events) or "（一個都沒有）"
         raise RuntimeError(
@@ -458,8 +462,8 @@ class Capital:
         code = self.order.GetUserAccount()
         if code != 0:
             raise RuntimeError(f"GetUserAccount 失敗: {self.message(code)}")
-        deadline = time.time() + 10
-        while not self.accounts and time.time() < deadline:
+        deadline = time.monotonic() + 10
+        while not self.accounts and time.monotonic() < deadline:
             self.pump(0.2)
         for market, account in self.accounts:
             if market == "TS":
