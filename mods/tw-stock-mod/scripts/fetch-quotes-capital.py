@@ -171,6 +171,10 @@ DEFAULT_INDICES = [("TSEA", "TAIEX"), ("OTCA", "TPEx")]
 # Holding.qty carries a short as a negative share count.
 SHORT_TRADE_TYPES = {"4", "9"}
 
+# OnProfitLossGWReport's first row is the query's own result: "000,訊息" on
+# success, an error code and message otherwise.
+PL_STATUS_OK = "000"
+
 # GetProfitLossGWReport 未實現彙總 field positions, 0-based off the manual's
 # own 1-based table (4-2-p OnProfitLossGWReport, 彙總資料格式).
 PL_NAME = 0  # 股票名稱
@@ -609,6 +613,31 @@ def build_payload(api: Capital, codes: list[str], indices: list[tuple[str, str]]
     return payload
 
 
+def pl_report_problem(status: str, rows: list[str]) -> str | None:
+    """
+    What is wrong with one 未實現損益 answer, as a log line, or None when
+    nothing is. A report with rows is used whatever its status says (the
+    rows are the evidence); one with no rows is only fine when the status
+    says the query succeeded - a holder with nothing held.
+    """
+    if rows:
+        return None
+    if not status:
+        return "庫存查詢這輪沒有回應（保留上一份檔案）"
+    if status.split(",", 1)[0].strip() != PL_STATUS_OK:
+        return f"庫存查詢失敗（保留上一份檔案）: {status.strip()}"
+    return None
+
+
+def held_outside(watch: list[str], holdings_payload: dict) -> list[str]:
+    """The held codes the watchlist does not already cover, in holdings order."""
+    out: list[str] = []
+    for row in holdings_payload["holdings"]:
+        if row["code"] not in watch and row["code"] not in out:
+            out.append(row["code"])
+    return out
+
+
 def build_holdings_payload(rows: list[str], quotes: dict) -> dict | None:
     """
     OnProfitLossGWReport's 未實現彙總 rows -> the holdings file's shape (see
@@ -1009,8 +1038,11 @@ def main() -> None:
     # The quotes fetch covers the watchlist UNION every held code, so a
     # holding that never made the watchlist still gets a live price here -
     # build_holdings_payload prefers exactly that over its own fallback. The
-    # union can only grow after the first holdings answer, so the initial
-    # subscribe is the watchlist and the loop re-subscribes when it widens.
+    # initial subscribe is the watchlist; each holdings file written re-sets
+    # the held part to what that file holds, so a sold position stops being
+    # subscribed and priced rather than riding along until the next restart.
+    watch = list(codes)
+    held: list[str] = []
     subscribed: list[str] = []
 
     def resubscribe(wanted: list[str]) -> None:
@@ -1023,6 +1055,7 @@ def main() -> None:
     resubscribe(codes + [c for c, _ in indices])
 
     first_tick = True
+    last_pl_problem: str | None = None  # logged once per change, not every tick
     failed_ticks = 0  # consecutive ticks that wrote no quotes (link down, raised, or nothing priced)
     give_up_at = failed_ticks_limit(args.interval)
     try:
@@ -1080,6 +1113,10 @@ def main() -> None:
             # price that still looks live
 
             if account:
+                problem = pl_report_problem(api.pl_status, api.pl_rows)
+                if problem != last_pl_problem:
+                    print(problem or "庫存查詢恢復正常", file=sys.stderr)
+                    last_pl_problem = problem
                 try:
                     holdings_payload = build_holdings_payload(api.pl_rows, payload["quotes"] if payload else {})
                 except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
@@ -1089,11 +1126,13 @@ def main() -> None:
                     write_atomic(holdings_path, holdings_payload)
                     print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
                     # a held code that never made the watchlist still needs a
-                    # live price, so widen the subscription and let the next
-                    # tick pick it up
-                    held = [row["code"] for row in holdings_payload["holdings"] if row["code"] not in codes]
-                    if held:
-                        codes.extend(held)
+                    # live price, and a sold one no longer does: the
+                    # subscription follows the file just written, and the
+                    # next tick prices the new set
+                    now_held = held_outside(watch, holdings_payload)
+                    if now_held != held:
+                        held = now_held
+                        codes = watch + held
                         resubscribe(codes + [c for c, _ in indices])
 
             if args.interval <= 0:

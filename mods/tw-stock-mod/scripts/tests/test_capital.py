@@ -240,3 +240,44 @@ def test_pump_waits_on_the_monotonic_clock_not_the_wall_clock(monkeypatch):
     api.pump(3.0)
 
     assert 3.0 <= clock.mono < 3.1  # returned once 3 s of monotonic time had passed
+
+
+# ---------------------------------------------------------------------------
+# the 未實現損益 answer: its status row is checked, and the held codes the
+# subscription carries follow the holdings file just written
+# ---------------------------------------------------------------------------
+
+
+def test_pl_report_with_rows_is_fine_whatever_its_status():
+    assert capital.pl_report_problem("", ["台積電,2330"]) is None
+    assert capital.pl_report_problem("999,x", ["台積電,2330"]) is None
+
+
+def test_pl_report_success_with_no_rows_is_nothing_held():
+    assert capital.pl_report_problem("000,查詢成功", []) is None
+
+
+def test_pl_report_failure_status_is_named_in_the_log_line():
+    line = capital.pl_report_problem("601,查無帳號資料", [])
+    assert line is not None and "601,查無帳號資料" in line
+
+
+def test_pl_report_with_no_answer_says_so():
+    line = capital.pl_report_problem("", [])
+    assert line is not None and "沒有回應" in line
+
+
+def holdings(*codes):
+    return {"holdings": [{"code": c} for c in codes]}
+
+
+def test_held_outside_is_the_held_codes_the_watchlist_lacks_in_order():
+    assert capital.held_outside(["2330", "2317"], holdings("2454", "2330", "0050", "2454")) == ["2454", "0050"]
+
+
+def test_held_outside_drops_a_sold_code():
+    watch = ["2330"]
+    before = capital.held_outside(watch, holdings("2454", "0050"))
+    after = capital.held_outside(watch, holdings("0050"))  # 2454 sold
+    assert before == ["2454", "0050"]
+    assert after == ["0050"]
