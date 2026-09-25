@@ -13,6 +13,10 @@
 //   (5) ...and when that abandoned request finally answers, its older
 //       prices do not replace what the newer tick already published
 //   (6) ...nor does its late FAILURE back off a host that has answered since
+//   (7) ...nor back off again a host nothing has answered since - the hang
+//       already charged that request once
+//   (8) a K-bar answer from an abandoned request does not replace the newer
+//       bars a later request already brought in
 //
 // Usage: node feed-errors.mjs <register.js>
 import { pathToFileURL } from 'node:url'
@@ -28,8 +32,10 @@ const FEED_MS = 30_000
 const STUCK_MS = 120_000 // hooks/constants.ts's IN_FLIGHT_STUCK_MS
 const BACKOFF_MS = 60_000 // the first back-off: feedMs x 2
 
+// Yahoo's K-bar endpoint is its own `host` here only so a case can script it
+// apart from spark; register.tsx backs both off as 'yahoo'
 const hostOf = u =>
-  u.includes('finance.yahoo.com') ? 'yahoo' : u.includes('mis.twse.com.tw') ? 'mis' : u.includes('pionex') ? 'pionex' : 'other'
+  u.includes('/v8/finance/chart/') ? 'chart' : u.includes('finance.yahoo.com') ? 'yahoo' : u.includes('mis.twse.com.tw') ? 'mis' : u.includes('pionex') ? 'pionex' : 'other'
 
 const SPARK_BODY = JSON.stringify({
   spark: {
@@ -46,6 +52,28 @@ const MIS_BODY = JSON.stringify({
     { c: 't00', n: '發行量加權股價指數', z: '20010', y: '19900', tlong: String(TW_OPEN) },
   ],
 })
+
+const chartAt = close =>
+  JSON.stringify({
+    chart: {
+      result: [
+        {
+          timestamp: [TW_OPEN / 1000 - 600, TW_OPEN / 1000 - 300],
+          indicators: { quote: [{ open: [1000, 1001], high: [1010, 1011], low: [990, 991], close: [1005, close], volume: [10, 20] }] },
+        },
+      ],
+    },
+  })
+
+function findButton(node, label) {
+  if (!node || typeof node !== 'object') return undefined
+  if (node.type === 'Button' && node.props?.label === label) return node
+  for (const k of [...(node.kids ?? []), node.props?.children]) {
+    const hit = findButton(k, label)
+    if (hit) return hit
+  }
+  return undefined
+}
 
 function findClient(node) {
   if (!node || typeof node !== 'object') return undefined
@@ -126,9 +154,14 @@ async function boot(twSources, answer) {
   // past a short real delay
   await Promise.race([handlers.get('session.start')($, {}, next), new Promise(r => setTimeout(r, 300))])
 
-  const probe = async () => {
-    const tree = await handlers.get('ui.render')($, { props: {}, surface: 'terminal', viewport: { columns: 100 } }, next)
-    return findClient(tree)?.props?.props
+  const render = () => handlers.get('ui.render')($, { props: {}, surface: 'terminal', viewport: { columns: 100 } }, next)
+  const probe = async () => findClient(await render())?.props?.props
+  /** presses a control-row button by its label, then redraws */
+  const press = async label => {
+    const button = findButton(await render(), label)
+    if (!button) throw new Error(`no ${label} button`)
+    button.props.onPress()
+    return probe()
   }
   // the feed timer is the one registered at feedInterval(); fire only it so
   // the 3s poll's own reads stay out of the way
@@ -140,7 +173,7 @@ async function boot(twSources, answer) {
     await new Promise(r => setTimeout(r, 50))
   }
   const count = host => calls.filter(c => c.host === host).length
-  return { probe, tick, count, logs }
+  return { probe, press, tick, count, logs }
 }
 
 // --- (1) a thrown Yahoo request backs Yahoo off -----------------------------
@@ -233,6 +266,47 @@ async function boot(twSources, answer) {
   ok(logs.filter(l => /next try in/.test(l)).length === backoffsBefore, '(6) the abandoned tick\'s late HTTP 500 is not a new back-off')
   await tick(FEED_MS)
   ok(count('yahoo') === 3, `(6) the next tick sends as usual (requests=${count('yahoo')})`)
+}
+
+// --- (7) a hung request's late failure is not charged twice -----------------
+{
+  let failLate
+  const late = new Promise(resolve => {
+    failLate = resolve
+  })
+  const { tick, count, logs } = await boot(['yahoo'], (host, n) => (n === 0 ? late : { status: 200, text: SPARK_BODY }))
+  await tick(STUCK_MS + FEED_MS) // the hang backs Yahoo off: failure 1, 60s
+  const backoffs = () => logs.filter(l => /next try in/.test(l))
+  ok(backoffs().length === 1 && /next try in 60s/.test(backoffs()[0]), `(7) the hang is one 60s back-off (${backoffs().join(' | ')})`)
+  failLate({ ok: false, status: 500, headers: {}, text: '' })
+  await new Promise(r => setTimeout(r, 100))
+  ok(backoffs().length === 1, `(7) the same request's late HTTP 500 is not a second back-off (${backoffs().join(' | ')})`)
+  await tick(BACKOFF_MS)
+  ok(count('yahoo') === 2, `(7) the next try comes after 60s, not a doubled 120s (requests=${count('yahoo')})`)
+}
+
+// --- (8) late K bars from an abandoned request are dropped -------------------
+{
+  let answerLate
+  const late = new Promise(resolve => {
+    answerLate = resolve
+  })
+  const { probe, press, tick, count } = await boot(['yahoo'], (host, n) =>
+    host === 'chart' ? (n === 0 ? late : { status: 200, text: chartAt(1200) }) : { status: 200, text: SPARK_BODY },
+  )
+  let p = await press('趨勢圖')
+  ok(p?.view === 'chart' && count('chart') === 1, `(8) the trend view asked for K bars once (view=${p?.view}, chart=${count('chart')})`)
+  await tick(STUCK_MS + FEED_MS) // the K-bar request hangs: Yahoo is backed off 60s
+  await tick(BACKOFF_MS)
+  await probe() // this redraw asks for bars again: the hung request no longer holds the latch
+  await new Promise(r => setTimeout(r, 100))
+  const lastClose = () => p?.quotes?.[p.focus]?.bars?.at(-1)?.[3]
+  p = await probe()
+  ok(count('chart') === 2 && lastClose() === 1200, `(8) a newer K-bar request brought bars closing at 1200 (chart=${count('chart')}, close=${lastClose()})`)
+  answerLate({ ok: true, status: 200, headers: {}, text: chartAt(900) })
+  await new Promise(r => setTimeout(r, 100))
+  p = await probe()
+  ok(lastClose() === 1200, `(8) the abandoned request's late 900 bars did not replace them (close=${lastClose()})`)
 }
 
 done()

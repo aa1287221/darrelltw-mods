@@ -1213,6 +1213,8 @@ export const register: Register = on => {
       }
     }
 
+    /** failed answers whose request backOffHung has already backed off */
+    const charged = new WeakSet<object>()
     /**
      * $.http.fetch, except a thrown request (DNS, refused connection, reset)
      * comes back as an Error instead of unwinding the whole tick - a throw
@@ -1227,17 +1229,26 @@ export const register: Register = on => {
     ): Promise<Awaited<ReturnType<typeof $.http.fetch>> | Error> => {
       const req = track ? { host: track.host, since: track.now } : undefined
       if (req) hostsInFlight.add(req)
+      let res: Awaited<ReturnType<typeof $.http.fetch>> | Error
       try {
-        return await $.http.fetch(url, init)
+        res = await $.http.fetch(url, init)
       } catch (err) {
-        return err instanceof Error ? err : new Error(String(err))
-      } finally {
-        if (req) hostsInFlight.delete(req)
+        res = err instanceof Error ? err : new Error(String(err))
       }
+      if (req) {
+        // gone from the set = backOffHung already charged this request, so its
+        // late failure must not count against the host a second time
+        if (!hostsInFlight.delete(req) && (res instanceof Error || !res.ok)) charged.add(res)
+      }
+      return res
     }
     /** the `why` a failed safeFetch answer gets in the back-off log line */
     const failure = (res: Awaited<ReturnType<typeof $.http.fetch>> | Error, what: string) =>
       res instanceof Error ? `network error${what}: ${res.message}` : `HTTP ${res.status}${what}`
+    /** backOff for a failed safeFetch answer, unless backOffHung already charged it */
+    const failed = (host: FeedHost, now: number, res: Awaited<ReturnType<typeof $.http.fetch>> | Error, what: string) => {
+      if (!charged.has(res)) backOff(host, now, failure(res, what))
+    }
 
     /**
      * Hand one market's parsed snapshot to the board. Everything above this
@@ -1336,7 +1347,7 @@ export const register: Register = on => {
         const batch = symbols.slice(i, i + SPARK_BATCH)
         const res = await safeFetch(sparkUrl(batch, now + i), { headers: FEED_HEADERS }, { host: 'yahoo', now })
         if (res instanceof Error || !res.ok) {
-          backOff('yahoo', now, failure(res, what))
+          failed('yahoo', now, res, what)
           return undefined
         }
         const part = parseSpark(res.text)
@@ -1635,7 +1646,7 @@ export const register: Register = on => {
       httpTickAt = now // this tick sends: the budget's clock restarts here
       const res = await safeFetch(misUrl(channels, now), { headers: FEED_HEADERS }, { host: 'mis', now })
       if (res instanceof Error || !res.ok) {
-        backOff('mis', now, failure(res, ' (證交所)'))
+        failed('mis', now, res, ' (證交所)')
         return false
       }
       const { quotes: parsed, tradedAt } = parseMis(res.text)
@@ -2087,7 +2098,7 @@ export const register: Register = on => {
       barsInFlightSince = mine
       try {
         const res = await safeFetch(chartUrl(yahooSymbol(market, sym), now), { headers: FEED_HEADERS }, { host: 'yahoo', now })
-        if (res instanceof Error || !res.ok) return backOff('yahoo', now, failure(res, ` (${code} K 棒)`))
+        if (res instanceof Error || !res.ok) return failed('yahoo', now, res, ` (${code} K 棒)`)
         const bars = parseChartBars(res.text)
         if (!bars) return
         // an abandoned request answering late must not replace newer bars
