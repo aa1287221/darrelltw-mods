@@ -86,6 +86,7 @@ from typing import NamedTuple
 # the helpers every script here shares - scripts/_common.py, next to this file
 from _common import (
     HEARTBEAT_MAX_AGE_MS,
+    HeldCodes,
     claim_pidfile,
     failed_ticks_limit,
     field,
@@ -852,6 +853,21 @@ class PositionsClock:
         self.last = self.now()
 
 
+def held_position_codes(positions: list, watch: set) -> list[str]:
+    """The codes the positions hold (qty != 0, the rows build_holdings_payload
+    keeps) that the watchlist does not already cover, in positions order."""
+    out: list[str] = []
+    for pos in positions:
+        code = str(field(pos, "code", "")).strip()
+        if code and code not in watch and code not in out and float(field(pos, "quantity", 0) or 0) != 0:
+            out.append(code)
+    return out
+
+
+def holds_anything(positions: list) -> bool:
+    return any(str(field(pos, "code", "")).strip() and float(field(pos, "quantity", 0) or 0) != 0 for pos in positions)
+
+
 def fetch_positions(api) -> list:
     """`list_positions` in shares, not 張 - the band's Holding.qty contract wants shares."""
     import shioaji as sj
@@ -1122,9 +1138,11 @@ def main() -> None:
     # The quotes fetch covers the watchlist UNION every held code (item 4/6 of
     # the spec), so a holding that never made the watchlist still gets a live
     # price in stock-quotes.json - build_holdings_payload prefers exactly that
-    # over the fallback price it computes itself.
+    # over the fallback price it computes itself. The held part follows each
+    # fresh list_positions answer (positions_answered below), so a sold code
+    # stops being priced and tick-subscribed.
     watchlist_codes = {row["code"] for row in watchlist}
-    symbols = list(watchlist) + [{"code": c, "name": c} for c in position_codes if c not in watchlist_codes]
+    symbols = list(watchlist)
 
     # Shioaji resolves 上市/上櫃 itself, so unlike the exchange endpoint the
     # watchlist needs no `ex` field here.
@@ -1143,6 +1161,29 @@ def main() -> None:
     for row in symbols:
         ensure_contract(row["code"])
 
+    held = HeldCodes()
+    empty_answers = 0  # consecutive fresh list_positions answers holding nothing
+    write_empty_holdings = False  # set once, when that count reaches 2
+
+    def positions_answered(fresh: list) -> None:
+        """Fold one successful list_positions answer in: the held codes (and
+        the contracts priced for them), and the sold-everything count."""
+        nonlocal empty_answers, write_empty_holdings
+        empty_answers = 0 if holds_anything(fresh) else empty_answers + 1
+        # everything sold, and two answers in a row say so: the tick writes an
+        # empty holdings file once (the band then falls back to the config's
+        # holdings, as with no file)
+        write_empty_holdings = write_empty_holdings or empty_answers == 2
+        if not held.update(held_position_codes(fresh, watchlist_codes)):
+            return
+        for code in held.codes:
+            ensure_contract(code)
+        for code in [c for c in contracts if c not in watchlist_codes and c not in held.codes]:
+            del contracts[code]
+
+    if stock_positions_clock.last is not None:  # the startup fetch succeeded
+        positions_answered(positions)
+
     index_contracts = []
     for exchange, code, name in INDICES:
         contract = getattr(api.Contracts.Indexs, exchange)[code]
@@ -1151,7 +1192,7 @@ def main() -> None:
 
     # --futures codes resolve once here; a position's code (T5) resolves
     # lazily inside the tick loop instead, the same way a stock position
-    # adds itself to `symbols` there - contracts persist across ticks either way.
+    # joins `contracts` through positions_answered - contracts persist across ticks either way.
     futures_contracts: dict = {}
     # same dict every tick, so fetch_futures_rows's kbars cadence actually
     # persists across the loop instead of resetting to "always fetch"
@@ -1239,14 +1280,9 @@ def main() -> None:
                     try:
                         positions = fetch_positions(api)
                         stock_positions_clock.fetched()
+                        positions_answered(positions)
                     except Exception as err:  # noqa: BLE001 - keep the last good positions rather than crash
                         log(f"庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}")
-                for pos in positions:
-                    code = str(field(pos, "code", "")).strip()
-                    if code:
-                        ensure_contract(code)
-                        if code not in watchlist_codes and not any(s["code"] == code for s in symbols):
-                            symbols.append({"code": code, "name": code})
 
                 # an empty contract list has nothing to price, which is not a
                 # dead session - only a tick with codes to price counts
@@ -1277,6 +1313,10 @@ def main() -> None:
                 if holdings_payload:
                     write_atomic(holdings_path, holdings_payload)
                     log(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}")
+                elif write_empty_holdings:
+                    write_atomic(holdings_path, {"asOf": int(time.time() * 1000), "market": "tw", "source": "永豐 庫存", "holdings": []})
+                    log(f"0 檔庫存（全部出清）-> {holdings_path}")
+                write_empty_holdings = False
 
             if work_tf:
                 # same guard as the stock side: a code that resolves to no

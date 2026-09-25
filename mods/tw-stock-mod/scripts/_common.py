@@ -2,8 +2,8 @@
 What fetch-quotes-shioaji.py, fetch-quotes-capital.py and order-shioaji.py
 share: the runtime-dir rule (which must match runtimeDir() in
 hooks/constants.ts), env-file parsing, the watchlist read, the pidfile
-protocol, the heartbeat age, the atomic file write, the give-up threshold and
-the log line. Each script imports it from
+protocol, the heartbeat age, the atomic file write, the give-up threshold,
+the log line and the held-codes tracker. Each script imports it from
 its own folder - running `python scripts/<script>.py` puts that folder first
 on sys.path.
 
@@ -310,3 +310,39 @@ def log(message: str) -> None:
     capture it.
     """
     print(f"{time.strftime('%m-%d %H:%M:%S')} {message}", file=sys.stderr, flush=True)
+
+
+# --- held codes --------------------------------------------------------------
+
+
+class HeldCodes:
+    """
+    The held codes the quote subscription carries on top of the watchlist.
+
+    A code the latest answer adds is taken at once - it needs a live price
+    now. A code it drops is only let go once two answers in a row agree: a
+    partial or glitched answer (群益's pump window can end while
+    OnProfitLossGWReport rows are still arriving) must not unsubscribe a
+    position for one answer and subscribe it again on the next. Feed it
+    fresh answers only - a cached one repeated would "agree" with itself.
+    """
+
+    def __init__(self) -> None:
+        self.codes: list[str] = []
+        self._dropping: list[str] | None = None  # the last answer that dropped codes
+
+    def update(self, seen: list[str]) -> bool:
+        """Fold one answer's held codes in; True when `codes` changed."""
+        if all(code in seen for code in self.codes):
+            self._dropping = None
+            if seen == self.codes:
+                return False
+            self.codes = list(seen)
+            return True
+        confirmed = self._dropping == seen
+        self._dropping = None if confirmed else list(seen)
+        new = list(seen) if confirmed else self.codes + [c for c in seen if c not in self.codes]
+        if new == self.codes:
+            return False
+        self.codes = new
+        return True

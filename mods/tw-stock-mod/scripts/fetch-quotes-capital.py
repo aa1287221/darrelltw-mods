@@ -97,6 +97,7 @@ from pathlib import Path
 # the helpers every script here shares - scripts/_common.py, next to this file
 from _common import (
     HEARTBEAT_MAX_AGE_MS,
+    HeldCodes,
     claim_pidfile,
     failed_ticks_limit,
     load_env,
@@ -633,38 +634,6 @@ def pl_report_problem(status: str, rows: list[str]) -> str | None:
 def pl_answered_empty(status: str, rows: list[str]) -> bool:
     """A successful 未實現損益 answer with no rows: nothing is held."""
     return not rows and status.split(",", 1)[0].strip() == PL_STATUS_OK
-
-
-class HeldCodes:
-    """
-    The held codes the quote subscription carries on top of the watchlist.
-
-    A code the latest answer adds is taken at once - it needs a live price
-    now. A code it drops is only let go once two answers in a row agree: the
-    pump window can end while OnProfitLossGWReport rows are still arriving,
-    and a partial answer must not unsubscribe a position for one tick and
-    subscribe it again on the next.
-    """
-
-    def __init__(self) -> None:
-        self.codes: list[str] = []
-        self._dropping: list[str] | None = None  # the last answer that dropped codes
-
-    def update(self, seen: list[str]) -> bool:
-        """Fold one answer's held codes in; True when `codes` changed."""
-        if all(code in seen for code in self.codes):
-            self._dropping = None
-            if seen == self.codes:
-                return False
-            self.codes = list(seen)
-            return True
-        confirmed = self._dropping == seen
-        self._dropping = None if confirmed else list(seen)
-        new = list(seen) if confirmed else self.codes + [c for c in seen if c not in self.codes]
-        if new == self.codes:
-            return False
-        self.codes = new
-        return True
 
 
 def held_outside(watch: list[str], holdings_payload: dict) -> list[str]:
