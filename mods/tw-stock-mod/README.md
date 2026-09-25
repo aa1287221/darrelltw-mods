@@ -361,8 +361,9 @@ then the readout, then the bar label.
 **The file shape.** A bar is `[open, high, low, close, volume, ts]` with
 `ts` the bucket start in ms; `volume` and `ts` are optional (`[o, h, l, c]`
 and `{o, h, l, c}` still parse). A futures row may add
-`barsBy: { "1": […], "5": […], "15": […], "60": […] }`; `bars` stays the
-5 分 set for older readers. Up to 120 bars per set are kept (a 5 分 chart
+`barsBy: { "1": […], "5": […], "15": […], "60": […] }`; a row with
+`barsBy` but no `bars` uses `barsBy["5"]` as its bars (the 永豐 fetcher
+writes `barsBy` alone rather than the 5 分 set twice). Up to 120 bars per set are kept (a 5 分 chart
 covers ten hours, a 60 分 chart a week). Only the focused symbol's bars —
 and only the timeframe on screen — cross into the board, which is why moving
 through the list is a button press rather than a scroll; with no feed

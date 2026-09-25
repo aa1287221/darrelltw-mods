@@ -267,7 +267,7 @@ def test_futures_quote_row_barsby_shape():
         assert len(bars) <= fetcher.FUTURES_BAR_LIMIT
         for bar in bars:
             assert len(bar) == 6  # o, h, l, c, v, ts
-    assert row["bars"] is row["barsBy"]["5"]
+    assert "bars" not in row  # barsBy["5"] is the 5-minute set; no second copy
 
 
 def test_bucket_to_bar_shape_is_o_h_l_c_v_ts():
@@ -410,7 +410,7 @@ def test_fetch_futures_rows_end_to_end_payload_shape():
 
     row = rows["TXFJ6"]
     assert set(row["barsBy"]) == {"1", "5", "15", "60"}
-    assert row["bars"] is row["barsBy"]["5"]
+    assert "bars" not in row  # barsBy["5"] is the 5-minute set; no second copy
     for tf_minutes, bars in ((1, row["barsBy"]["1"]), (5, row["barsBy"]["5"]), (15, row["barsBy"]["15"]), (60, row["barsBy"]["60"])):
         assert 0 < len(bars) <= fetcher.FUTURES_BAR_LIMIT
         for bar in bars:

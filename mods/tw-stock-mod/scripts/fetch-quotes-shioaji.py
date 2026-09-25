@@ -349,11 +349,11 @@ def minute_buckets(rows_1min: list[dict], minutes: int) -> list[dict]:
 def futures_quote_row(contract, snapshot, bars_by: dict, requested_code: str) -> dict | None:
     """One futures-quotes.json entry; multiplier/decimals/prevClose always
     come from `contract`, never a lookup table. `bars_by` is {"1"/"5"/"15"/
-    "60": bars}, already ≤ FUTURES_BAR_LIMIT each (see refresh_futures_kbars)
-    - `bars` stays the 5-minute set for backward compatibility, and is the
-    SAME list object as barsBy["5"] so a tick that mutates one is visible
-    through the other. `ts` is popped by build_futures_payload once folded
-    into dataAt."""
+    "60": bars}, already ≤ FUTURES_BAR_LIMIT each (see refresh_futures_kbars).
+    There is no separate `bars` key: it only ever repeated barsBy["5"], which
+    doubled the largest part of a file the band re-reads every few seconds -
+    the band reads barsBy["5"] as the row's bars (hooks/files.ts). `ts` is
+    popped by build_futures_payload once folded into dataAt."""
     close = float(field(snapshot, "close", 0) or 0)
     if close <= 0:
         return None
@@ -363,7 +363,6 @@ def futures_quote_row(contract, snapshot, bars_by: dict, requested_code: str) ->
         "name": field(contract, "name", None) or requested_code,
         "multiplier": field(contract, "multiplier", 1),
         "decimals": int(field(contract, "decimal_locator", 0) or 0),
-        "bars": bars_by.get("5", []),
         "barsBy": bars_by,
         "ts": fix_taipei_ts(int(field(snapshot, "ts", 0) or 0)),
     }
