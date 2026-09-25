@@ -127,12 +127,14 @@ function parseQuotesUncached(text: string): QuotesFile | undefined {
     // decimals feed toFixed(), which throws outside 0..100 - a bad value in a
     // fetcher-written file must not take the render down with it
     const decimals = num(entry.decimals, NaN)
+    const barsBy = parseBarsBy(entry.barsBy)
     quotes[code] = {
       price,
       prevClose: typeof entry.prevClose === 'number' ? entry.prevClose : undefined,
       name: typeof entry.name === 'string' ? entry.name : undefined,
-      bars: parseBars(entry.bars),
-      barsBy: parseBarsBy(entry.barsBy),
+      // the 永豐 futures fetcher writes barsBy alone, no copy of its 5 分 set
+      bars: parseBars(entry.bars) ?? barsBy?.['5'],
+      barsBy,
       multiplier: typeof entry.multiplier === 'number' && entry.multiplier > 0 ? entry.multiplier : undefined,
       decimals: Number.isInteger(decimals) && decimals >= 0 && decimals <= 8 ? decimals : undefined,
       resolved: typeof entry.resolved === 'string' && entry.resolved ? entry.resolved : undefined,

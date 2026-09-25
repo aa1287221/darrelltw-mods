@@ -100,6 +100,7 @@ from _common import (
     claim_pidfile,
     failed_ticks_limit,
     load_env,
+    log,
     read_env_file,
     read_watchlist,
     release_pidfile,
@@ -170,6 +171,10 @@ DEFAULT_INDICES = [("TSEA", "TAIEX"), ("OTCA", "TPEx")]
 # 8 券差, 9 無券賣出. The last two are short positions, and the band's
 # Holding.qty carries a short as a negative share count.
 SHORT_TRADE_TYPES = {"4", "9"}
+
+# OnProfitLossGWReport's first row is the query's own result: "000,訊息" on
+# success, an error code and message otherwise.
+PL_STATUS_OK = "000"
 
 # GetProfitLossGWReport 未實現彙總 field positions, 0-based off the manual's
 # own 1-based table (4-2-p OnProfitLossGWReport, 彙總資料格式).
@@ -361,13 +366,16 @@ class Capital:
         on the same machine. 群益's own examples never hit this because they
         run inside Tkinter's `mainloop()`, which is exactly this loop.
         """
-        deadline = time.time() + max(seconds, 0.0)
+        # monotonic, not time.time(): this wait IS the fetcher's tick, and a
+        # wall clock stepped back (NTP, a manual fix, resume from sleep)
+        # would stretch it by the size of the step
+        deadline = time.monotonic() + max(seconds, 0.0)
         msg = self._msg
         while True:
             while self._user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
                 self._user32.TranslateMessage(ctypes.byref(msg))
                 self._user32.DispatchMessageW(ctypes.byref(msg))
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 return
             # a short sleep rather than a spin: the callbacks that matter here
             # arrive on the order of seconds, not microseconds
@@ -401,19 +409,20 @@ class Capital:
         code = self.quote.SKQuoteLib_EnterMonitorLONG()
         if code != 0:
             raise RuntimeError(f"SKQuoteLib_EnterMonitorLONG 失敗: {self.message(code)}")
-        deadline = time.time() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
         state = QUOTE_STATE_DISCONNECTED
         last_reported = None
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             self.pump(0.5)
             state = self.quote_state()
             if self.connected or state == QUOTE_STATE_READY:
                 self.connected = True
                 if progress and last_reported is not None:
-                    progress(state, time.time() - (deadline - timeout))
+                    progress(state, time.monotonic() - started)
                 return
             if progress and state != last_reported:
-                progress(state, time.time() - (deadline - timeout))
+                progress(state, time.monotonic() - started)
                 last_reported = state
         seen = ",".join(str(k) for k in self.connection_events) or "（一個都沒有）"
         raise RuntimeError(
@@ -453,13 +462,13 @@ class Capital:
             raise RuntimeError(f"SKOrderLib_Initialize 失敗: {self.message(code)}")
         cert = self.order.ReadCertByID(user_id)
         if cert != 0:
-            print(f"ReadCertByID: {self.message(cert)}（只有下單一定要憑證，庫存查詢先照樣試）", file=sys.stderr)
+            log(f"ReadCertByID: {self.message(cert)}（只有下單一定要憑證，庫存查詢先照樣試）")
         self.accounts = []
         code = self.order.GetUserAccount()
         if code != 0:
             raise RuntimeError(f"GetUserAccount 失敗: {self.message(code)}")
-        deadline = time.time() + 10
-        while not self.accounts and time.time() < deadline:
+        deadline = time.monotonic() + 10
+        while not self.accounts and time.monotonic() < deadline:
             self.pump(0.2)
         for market, account in self.accounts:
             if market == "TS":
@@ -493,11 +502,11 @@ class Capital:
 def connect_progress(state: int, elapsed: float) -> None:
     """What `enter_monitor` prints while the 商品檔 download runs."""
     if state == QUOTE_STATE_DOWNLOADING:
-        print(f"連上報價主機了，正在下載商品檔…（{elapsed:.0f} 秒）", file=sys.stderr)
+        log(f"連上報價主機了，正在下載商品檔…（{elapsed:.0f} 秒）")
     elif state == QUOTE_STATE_READY:
-        print(f"報價主機就緒（{elapsed:.0f} 秒）", file=sys.stderr)
+        log(f"報價主機就緒（{elapsed:.0f} 秒）")
     elif state == QUOTE_STATE_DISCONNECTED:
-        print(f"還沒連上報價主機…（{elapsed:.0f} 秒）", file=sys.stderr)
+        log(f"還沒連上報價主機…（{elapsed:.0f} 秒）")
 
 
 def to_float(value: str) -> float:
@@ -603,6 +612,31 @@ def build_payload(api: Capital, codes: list[str], indices: list[tuple[str, str]]
         payload["indices"] = index_rows
         payload["index"] = {k: v for k, v in index_rows[0].items() if k != "name"}
     return payload
+
+
+def pl_report_problem(status: str, rows: list[str]) -> str | None:
+    """
+    What is wrong with one 未實現損益 answer, as a log line, or None when
+    nothing is. A report with rows is used whatever its status says (the
+    rows are the evidence); one with no rows is only fine when the status
+    says the query succeeded - a holder with nothing held.
+    """
+    if rows:
+        return None
+    if not status:
+        return "庫存查詢這輪沒有回應（保留上一份檔案）"
+    if status.split(",", 1)[0].strip() != PL_STATUS_OK:
+        return f"庫存查詢失敗（保留上一份檔案）: {status.strip()}"
+    return None
+
+
+def held_outside(watch: list[str], holdings_payload: dict) -> list[str]:
+    """The held codes the watchlist does not already cover, in holdings order."""
+    out: list[str] = []
+    for row in holdings_payload["holdings"]:
+        if row["code"] not in watch and row["code"] not in out:
+            out.append(row["code"])
+    return out
 
 
 def build_holdings_payload(rows: list[str], quotes: dict) -> dict | None:
@@ -943,7 +977,7 @@ def main() -> None:
 
     pidfile = Path(args.pidfile).expanduser().resolve() if args.pidfile else None
     if pidfile and not claim_pidfile(pidfile):
-        print(f"另一個 fetcher 已經在跑這個專案（{pidfile} 裡的 pid 還活著），這次略過", file=sys.stderr)
+        log(f"另一個 fetcher 已經在跑這個專案（{pidfile} 裡的 pid 還活著），這次略過")
         return
     heartbeat_path = Path(args.heartbeat).expanduser().resolve() if args.heartbeat else None
 
@@ -961,7 +995,7 @@ def main() -> None:
             except Exception:  # noqa: BLE001 - logout failing on the way out changes nothing
                 pass
             api = None
-            print("群益 已離線", file=sys.stderr)
+            log("群益 已離線")
         if pidfile:
             release_pidfile(pidfile)
 
@@ -981,7 +1015,7 @@ def main() -> None:
             "多半是元件沒註冊：用系統管理員身分在 SDK 的 元件\\x64 資料夾跑 regsvr32 SKCOM.dll"
         )
 
-    print("群益 登入中…", file=sys.stderr)
+    log("群益 登入中…")
     api.login(os.environ["CAPITAL_USER_ID"], os.environ["CAPITAL_PASSWORD"])
     api.enter_monitor(timeout=args.connect_timeout, progress=connect_progress)
 
@@ -992,9 +1026,9 @@ def main() -> None:
     try:
         account = api.init_order(os.environ["CAPITAL_USER_ID"])
         if not account:
-            print("查不到證券帳號（市場別 TS），這次只出報價", file=sys.stderr)
+            log("查不到證券帳號（市場別 TS），這次只出報價")
     except Exception as err:  # noqa: BLE001
-        print(f"下單元件初始化失敗（只影響庫存）: {type(err).__name__}: {err}", file=sys.stderr)
+        log(f"下單元件初始化失敗（只影響庫存）: {type(err).__name__}: {err}")
 
     if not codes and not account:
         sys.exit(
@@ -1005,8 +1039,11 @@ def main() -> None:
     # The quotes fetch covers the watchlist UNION every held code, so a
     # holding that never made the watchlist still gets a live price here -
     # build_holdings_payload prefers exactly that over its own fallback. The
-    # union can only grow after the first holdings answer, so the initial
-    # subscribe is the watchlist and the loop re-subscribes when it widens.
+    # initial subscribe is the watchlist; each holdings file written re-sets
+    # the held part to what that file holds, so a sold position stops being
+    # subscribed and priced rather than riding along until the next restart.
+    watch = list(codes)
+    held: list[str] = []
     subscribed: list[str] = []
 
     def resubscribe(wanted: list[str]) -> None:
@@ -1019,6 +1056,7 @@ def main() -> None:
     resubscribe(codes + [c for c, _ in indices])
 
     first_tick = True
+    last_pl_problem: str | None = None  # logged once per change, not every tick
     failed_ticks = 0  # consecutive ticks that wrote no quotes (link down, raised, or nothing priced)
     give_up_at = failed_ticks_limit(args.interval)
     try:
@@ -1028,7 +1066,7 @@ def main() -> None:
             # or on the US board). The very first tick is exempt because the
             # band writes the heartbeat moments BEFORE spawning this process.
             if heartbeat_path and not first_tick and heartbeat_stale(heartbeat_path):
-                print(f"心跳逾時（{heartbeat_path} 沒人更新），結束", file=sys.stderr)
+                log(f"心跳逾時（{heartbeat_path} 沒人更新），結束")
                 break
             first_tick = False
 
@@ -1036,7 +1074,7 @@ def main() -> None:
                 try:
                     api.request_holdings(os.environ["CAPITAL_USER_ID"], account)
                 except Exception as err:  # noqa: BLE001 - keep pumping; the quotes half of the tick still works
-                    print(f"庫存查詢送出失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"庫存查詢送出失敗（保留上一份）: {type(err).__name__}: {err}")
 
             # The pump IS the tick: SKCOM only moves prices into its cache
             # while messages are being dispatched, and the holdings rows
@@ -1054,42 +1092,48 @@ def main() -> None:
             # missed costs one clean respawn, never a frozen price.
             payload = None
             if not api.connected or api.quote_state() != QUOTE_STATE_READY:
-                print(f"報價主機斷線（保留上一份檔案）{api.connection_error}", file=sys.stderr)
+                log(f"報價主機斷線（保留上一份檔案）{api.connection_error}")
             else:
                 try:
                     payload = build_payload(api, codes, indices, watchlist_names)
                 except Exception as err:  # noqa: BLE001 - any COM error is the same story here
-                    print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
             # only a written file counts as alive: a link that reads READY but
             # prices nothing (subscriptions lost on a silent reconnect) is as
             # dead as one that is down
             failed_ticks = 0 if payload else failed_ticks + 1
             if failed_ticks >= give_up_at:
-                print(f"連續 {failed_ticks} 輪沒有報價，結束讓 band 重新登入", file=sys.stderr)
+                log(f"連續 {failed_ticks} 輪沒有報價，結束讓 band 重新登入")
                 sys.exit(1)
             if payload:
                 write_atomic(out_path, payload)
                 stamp = time.strftime("%H:%M:%S", time.localtime(payload["dataAt"] / 1000))
-                print(f"{stamp}  {len(payload['quotes'])} 檔 -> {out_path}", file=sys.stderr)
+                log(f"{len(payload['quotes'])} 檔 -> {out_path}（資料 {stamp}）")
             # a failed snapshot leaves the file alone: the band drops a file
             # older than 120 s by itself and says so, which beats a stale
             # price that still looks live
 
             if account:
+                problem = pl_report_problem(api.pl_status, api.pl_rows)
+                if problem != last_pl_problem:
+                    log(problem or "庫存查詢恢復正常")
+                    last_pl_problem = problem
                 try:
                     holdings_payload = build_holdings_payload(api.pl_rows, payload["quotes"] if payload else {})
                 except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
-                    print(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
                     holdings_payload = None
                 if holdings_payload:
                     write_atomic(holdings_path, holdings_payload)
-                    print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
+                    log(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}")
                     # a held code that never made the watchlist still needs a
-                    # live price, so widen the subscription and let the next
-                    # tick pick it up
-                    held = [row["code"] for row in holdings_payload["holdings"] if row["code"] not in codes]
-                    if held:
-                        codes.extend(held)
+                    # live price, and a sold one no longer does: the
+                    # subscription follows the file just written, and the
+                    # next tick prices the new set
+                    now_held = held_outside(watch, holdings_payload)
+                    if now_held != held:
+                        held = now_held
+                        codes = watch + held
                         resubscribe(codes + [c for c, _ in indices])
 
             if args.interval <= 0:

@@ -2,7 +2,8 @@
 What fetch-quotes-shioaji.py, fetch-quotes-capital.py and order-shioaji.py
 share: the runtime-dir rule (which must match runtimeDir() in
 hooks/constants.ts), env-file parsing, the watchlist read, the pidfile
-protocol, the heartbeat age, the atomic file write and the give-up threshold. Each script imports it from
+protocol, the heartbeat age, the atomic file write, the give-up threshold and
+the log line. Each script imports it from
 its own folder - running `python scripts/<script>.py` puts that folder first
 on sys.path.
 
@@ -17,6 +18,7 @@ import os
 import re
 import signal
 import sys
+import time
 from pathlib import Path
 
 RUNTIME_DIR_ROOT = ".claude/stock-band"
@@ -294,3 +296,17 @@ def failed_ticks_limit(interval: float) -> int:
     120 s staleness, so its respawns all bounced off our pidfile) and after
     6 s at interval 1 (a blip forcing a full re-login)."""
     return max(1, math.ceil(GIVE_UP_AFTER_S / interval)) if interval > 0 else 1
+
+
+# --- log ---------------------------------------------------------------------
+
+
+def log(message: str) -> None:
+    """
+    One line to stderr, stamped with the local date and time. A spawned
+    fetcher's stderr is appended to stock-shioaji.log / stock-capital.log in
+    the runtime dir across every run, so an unstamped line there could be
+    from any day. sys.stderr is looked up per call, which is what lets a test
+    capture it.
+    """
+    print(f"{time.strftime('%m-%d %H:%M:%S')} {message}", file=sys.stderr, flush=True)

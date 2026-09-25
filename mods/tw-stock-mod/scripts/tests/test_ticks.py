@@ -308,11 +308,10 @@ def test_tick_updated_bars_survive_the_next_snapshot_inside_the_kbars_window():
     rows = fetcher.fetch_futures_rows(api, {"TXFJ6": TXF}, ["TXFJ6"], "2026-09-18", kbars_cache=cache, now=clock)
 
     assert api.kbars_calls == 1
-    assert rows["TXFJ6"]["bars"][-1] == [110.0, 115.0, 109.0, 115.0, 1.0, BUCKET_2105]
-    # row["bars"] IS barsBy["5"]'s cache list, not a copy - a tick that
-    # mutated one is visible through the other and through the file's payload
-    assert rows["TXFJ6"]["bars"] is rows["TXFJ6"]["barsBy"]["5"]
-    assert rows["TXFJ6"]["bars"] is cache["TXFJ6"]["by"][5]["bars"]
+    assert rows["TXFJ6"]["barsBy"]["5"][-1] == [110.0, 115.0, 109.0, 115.0, 1.0, BUCKET_2105]
+    # barsBy["5"] IS the cache list, not a copy - a tick that mutated the
+    # cache is visible through the file's payload
+    assert rows["TXFJ6"]["barsBy"]["5"] is cache["TXFJ6"]["by"][5]["bars"]
 
 
 # ---------------------------------------------------------------------------

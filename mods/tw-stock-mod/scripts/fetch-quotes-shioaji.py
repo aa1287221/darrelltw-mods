@@ -90,6 +90,7 @@ from _common import (
     failed_ticks_limit,
     field,
     load_env,
+    log,
     read_env_file,
     read_watchlist,
     release_pidfile,
@@ -349,11 +350,11 @@ def minute_buckets(rows_1min: list[dict], minutes: int) -> list[dict]:
 def futures_quote_row(contract, snapshot, bars_by: dict, requested_code: str) -> dict | None:
     """One futures-quotes.json entry; multiplier/decimals/prevClose always
     come from `contract`, never a lookup table. `bars_by` is {"1"/"5"/"15"/
-    "60": bars}, already ≤ FUTURES_BAR_LIMIT each (see refresh_futures_kbars)
-    - `bars` stays the 5-minute set for backward compatibility, and is the
-    SAME list object as barsBy["5"] so a tick that mutates one is visible
-    through the other. `ts` is popped by build_futures_payload once folded
-    into dataAt."""
+    "60": bars}, already ≤ FUTURES_BAR_LIMIT each (see refresh_futures_kbars).
+    There is no separate `bars` key: it only ever repeated barsBy["5"], which
+    doubled the largest part of a file the band re-reads every few seconds -
+    the band reads barsBy["5"] as the row's bars (hooks/files.ts). `ts` is
+    popped by build_futures_payload once folded into dataAt."""
     close = float(field(snapshot, "close", 0) or 0)
     if close <= 0:
         return None
@@ -363,7 +364,6 @@ def futures_quote_row(contract, snapshot, bars_by: dict, requested_code: str) ->
         "name": field(contract, "name", None) or requested_code,
         "multiplier": field(contract, "multiplier", 1),
         "decimals": int(field(contract, "decimal_locator", 0) or 0),
-        "bars": bars_by.get("5", []),
         "barsBy": bars_by,
         "ts": fix_taipei_ts(int(field(snapshot, "ts", 0) or 0)),
     }
@@ -540,7 +540,7 @@ def drain_ticks(tick_queue: queue.Queue, overlays: dict, code_maps: dict, kbars_
         except queue.Empty:
             return
         if not isinstance(item, TickEvent):
-            print(f"永豐 事件 resp={item[1]} code={item[2]} {item[3]} {item[4]}", file=sys.stderr)
+            log(f"永豐 事件 resp={item[1]} code={item[2]} {item[3]} {item[4]}")
             continue
         overlay = overlays.get(item.market)
         if overlay is None:
@@ -589,19 +589,19 @@ def sync_subscriptions(api, sj, desired: dict, subscribed: dict) -> None:
         try:
             api.subscribe(contract, quote_type=sj.QuoteType.Tick, version=sj.QuoteVersion.v1)
         except Exception as err:  # noqa: BLE001 - one bad subscription must not stop the others or the snapshots
-            print(f"訂閱 tick 失敗 {market} {code}: {type(err).__name__}: {err}", file=sys.stderr)
+            log(f"訂閱 tick 失敗 {market} {code}: {type(err).__name__}: {err}")
             continue
         subscribed[key] = contract
-        print(f"訂閱 tick {market} {code}" + (f" -> {resolved}" if resolved != code else ""), file=sys.stderr)
+        log(f"訂閱 tick {market} {code}" + (f" -> {resolved}" if resolved != code else ""))
     for key in [k for k in subscribed if k not in desired]:
         market, code = key
         try:
             api.unsubscribe(subscribed[key], quote_type=sj.QuoteType.Tick, version=sj.QuoteVersion.v1)
         except Exception as err:  # noqa: BLE001 - keep it listed and retry next time round
-            print(f"退訂 tick 失敗 {market} {code}: {type(err).__name__}: {err}", file=sys.stderr)
+            log(f"退訂 tick 失敗 {market} {code}: {type(err).__name__}: {err}")
             continue
         del subscribed[key]
-        print(f"退訂 tick {market} {code}", file=sys.stderr)
+        log(f"退訂 tick {market} {code}")
 
 
 def split_futures_codes(raw: str) -> list[str]:
@@ -635,7 +635,7 @@ def refresh_futures_kbars(api, contract, code: str, start: str, today: str, kbar
     try:
         rows_1min = kbars_to_rows(api.kbars(contract, start=start, end=today))
     except Exception as err:  # noqa: BLE001 - a bad K-bar fetch keeps the quote, just with no bars
-        print(f"{code} K 棒取得失敗（沿用{'上次結果' if cached else '空陣列'}）: {type(err).__name__}: {err}", file=sys.stderr)
+        log(f"{code} K 棒取得失敗（沿用{'上次結果' if cached else '空陣列'}）: {type(err).__name__}: {err}")
         if cached:
             return _bars_by(cached), "（取得失敗，未更新快取）"
         return {str(minutes): [] for minutes in FUTURES_TIMEFRAMES}, "（取得失敗，未更新快取）"
@@ -687,19 +687,18 @@ def fetch_futures_rows(
     for code, contract in live.items():
         snap = snaps.get(code)
         if snap is None:
-            print(f"跳過期貨 {code}：這次快照沒有回應", file=sys.stderr)
+            log(f"跳過期貨 {code}：這次快照沒有回應")
             continue
         bars_by, cadence_note = refresh_futures_kbars(api, contract, code, start, today, kbars_cache, tick_now)
         row = futures_quote_row(contract, snap, bars_by, code)
         if row is None:
-            print(f"跳過期貨 {code}：快照價格無效", file=sys.stderr)
+            log(f"跳過期貨 {code}：快照價格無效")
             continue
         rows[code] = row
         resolved = row.get("resolved", code)
         counts = " ".join(f"{m}分={len(bars_by.get(str(m), []))}" for m in FUTURES_TIMEFRAMES)
-        print(
+        log(
             f"期貨 {code} -> {resolved}  乘數={row['multiplier']}  小數位={row['decimals']}  K棒 {counts} 根{cadence_note}",
-            file=sys.stderr,
         )
     return rows
 
@@ -710,10 +709,10 @@ def fetch_futures_positions(api) -> list:
     neither hits the caller as an exception every tick."""
     account = getattr(api, "futopt_account", None)
     if account is None:
-        print("期貨帳戶未設定（futopt_account 是 None），期貨庫存視為空", file=sys.stderr)
+        log("期貨帳戶未設定（futopt_account 是 None），期貨庫存視為空")
         return []
     if not getattr(account, "signed", True):
-        print(f"期貨帳戶未簽署（{field(account, 'account_id', '?')} signed=False），期貨庫存視為空", file=sys.stderr)
+        log(f"期貨帳戶未簽署（{field(account, 'account_id', '?')} signed=False），期貨庫存視為空")
         return []
     return api.list_positions(account) or []
 
@@ -1019,7 +1018,7 @@ def main() -> None:
 
     pidfile = Path(args.pidfile).expanduser().resolve() if args.pidfile else None
     if pidfile and not claim_pidfile(pidfile):
-        print(f"另一個 fetcher 已經在跑這個專案（{pidfile} 裡的 pid 還活著），這次略過", file=sys.stderr)
+        log(f"另一個 fetcher 已經在跑這個專案（{pidfile} 裡的 pid 還活著），這次略過")
         return
     heartbeat_path = Path(args.heartbeat).expanduser().resolve() if args.heartbeat else None
 
@@ -1037,7 +1036,7 @@ def main() -> None:
             except Exception:  # noqa: BLE001 - logout failing on the way out changes nothing
                 pass
             api = None
-            print("永豐 已登出", file=sys.stderr)
+            log("永豐 已登出")
         if pidfile:
             release_pidfile(pidfile)
 
@@ -1062,7 +1061,7 @@ def main() -> None:
     import shioaji as sj  # imported here so --help works without the SDK
 
     api = sj.Shioaji()
-    print("永豐 登入中…", file=sys.stderr)
+    log("永豐 登入中…")
     api.login(
         api_key=os.environ["SINOBON_API_KEY"],
         secret_key=os.environ["SINOBON_SECRET_KEY"],
@@ -1102,7 +1101,7 @@ def main() -> None:
         positions = fetch_positions(api)
         stock_positions_clock.fetched()
     except Exception as err:  # noqa: BLE001 - a failed first fetch just means no holdings this run
-        print(f"庫存查詢失敗: {type(err).__name__}: {err}", file=sys.stderr)
+        log(f"庫存查詢失敗: {type(err).__name__}: {err}")
         positions = []
     position_codes = {str(field(p, "code", "")).strip() for p in positions}
     position_codes.discard("")
@@ -1136,7 +1135,7 @@ def main() -> None:
             return contracts[code]
         contract = api.Contracts.Stocks[code]
         if contract is None:
-            print(f"跳過 {code}：永豐查不到這個代號", file=sys.stderr)
+            log(f"跳過 {code}：永豐查不到這個代號")
             return None
         contracts[code] = contract
         return contract
@@ -1163,7 +1162,7 @@ def main() -> None:
             return futures_contracts[code]
         contract = api.Contracts.Futures[code]
         if contract is None:
-            print(f"跳過期貨 {code}：永豐查不到這個合約代號", file=sys.stderr)
+            log(f"跳過期貨 {code}：永豐查不到這個合約代號")
             return None
         futures_contracts[code] = contract
         return contract
@@ -1195,7 +1194,7 @@ def main() -> None:
             if heartbeat_path:
                 stale, wanted = read_heartbeat(heartbeat_path)
                 if stale and not first_tick:
-                    print(f"心跳逾時（{heartbeat_path} 沒人更新），結束", file=sys.stderr)
+                    log(f"心跳逾時（{heartbeat_path} 沒人更新），結束")
                     break
                 why = f"心跳要 {sorted(wanted) or '（沒有市場）'}"
             else:
@@ -1210,7 +1209,7 @@ def main() -> None:
                     futures_positions = fetch_futures_positions(api)
                     futures_positions_clock.fetched()
                 except Exception as err:  # noqa: BLE001 - None/unsigned accounts return [] inside; only a network/SDK error reaches here, so keep last tick's positions
-                    print(f"期貨庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"期貨庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}")
                     futures_positions = last_futures_positions
                 last_futures_positions = futures_positions
 
@@ -1226,13 +1225,12 @@ def main() -> None:
             # positions alone drive futures work (holdings-only user), but only while the band wants tf
             work_tf = tf_wanted and bool(tick_futures_codes or futures_positions)
             tf_note = "做" if work_tf else ("不做：心跳沒要 tf" if not tf_wanted else "不做：沒有 --futures 代號也沒有期貨部位")
-            print(
+            log(
                 f"{time.strftime('%H:%M:%S')}  tick  台股={'做' if work_tw else '不做：心跳沒要 tw'}  "
                 f"期貨={tf_note}  （{why}）",
-                file=sys.stderr,
             )
             if subscribed:
-                print(format_tick_stats(tick_stats), file=sys.stderr)
+                log(format_tick_stats(tick_stats))
             tick_stats = new_tick_stats()
             attempted = failed = 0
 
@@ -1242,7 +1240,7 @@ def main() -> None:
                         positions = fetch_positions(api)
                         stock_positions_clock.fetched()
                     except Exception as err:  # noqa: BLE001 - keep the last good positions rather than crash
-                        print(f"庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
+                        log(f"庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}")
                 for pos in positions:
                     code = str(field(pos, "code", "")).strip()
                     if code:
@@ -1256,7 +1254,7 @@ def main() -> None:
                 try:
                     payload = build_payload(api, contracts, index_contracts, watchlist_names)
                 except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
-                    print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
                     payload = None
                 # raised or answered nothing priced: a dead session can do either
                 failed += 1 if contracts and not payload else 0
@@ -1264,7 +1262,7 @@ def main() -> None:
                     write_atomic(out_path, tw_overlay.absorb(payload, int(time.time() * 1000)))
                     rows = len(payload["quotes"])
                     stamp = time.strftime("%H:%M:%S", time.localtime(payload["dataAt"] / 1000))
-                    print(f"{stamp}  {rows} 檔 -> {out_path}", file=sys.stderr)
+                    log(f"{rows} 檔 -> {out_path}（資料 {stamp}）")
                 # a failed snapshot leaves the file alone: the band drops a file
                 # older than 120 s by itself and says so, which beats a stale price
                 # that still looks live
@@ -1274,11 +1272,11 @@ def main() -> None:
                         positions, contracts, payload["quotes"] if payload else {}, watchlist_names
                     )
                 except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
-                    print(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
                     holdings_payload = None
                 if holdings_payload:
                     write_atomic(holdings_path, holdings_payload)
-                    print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
+                    log(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}")
 
             if work_tf:
                 # same guard as the stock side: a code that resolves to no
@@ -1291,13 +1289,13 @@ def main() -> None:
                         api, futures_contracts, tick_futures_codes, date.today().isoformat(), kbars_cache=futures_kbars_cache
                     )
                 except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
-                    print(f"期貨快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"期貨快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
                     futures_rows = {}
                 futures_payload = build_futures_payload(futures_rows)
                 failed += 1 if tf_priceable and not futures_payload else 0
                 if futures_payload:
                     write_atomic(futures_out_path, tf_overlay.absorb(futures_payload, int(time.time() * 1000)))
-                    print(f"{len(futures_payload['quotes'])} 檔期貨 -> {futures_out_path}", file=sys.stderr)
+                    log(f"{len(futures_payload['quotes'])} 檔期貨 -> {futures_out_path}")
 
                 try:
                     holding_rows = []
@@ -1305,7 +1303,7 @@ def main() -> None:
                         pos_code = str(field(pos, "code", "")).strip()
                         contract = futures_contracts.get(pos_code)
                         if not contract:
-                            print(f"期貨庫存 {pos_code} 略過：合約未解析", file=sys.stderr)
+                            log(f"期貨庫存 {pos_code} 略過：合約未解析")
                             continue
                         row = futures_holding_row(pos, contract)
                         if row is None:
@@ -1313,17 +1311,16 @@ def main() -> None:
                         mismatch = check_futures_pnl(pos, contract)
                         holding_rows.append(row)
                         status = mismatch if mismatch else "OK"
-                        print(
+                        log(
                             f"期貨庫存 {row['code']} 方向={row['direction']} qty={row['qty']} 乘數={row['multiplier']} pnl={status}",
-                            file=sys.stderr,
                         )
                     futures_holdings_payload = build_futures_holdings_payload(holding_rows)
                 except Exception as err:  # noqa: BLE001 - same story as the quotes side
-                    print(f"期貨庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                    log(f"期貨庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
                     futures_holdings_payload = None
                 if futures_holdings_payload:
                     write_atomic(futures_holdings_path, futures_holdings_payload)
-                    print(f"{len(futures_holdings_payload['holdings'])} 檔期貨庫存 -> {futures_holdings_path}", file=sys.stderr)
+                    log(f"{len(futures_holdings_payload['holdings'])} 檔期貨庫存 -> {futures_holdings_path}")
 
             # A session that died (token expired, connection dropped for good)
             # fails every snapshot - raising, or answering nothing priced -
@@ -1333,7 +1330,7 @@ def main() -> None:
             # and the band's next tick respawns a fresh login.
             failed_ticks = failed_ticks + 1 if attempted and failed == attempted else 0
             if failed_ticks >= give_up_at:
-                print(f"連續 {failed_ticks} 輪快照都沒有可用報價，結束讓 band 重新登入", file=sys.stderr)
+                log(f"連續 {failed_ticks} 輪快照都沒有可用報價，結束讓 band 重新登入")
                 sys.exit(1)
 
             # Ticks follow the worked set: subscribe what this tick served,
@@ -1364,10 +1361,11 @@ def main() -> None:
             if args.interval <= 0:
                 break
             sync_subscriptions(api, sj, desired, subscribed)
-            slept = 0.0
-            while running and slept < args.interval:
+            # a monotonic deadline: counting 0.2 s sleeps left out the drain
+            # and flush work between them, and the wall clock can step
+            wait_until = time.monotonic() + args.interval
+            while running and time.monotonic() < wait_until:
                 time.sleep(0.2)
-                slept += 0.2
                 drain_ticks(tick_queue, overlays, code_maps, futures_kbars_cache, tick_stats)
                 flush_overlays(overlays, int(time.time() * 1000), tick_stats)
     finally:

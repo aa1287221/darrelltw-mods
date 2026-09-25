@@ -8,6 +8,7 @@ one copy rather than a drifting local one.
 """
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import time
@@ -289,3 +290,9 @@ def test_scripts_run_as_scripts_on_a_cp1252_pipe(script, tmp_path):
     assert done.returncode == 0, (script, done.stderr.decode("utf-8", "replace"))
     out = done.stdout.decode("utf-8")
     assert out.startswith("usage:") and ("永豐" in out or "群益" in out), out[:200]
+
+
+def test_log_lines_carry_the_date_and_time(capsys):
+    _common.log("群益 已離線")
+    err = capsys.readouterr().err
+    assert re.fullmatch(r"\d\d-\d\d \d\d:\d\d:\d\d 群益 已離線\n", err), err

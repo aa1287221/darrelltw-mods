@@ -199,3 +199,85 @@ def test_build_payload_drops_unpriced_codes_and_falls_back_on_names():
 
 def test_build_payload_nothing_priced_is_none():
     assert capital.build_payload(FakeApi({}), ["2330"], [], {}) is None
+
+
+# ---------------------------------------------------------------------------
+# the message pump is the fetcher's tick: its wait runs on the monotonic
+# clock, so a wall clock stepped back (NTP, resume from sleep) cannot stretch it
+# ---------------------------------------------------------------------------
+
+
+class SteppedClock:
+    """time.monotonic advances with every sleep; time.time is stuck, the way
+    it reads while a wall clock stepped back catches up."""
+
+    def __init__(self):
+        self.mono = 0.0
+        self.sleeps = 0
+
+    def monotonic(self):
+        return self.mono
+
+    def time(self):
+        return 1_790_000_000.0
+
+    def sleep(self, seconds):
+        self.sleeps += 1
+        if self.sleeps > 10_000:
+            raise AssertionError("pump never returned - is it timed off the wall clock?")
+        self.mono += seconds
+
+
+def test_pump_waits_on_the_monotonic_clock_not_the_wall_clock(monkeypatch):
+    import ctypes
+
+    clock = SteppedClock()
+    monkeypatch.setattr(capital, "time", clock)
+    api = capital.Capital.__new__(capital.Capital)  # no SKCOM: only the pump's own fields
+    api._msg = ctypes.c_int()
+    api._user32 = types.SimpleNamespace(PeekMessageW=lambda *a: 0, TranslateMessage=None, DispatchMessageW=None)
+
+    api.pump(3.0)
+
+    assert 3.0 <= clock.mono < 3.1  # returned once 3 s of monotonic time had passed
+
+
+# ---------------------------------------------------------------------------
+# the 未實現損益 answer: its status row is checked, and the held codes the
+# subscription carries follow the holdings file just written
+# ---------------------------------------------------------------------------
+
+
+def test_pl_report_with_rows_is_fine_whatever_its_status():
+    assert capital.pl_report_problem("", ["台積電,2330"]) is None
+    assert capital.pl_report_problem("999,x", ["台積電,2330"]) is None
+
+
+def test_pl_report_success_with_no_rows_is_nothing_held():
+    assert capital.pl_report_problem("000,查詢成功", []) is None
+
+
+def test_pl_report_failure_status_is_named_in_the_log_line():
+    line = capital.pl_report_problem("601,查無帳號資料", [])
+    assert line is not None and "601,查無帳號資料" in line
+
+
+def test_pl_report_with_no_answer_says_so():
+    line = capital.pl_report_problem("", [])
+    assert line is not None and "沒有回應" in line
+
+
+def holdings(*codes):
+    return {"holdings": [{"code": c} for c in codes]}
+
+
+def test_held_outside_is_the_held_codes_the_watchlist_lacks_in_order():
+    assert capital.held_outside(["2330", "2317"], holdings("2454", "2330", "0050", "2454")) == ["2454", "0050"]
+
+
+def test_held_outside_drops_a_sold_code():
+    watch = ["2330"]
+    before = capital.held_outside(watch, holdings("2454", "0050"))
+    after = capital.held_outside(watch, holdings("0050"))  # 2454 sold
+    assert before == ["2454", "0050"]
+    assert after == ["0050"]

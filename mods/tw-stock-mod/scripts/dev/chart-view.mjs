@@ -11,7 +11,7 @@
 //
 // Usage: node chart-view.mjs $OUT/register.js $OUT/board.js <tf-proj> <tw-proj>
 // <tf-proj> pins tf with a `futures` list (the harness writes its runtime-dir
-// futures-quotes.json: six-element bars plus a barsBy block on TXFR1, bars
+// futures-quotes.json: a barsBy block and no `bars` on TXFR1, bars
 // alone on SRFJ6); <tw-proj> pins tw, feed off, with a project-level
 // stock-quotes.json whose bars are the old [o, h, l, c] shape.
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
@@ -67,7 +67,8 @@ const futuresFile = asOf => ({
   quotes: {
     TXFR1: {
       price: TXF_5[TXF_5.length - 1][3], prevClose: 47428, name: '臺股期貨 近月', multiplier: 200, decimals: 0, resolved: 'TXFJ6',
-      bars: TXF_5,
+      // barsBy alone, the way the 永豐 fetcher writes it: the band takes
+      // barsBy["5"] as the row's bars
       barsBy: { 1: TXF_1, 5: TXF_5, 15: TXF_15, 60: TXF_60 },
     },
     MXFR1: { price: 47430, prevClose: 47428, name: '小型臺指 近月', multiplier: 50, decimals: 0, resolved: 'MXFJ6', bars: MXF_5 },
