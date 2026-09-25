@@ -1,9 +1,11 @@
 """
 fetch-quotes-capital.py's main loop against a fake SKCOM, one scripted
-未實現損益 answer per tick: the subscription follows the holdings file (a
-sold code stops being subscribed and priced), and a failed or missing
-answer is logged once per change rather than every tick.
+未實現損益 answer per tick: the subscription follows the answers (a sold code
+stops being subscribed and priced once two answers agree, selling
+everything included), and a failed or missing answer is logged once per
+change rather than every tick.
 """
+import json
 import importlib.util
 import sys
 import types
@@ -104,7 +106,8 @@ OK = "000,查詢成功"
 def test_the_subscription_follows_the_held_codes_both_ways(tmp_path, monkeypatch):
     subs, out = run(tmp_path, monkeypatch, [
         (OK, [pl_row("2454"), pl_row("0050")]),
-        (OK, [pl_row("0050")]),  # 2454 sold
+        (OK, [pl_row("0050")]),  # 2454 sold: one answer is not enough to drop it
+        (OK, [pl_row("0050")]),  # the second agrees
         (OK, [pl_row("0050")]),
     ])
     assert subs == [
@@ -114,6 +117,28 @@ def test_the_subscription_follows_the_held_codes_both_ways(tmp_path, monkeypatch
     ]
     quotes = (out / "stock-quotes.json").read_text(encoding="utf-8")
     assert '"0050"' in quotes and '"2454"' not in quotes  # the tick after the shrink prices the new set
+
+
+def test_a_partial_answer_does_not_unsubscribe_for_one_tick(tmp_path, monkeypatch):
+    subs, _ = run(tmp_path, monkeypatch, [
+        (OK, [pl_row("2454"), pl_row("0050")]),
+        (OK, [pl_row("2454")]),  # the pump ended before 0050's row arrived
+        (OK, [pl_row("2454"), pl_row("0050")]),
+    ])
+    assert subs == [["2330", "TSEA"], ["2330", "2454", "0050", "TSEA"]]
+
+
+def test_selling_everything_empties_the_subscription_and_the_file(tmp_path, monkeypatch):
+    subs, out = run(tmp_path, monkeypatch, [
+        (OK, [pl_row("2454")]),
+        (OK, []),
+        (OK, []),
+        (OK, []),
+    ])
+    assert subs == [["2330", "TSEA"], ["2330", "2454", "TSEA"], ["2330", "TSEA"]]
+    held = json.loads((out / "stock-holdings.json").read_text(encoding="utf-8"))
+    assert held["holdings"] == []  # the band falls back to the config's holdings, not the sold position
+    assert '"2454"' not in (out / "stock-quotes.json").read_text(encoding="utf-8")
 
 
 def test_a_failed_or_missing_answer_is_logged_once_per_change(tmp_path, monkeypatch, capsys):

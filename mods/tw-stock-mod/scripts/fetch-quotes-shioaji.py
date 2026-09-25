@@ -1226,7 +1226,7 @@ def main() -> None:
             work_tf = tf_wanted and bool(tick_futures_codes or futures_positions)
             tf_note = "做" if work_tf else ("不做：心跳沒要 tf" if not tf_wanted else "不做：沒有 --futures 代號也沒有期貨部位")
             log(
-                f"{time.strftime('%H:%M:%S')}  tick  台股={'做' if work_tw else '不做：心跳沒要 tw'}  "
+                f"tick  台股={'做' if work_tw else '不做：心跳沒要 tw'}  "
                 f"期貨={tf_note}  （{why}）",
             )
             if subscribed:

@@ -630,6 +630,43 @@ def pl_report_problem(status: str, rows: list[str]) -> str | None:
     return None
 
 
+def pl_answered_empty(status: str, rows: list[str]) -> bool:
+    """A successful 未實現損益 answer with no rows: nothing is held."""
+    return not rows and status.split(",", 1)[0].strip() == PL_STATUS_OK
+
+
+class HeldCodes:
+    """
+    The held codes the quote subscription carries on top of the watchlist.
+
+    A code the latest answer adds is taken at once - it needs a live price
+    now. A code it drops is only let go once two answers in a row agree: the
+    pump window can end while OnProfitLossGWReport rows are still arriving,
+    and a partial answer must not unsubscribe a position for one tick and
+    subscribe it again on the next.
+    """
+
+    def __init__(self) -> None:
+        self.codes: list[str] = []
+        self._dropping: list[str] | None = None  # the last answer that dropped codes
+
+    def update(self, seen: list[str]) -> bool:
+        """Fold one answer's held codes in; True when `codes` changed."""
+        if all(code in seen for code in self.codes):
+            self._dropping = None
+            if seen == self.codes:
+                return False
+            self.codes = list(seen)
+            return True
+        confirmed = self._dropping == seen
+        self._dropping = None if confirmed else list(seen)
+        new = list(seen) if confirmed else self.codes + [c for c in seen if c not in self.codes]
+        if new == self.codes:
+            return False
+        self.codes = new
+        return True
+
+
 def held_outside(watch: list[str], holdings_payload: dict) -> list[str]:
     """The held codes the watchlist does not already cover, in holdings order."""
     out: list[str] = []
@@ -1043,7 +1080,7 @@ def main() -> None:
     # the held part to what that file holds, so a sold position stops being
     # subscribed and priced rather than riding along until the next restart.
     watch = list(codes)
-    held: list[str] = []
+    held = HeldCodes()
     subscribed: list[str] = []
 
     def resubscribe(wanted: list[str]) -> None:
@@ -1057,6 +1094,7 @@ def main() -> None:
 
     first_tick = True
     last_pl_problem: str | None = None  # logged once per change, not every tick
+    empty_answers = 0  # consecutive successful P/L answers with no rows
     failed_ticks = 0  # consecutive ticks that wrote no quotes (link down, raised, or nothing priced)
     give_up_at = failed_ticks_limit(args.interval)
     try:
@@ -1123,18 +1161,25 @@ def main() -> None:
                 except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
                     log(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
                     holdings_payload = None
+                answered_empty = pl_answered_empty(api.pl_status, api.pl_rows)
+                empty_answers = empty_answers + 1 if answered_empty else 0
                 if holdings_payload:
                     write_atomic(holdings_path, holdings_payload)
                     log(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}")
-                    # a held code that never made the watchlist still needs a
-                    # live price, and a sold one no longer does: the
-                    # subscription follows the file just written, and the
-                    # next tick prices the new set
-                    now_held = held_outside(watch, holdings_payload)
-                    if now_held != held:
-                        held = now_held
-                        codes = watch + held
-                        resubscribe(codes + [c for c, _ in indices])
+                elif empty_answers == 2:
+                    # everything sold, and two answers in a row say so: an
+                    # empty file replaces the last positions (the band then
+                    # falls back to the config's holdings, as with no file)
+                    write_atomic(holdings_path, {"asOf": int(time.time() * 1000), "market": "tw", "source": HOLDINGS_LABEL, "holdings": []})
+                    log(f"0 檔庫存（全部出清）-> {holdings_path}")
+                # a held code that never made the watchlist still needs a
+                # live price, and a sold one no longer does: the subscription
+                # follows the answers (HeldCodes), and the next tick prices
+                # the new set. No usable answer this tick changes nothing.
+                seen = held_outside(watch, holdings_payload) if holdings_payload else ([] if answered_empty else None)
+                if seen is not None and held.update(seen):
+                    codes = watch + held.codes
+                    resubscribe(codes + [c for c, _ in indices])
 
             if args.interval <= 0:
                 break
