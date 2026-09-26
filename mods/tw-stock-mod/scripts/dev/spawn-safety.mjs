@@ -12,6 +12,8 @@
 //       command - the log file still gets the fetcher's output. (No `"` in
 //       the name: under the old wrapper that broke the quoting first and hid
 //       the injection this is here to catch.)
+//   (3) a project `shioaji` value that is not an object leaves the user's
+//       block as it is (logged), instead of wiping its paths to defaults
 //
 // Usage: node spawn-safety.mjs $OUT/register.js   (makes its own temp dirs; no network)
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
@@ -36,12 +38,13 @@ await writeFile(join(home, '.claude', 'stock-band.json'), JSON.stringify({
   twSources: ['shioaji'],
   shioaji: { python: '/user/venv/bin/python', env: '/user/.sinobon.env' },
 }))
+/** a fresh register.js instance (`tag` defeats the ESM cache) against a project whose `shioaji` value is `projectShioaji` */
+async function boot(projectShioaji, tag) {
 await writeFile(join(projDir, '.claude', 'stock-band.json'), JSON.stringify({
   market: 'tw',
   tw: [{ code: '2330', name: '台積電' }],
   us: [],
-  // what a hostile repo would ship; interval is an ordinary key and applies
-  shioaji: { python: './tools/evil.sh', env: './creds.env', interval: 7 },
+  shioaji: projectShioaji,
 }))
 
 const logs = []
@@ -61,14 +64,21 @@ const $ = {
   process: { run: async argv => { spawns.push(argv); return { exitCode: 0, stdout: '', stderr: '' } } },
 }
 const handlers = new Map()
-const { register } = await import(pathToFileURL(regPath).href)
+const url = pathToFileURL(regPath)
+url.search = `?case=${tag}`
+const { register } = await import(url.href)
 register((e, a, b) => handlers.set(e, typeof a === 'function' ? a : b))
 await Promise.race([handlers.get('session.start')($, {}, async () => ({ kids: [] })), new Promise(r => setTimeout(r, 500))])
 for (const t of timers) await Promise.race([t.fn(), new Promise(r => setTimeout(r, 300))])
 for (const t of timers) await Promise.race([t.fn(), new Promise(r => setTimeout(r, 300))])
+return { logs, spawns }
+}
+const shioajiOf = spawns => spawns.find(argv => argv.some(a => String(a).endsWith('fetch-quotes-shioaji.py')))
 
 // --- (1) the project cannot choose the program or the env file ---------------
-const shioaji = spawns.find(argv => argv.some(a => String(a).endsWith('fetch-quotes-shioaji.py')))
+// what a hostile repo would ship; interval is an ordinary key and applies
+const { logs, spawns } = await boot({ python: './tools/evil.sh', env: './creds.env', interval: 7 }, 'object')
+const shioaji = shioajiOf(spawns)
 ok(shioaji !== undefined, `the shioaji route spawned (spawns=${spawns.length})`)
 const argv = shioaji ?? []
 const argOf = flag => { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1] : undefined }
@@ -95,6 +105,15 @@ if (shioaji) {
   ok(!existsSync(join(base, 'PWNED')), 'the `$(touch PWNED)` in the directory name did not run')
   const logged = existsSync(logPath) ? await readFile(logPath, 'utf8') : ''
   ok(logged.includes('fetch-quotes-shioaji.py'), `the fetcher's output reached the log file: ${JSON.stringify(logged.slice(0, 80))}`)
+}
+
+// --- (3) a project block that is not an object leaves the user's block alone -
+{
+  const { logs: badLogs, spawns: badSpawns } = await boot('x', 'string')
+  const bad = shioajiOf(badSpawns) ?? []
+  const badArg = flag => { const i = bad.indexOf(flag); return i >= 0 ? bad[i + 1] : undefined }
+  ok(bad.includes('/user/venv/bin/python') && badArg('--env') === '/user/.sinobon.env', `"shioaji": "x" in the project keeps the user's python and env (${badArg('--env')})`)
+  ok(badLogs.some(l => /設了 shioaji，已忽略/.test(l)), `the non-object block is logged as ignored: ${badLogs.filter(l => /已忽略/.test(l)).join(' / ')}`)
 }
 
 await rm(base, { recursive: true, force: true })

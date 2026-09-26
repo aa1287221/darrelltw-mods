@@ -1,8 +1,9 @@
 """
 A project's .claude/stock-band.json travels with a cloned repo, so it never
-names the file the 永豐 fetcher reads broker credentials from: with no --env,
-fetch-quotes-shioaji.py takes shioaji.env from ~/.claude/stock-band.json
-only (hooks/config.ts's mergeConfigRoots draws the same line for the band).
+names the file a broker fetcher reads credentials from, or (群益) the DLL
+directory it loads code from: with no --env/--dll, both fetchers take those
+from ~/.claude/stock-band.json only (hooks/config.ts's mergeConfigRoots draws
+the same line for the band).
 """
 import importlib.util
 import json
@@ -16,6 +17,11 @@ spec = importlib.util.spec_from_file_location("fetch_quotes_shioaji_user_only", 
 fetcher = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = fetcher
 spec.loader.exec_module(fetcher)
+
+capital_spec = importlib.util.spec_from_file_location("fetch_quotes_capital_user_only", SCRIPTS / "fetch-quotes-capital.py")
+capital = importlib.util.module_from_spec(capital_spec)
+sys.modules[capital_spec.name] = capital
+capital_spec.loader.exec_module(capital)
 
 
 def setup(tmp_path, monkeypatch, user_env=None):
@@ -56,3 +62,27 @@ def test_the_user_config_still_names_it(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exit_info:
         fetcher.main()
     assert str(user_env) in str(exit_info.value)
+
+
+def write_config(path, block):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"capital": block}), encoding="utf-8")
+    return path
+
+
+def test_capital_env_and_dll_never_come_from_the_project(tmp_path):
+    user = write_config(tmp_path / "home" / ".claude" / "stock-band.json", {"env": "~/.capital.env", "dll": "C:/sdk/SKCOM.dll"})
+    project = write_config(tmp_path / "proj" / ".claude" / "stock-band.json", {
+        "env": "./creds.env", "dll": "./evil/SKCOM.dll", "python": "./evil.exe", "interval": 5,
+    })
+    block = capital.read_capital_config(user, project)
+    assert block["env"] == "~/.capital.env"
+    assert block["dll"] == "C:/sdk/SKCOM.dll"
+    assert "python" not in block
+    assert block["interval"] == 5  # an ordinary key still comes from the project
+
+
+def test_capital_project_paths_are_dropped_even_with_no_user_file(tmp_path):
+    project = write_config(tmp_path / "proj" / ".claude" / "stock-band.json", {"env": "./creds.env", "dll": "./evil/SKCOM.dll"})
+    block = capital.read_capital_config(None, project)
+    assert "env" not in block and "dll" not in block

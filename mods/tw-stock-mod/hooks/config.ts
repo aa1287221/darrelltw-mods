@@ -433,9 +433,10 @@ export const USER_ONLY_KEYS: Record<'shioaji' | 'capital', string[]> = {
  * user-level root < project root, key by key: the project file wins every
  * top-level key it states, except that the `shioaji`/`capital` blocks merge
  * per key (a project stating only `interval` keeps the user's paths) and
- * never take a USER_ONLY_KEYS value from the project. `ignored` names the
- * project values dropped that way, e.g. "shioaji.python", for the caller to
- * log once.
+ * never take a USER_ONLY_KEYS value from the project, and a project value
+ * for either block that is not an object leaves the user's block as it is.
+ * `ignored` names the project values dropped that way, e.g.
+ * "shioaji.python" or "capital", for the caller to log once.
  */
 export function mergeConfigRoots(
   user: Record<string, unknown> | undefined,
@@ -445,9 +446,17 @@ export function mergeConfigRoots(
   const root: Record<string, unknown> = { ...user, ...project }
   const ignored: string[] = []
   for (const block of ['shioaji', 'capital'] as const) {
+    if (!project || !(block in project)) continue
     const fromUser = asRecord(user?.[block])
-    const fromProject = asRecord(project?.[block])
-    if (!fromProject) continue
+    const fromProject = asRecord(project[block])
+    if (!fromProject) {
+      // not an object: it cannot state a key, so it must not wipe the
+      // user's block either (the spread above already took it)
+      ignored.push(block)
+      if (user && block in user) root[block] = user[block]
+      else delete root[block]
+      continue
+    }
     const merged: Record<string, unknown> = { ...fromUser, ...fromProject }
     for (const key of USER_ONLY_KEYS[block]) {
       if (!(key in fromProject)) continue
