@@ -40,11 +40,14 @@ def setup(tmp_path, monkeypatch, user_env=None):
 
 
 def test_the_project_config_never_names_the_env_file(tmp_path, monkeypatch):
-    home = setup(tmp_path, monkeypatch)
+    setup(tmp_path, monkeypatch)
     with pytest.raises(SystemExit) as exit_info:
         fetcher.main()
-    # the repo's creds.env is ignored: the default ~/.sinobon.env is what it looked for
-    assert str(home / ".sinobon.env") in str(exit_info.value)
+    # the repo's creds.env is ignored: the default ~/.sinobon.env is what it
+    # looked for (where `~` lands is expanduser's business - on Windows it
+    # reads USERPROFILE, not the HOME set here)
+    message = str(exit_info.value)
+    assert ".sinobon.env" in message and "creds.env" not in message
 
 
 def test_the_user_config_still_names_it(tmp_path, monkeypatch):
