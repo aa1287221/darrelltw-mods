@@ -18,8 +18,16 @@ CA 憑證設定好並啟用成功，沒設定或啟用失敗，腳本會印 `需
 
 ## 三個子指令
 
-- **`place`**：下單。`--code --side buy|sell --price --qty`，選填 `--lot common|odd`（股票用，
-  預設 common／張）、`--octype auto|new|cover`（期貨用，預設 auto）。
+- **`place`**：下單。`--code --side buy|sell --price --qty`，選填 `--lot`（股票用，預設
+  `common`）、`--octype auto|new|cover`（期貨用，預設 auto）。`--lot` 三種：
+  - `common`：整股，數量單位是張。
+  - `intraday-odd`：盤中零股，數量單位是股——使用者在盤中說「買 50 股」用這個。
+  - `odd`：盤後零股（13:40–14:30 撮合），數量單位是股。使用者沒說盤後就不要選它。
+
+  確認畫面的數量後面會標出是哪一種（整股／盤中零股／盤後零股），轉述時保留。
+- 價格要是正數、數量至少 1，否則腳本直接拒絕；正式模式下合約查不到漲跌停就拒絕送單，不會跳過檢查。
+- `place` 如果印出「狀態未知」：送單時出錯，委託**可能已經到券商**。先跑 `status` 確認，**不要**直接
+  重下同一筆單。
 - **`status`**：`update_status` 之後 `list_trades`，逐筆印出 id / 代號 / 買賣 / 價格 / 數量 /
   狀態 / 已成量。
 - **`cancel --id <委託 id>`**：取消一筆委託，id 是 `status` 或前一次 `place` 印出的那個。

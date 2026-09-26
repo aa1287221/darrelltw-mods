@@ -925,7 +925,8 @@ any hook, and the band never places orders.**
 `sj.Shioaji(simulation=True)` and nothing it does touches a real position.
 
 **Live needs two keys, both true, plus a CA cert.** `"order": { "live": true
-}"` in the USER-level `~/.claude/stock-band.json` — never the project file,
+}"` (the JSON `true` itself — `"true"`, `"false"` or `1` all leave it in
+simulation) in the USER-level `~/.claude/stock-band.json` — never the project file,
 so a checked-in config can never turn live trading on — **and** `--live` on
 the invocation; either alone still runs in simulation. Live additionally
 needs `"order": { "ca": "~/path.pfx", "caPasswordEnv":
@@ -937,9 +938,21 @@ testing an actual cert is out of scope for now.)
 
 **A confirmation gate guards every order.** Before `place_order` the script
 prints the contract, direction, price, quantity (with its unit — 張/股 by
-lot, 口 for futures), account id and mode (模擬/正式), then waits for the
-literal reply `確認` on stdin. `--yes` skips that prompt in simulation only —
-live always prompts, whatever `--yes` says.
+lot, 口 for futures, and for stocks the lot: 整股 / 盤中零股 / 盤後零股),
+account id and mode (模擬/正式), then waits for the literal reply `確認` on
+stdin. `--yes` skips that prompt in simulation only — live always prompts,
+whatever `--yes` says. `--lot` is `common` (整股, the default),
+`intraday-odd` (盤中零股) or `odd` (盤後零股, shioaji's `Odd`, matched
+13:40–14:30).
+
+**Guards before the gate.** The price must be a positive finite number and
+the quantity at least 1 and at most `order.maxQty` (a whole number, default
+1 — anything else there refuses every order). A contract with no
+limit-up/limit-down band is skipped with a `SKIPPED` note in simulation and
+refused in live mode. If `place_order` itself fails, the order may already
+be at the broker: the script logs the attempt and the error to `orders.log`,
+says the state is unknown, and exits 1 — run `status` before placing it
+again.
 
 **Keep the Bash approval prompt in the loop.** Under `/tw-stock-mod:order` it
 is Claude that passes your `確認` to the script's stdin, so once live trading

@@ -2,6 +2,7 @@
 (issue #11) for the acceptance criteria these map to - AC bullet 1's sub-cases."""
 import importlib.util
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -15,10 +16,12 @@ sys.modules[spec.name] = order
 spec.loader.exec_module(order)
 
 # These build real sj order/Account objects, so they need the SDK itself. A
-# machine without it skips them instead of reporting 13 failures that say
-# nothing about order-shioaji.py's own logic.
+# machine without it skips them instead of reporting failures that say
+# nothing about order-shioaji.py's own logic - except where REQUIRE_SHIOAJI
+# is set (CI's `checks` job), where the order path must actually run.
 needs_shioaji = pytest.mark.skipif(
-    importlib.util.find_spec("shioaji") is None, reason="shioaji SDK not installed"
+    importlib.util.find_spec("shioaji") is None and not os.environ.get("REQUIRE_SHIOAJI"),
+    reason="shioaji SDK not installed",
 )
 
 
@@ -398,3 +401,114 @@ def test_settle_after_cancel_gives_up_after_tries_and_says_so():
     trade, settled = order.settle_after_cancel(lambda: stuck, "A1", tries=3, sleep=lambda s: None)
     assert settled is False
     assert trade is stuck[0]
+
+
+# ---------------------------------------------------------------------------
+# audit hardening: what a malformed price, quantity or config can no longer do
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("price", [float("nan"), float("inf"), 0.0, -1.0])
+def test_guard_price_rejects_a_price_that_is_not_a_positive_finite_number(price):
+    # nan compares False against both bounds, so it used to pass as in-band
+    status, message = order.guard_price(TXF_CONTRACT, price)
+    assert status == "reject" and message
+
+
+def test_guard_price_missing_band_is_a_reject_in_live_mode():
+    contract = make_contract("XXXX", "沒有漲跌停資料", None, None)
+    assert order.guard_price(contract, 100.0, live=False)[0] == "skip"
+    status, message = order.guard_price(contract, 100.0, live=True)
+    assert status == "reject" and "正式" in message
+
+
+@pytest.mark.parametrize("qty", [0, -5])
+def test_guard_qty_rejects_less_than_one(qty):
+    assert order.guard_qty({"order": {"maxQty": 10}}, qty) is not None
+
+
+@pytest.mark.parametrize("max_qty", ["5", 2.5, True, 0, None])
+def test_guard_qty_refuses_when_max_qty_is_not_a_positive_whole_number(max_qty):
+    # "5" used to raise TypeError; True used to mean a cap of 1
+    message = order.guard_qty({"order": {"maxQty": max_qty}}, 1)
+    assert message is not None and "maxQty" in message
+
+
+@pytest.mark.parametrize("live", ["false", "true", 1, "yes"])
+def test_resolve_mode_live_must_be_the_json_true(live):
+    # any truthy value used to count, so "live": "false" switched live trading on
+    assert order.resolve_mode({"order": {"live": live}}, {}, cli_live=True, ca_ok=True) == "sim"
+
+
+@needs_shioaji
+def test_build_order_intraday_odd_lot_and_the_confirmation_names_the_lot():
+    import shioaji as sj
+
+    intent = {"code": "2330", "side": "buy", "price": 1188.0, "qty": 50, "kind": "stock", "lot": "intraday-odd", "octype": "auto"}
+    sdk_order, confirmation = order.build_order(intent, STOCK_CONTRACT, make_accounts())
+    assert sdk_order.order_lot == sj.StockOrderLot.IntradayOdd
+    assert confirmation["unit"] == "股"
+    confirmation["mode"] = "模擬"
+    assert "50 股（盤中零股）" in order.format_confirmation(confirmation)
+
+
+@needs_shioaji
+def test_build_order_odd_is_named_as_after_hours():
+    intent = {"code": "2330", "side": "buy", "price": 1188.0, "qty": 50, "kind": "stock", "lot": "odd", "octype": "auto"}
+    _, confirmation = order.build_order(intent, STOCK_CONTRACT, make_accounts())
+    confirmation["mode"] = "模擬"
+    assert "（盤後零股）" in order.format_confirmation(confirmation)
+
+
+def test_confirm_accepts_the_word_with_a_bom_or_crlf(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _prompt: "﻿確認\r")
+    assert order.confirm("live", auto_yes=False) is True
+    monkeypatch.setattr("builtins.input", lambda _prompt: "好")
+    assert order.confirm("live", auto_yes=False) is False
+
+
+def place_args(**kw):
+    base = dict(code="2330", side="buy", price=1188.0, qty=1, lot="common", octype="auto", yes=True, live=False, env=None)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def test_a_place_order_that_raises_is_logged_and_says_the_state_is_unknown(tmp_path, monkeypatch, capsys):
+    log = tmp_path / "orders.log"
+    monkeypatch.setattr(order, "ORDERS_LOG", log)
+    api = types.SimpleNamespace(logout=lambda: None)
+    monkeypatch.setattr(order, "enter_session", lambda *a: ("sim", api, None))
+    monkeypatch.setattr(order, "resolve_contract", lambda api, code: ("stock", STOCK_CONTRACT))
+    monkeypatch.setattr(order, "build_order", lambda intent, contract, accounts: (object(), {
+        "code": "2330", "resolved_code": None, "name": "台積電", "side": "買進", "price_type": "LMT",
+        "price": 1188.0, "qty": 1, "unit": "張", "lot": "整股", "account_id": "acct", "mode": None,
+    }))
+
+    def boom(api, contract, sdk_order):
+        raise TimeoutError("broker did not answer")
+
+    monkeypatch.setattr(order, "submit_order", boom)
+    with pytest.raises(SystemExit) as exit_info:
+        order.cmd_place(place_args(), {}, {})
+    assert exit_info.value.code == 1
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [r["result"] for r in records] == ["submitting", "error"]
+    assert "TimeoutError" in records[1]["error"]
+    assert "狀態未知" in capsys.readouterr().err
+
+
+def test_the_env_file_is_loaded_before_the_ca_check(tmp_path, monkeypatch):
+    # order.caPasswordEnv may name a variable only the env file sets: loading
+    # it after resolve_mode refused live with 需要 CA 憑證
+    env = tmp_path / "sinobon.env"
+    env.write_text("SINOBON_API_KEY=k\nSINOBON_SECRET_KEY=s\nMY_CA_PW=pw\n", encoding="utf-8")
+    for key in ("SINOBON_API_KEY", "SINOBON_SECRET_KEY", "MY_CA_PW"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(order, "RUNTIME_DIR", tmp_path / "runtime")
+    monkeypatch.setattr(order, "ORDERS_LOG", tmp_path / "runtime" / "orders.log")
+    monkeypatch.setitem(sys.modules, "shioaji", types.SimpleNamespace())
+    api = types.SimpleNamespace(stock_account=None, futopt_account=None, logout=lambda: None)
+    monkeypatch.setattr(order, "do_login", lambda sj, key, secret, simulation: api)
+    monkeypatch.setattr(order, "do_activate_ca", lambda api, path, passwd, person_id: passwd == "pw")
+    user_cfg = {"order": {"live": True, "ca": "~/ca.pfx", "caPasswordEnv": "MY_CA_PW"}}
+    session = order.enter_session(place_args(live=True, env=str(env)), user_cfg, {}, "place", {})
+    assert session is not None and session[0] == "live"

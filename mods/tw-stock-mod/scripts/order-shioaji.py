@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -14,6 +15,14 @@ from pathlib import Path
 from _common import RUNTIME_DIR_ROOT, field, load_env, utf8_stdio
 
 DEFAULT_MAX_QTY = 1
+# --lot -> (sj.StockOrderLot member, what the confirmation calls it). `odd`
+# is 盤後零股 (after-hours, 13:40-14:30), which is what shioaji's `Odd` is;
+# an odd lot during the session is `intraday-odd`.
+LOTS = {
+    "common": ("Common", "整股"),
+    "intraday-odd": ("IntradayOdd", "盤中零股"),
+    "odd": ("Odd", "盤後零股"),
+}
 RUNTIME_DIR = Path.home() / RUNTIME_DIR_ROOT  # orders.log is per user, not per project
 ORDERS_LOG = RUNTIME_DIR / "orders.log"
 USER_CONFIG_PATH = Path.home() / ".claude" / "stock-band.json"
@@ -63,7 +72,8 @@ def resolve_mode(user_cfg: dict, project_cfg: dict, cli_live: bool, ca_ok: bool)
     config can never enable live trading."""
     del project_cfg
     user_order = user_cfg.get("order") if isinstance(user_cfg, dict) else None
-    user_live = bool(isinstance(user_order, dict) and user_order.get("live"))
+    # `is True`, not truthiness: "live": "false" (a string) must not count as on
+    user_live = isinstance(user_order, dict) and user_order.get("live") is True
     if not (cli_live and user_live):
         return "sim"
     if not ca_ok:
@@ -81,12 +91,19 @@ def ca_configured(user_cfg: dict) -> bool:
     return bool(ca_path) and bool(password_env) and bool(os.environ.get(password_env))
 
 
-def guard_price(contract, price: float):
-    """('ok'|'reject'|'skip', message|None). 'skip' when the contract carries
-    no usable limit_up/limit_down - never silently treated as in-band."""
+def guard_price(contract, price: float, live: bool = False):
+    """('ok'|'reject'|'skip', message|None). A price that is not a positive
+    finite number is rejected outright (`--price nan` compares False against
+    every bound). 'skip' when the contract carries no usable
+    limit_up/limit_down - never silently treated as in-band - and in live
+    mode that is a 'reject' instead: a real order is never sent unchecked."""
+    if not (isinstance(price, (int, float)) and math.isfinite(price) and price > 0):
+        return "reject", f"價格 {price} 不是正數"
     limit_up = field(contract, "limit_up", None)
     limit_down = field(contract, "limit_down", None)
     if not limit_up or not limit_down:
+        if live:
+            return "reject", "合約沒有 limit_up/limit_down，正式模式不送沒檢查過漲跌停的委託"
         return "skip", "合約沒有 limit_up/limit_down，略過漲跌停檢查"
     if price < limit_down or price > limit_up:
         return "reject", f"價格 {price} 超出漲跌停範圍 [{limit_down}, {limit_up}]"
@@ -94,9 +111,15 @@ def guard_price(contract, price: float):
 
 
 def guard_qty(user_cfg: dict, qty: int):
-    """None when qty is within order.maxQty (default 1), else a message naming both numbers."""
+    """None when 1 <= qty <= order.maxQty (default 1), else a message. A
+    maxQty that is not a positive whole number refuses every order rather
+    than crashing or guessing what was meant."""
+    if qty < 1:
+        return f"數量 {qty} 至少要 1"
     order_cfg = user_cfg.get("order") if isinstance(user_cfg, dict) else None
-    max_qty = (order_cfg or {}).get("maxQty", DEFAULT_MAX_QTY)
+    max_qty = (order_cfg if isinstance(order_cfg, dict) else {}).get("maxQty", DEFAULT_MAX_QTY)
+    if isinstance(max_qty, bool) or not isinstance(max_qty, int) or max_qty < 1:
+        return f"order.maxQty 設定不是正整數（{max_qty!r}），不下單"
     if qty > max_qty:
         return f"數量 {qty} 超過上限 {max_qty}"
     return None
@@ -114,9 +137,10 @@ def build_order(intent: dict, contract, accounts):
     price = intent["price"]
     qty = intent["qty"]
 
+    lot_label = None
     if intent["kind"] == "stock":
-        lot_name = "Odd" if intent.get("lot") == "odd" else "Common"
-        unit = "股" if lot_name == "Odd" else "張"
+        lot_name, lot_label = LOTS[intent.get("lot", "common")]
+        unit = "張" if lot_name == "Common" else "股"
         account = accounts.stock_account
         sdk_order = sj.StockOrder(
             action=action,
@@ -150,6 +174,7 @@ def build_order(intent: dict, contract, accounts):
         "price": price,
         "qty": qty,
         "unit": unit,
+        "lot": lot_label,
         "account_id": field(account, "account_id", "?"),
         "mode": None,
     }
@@ -164,7 +189,7 @@ def format_confirmation(confirmation: dict) -> str:
         f"合約：{code_label} {confirmation['name']}",
         f"方向：{confirmation['side']}",
         f"價格：{confirmation['price_type']} {confirmation['price']}",
-        f"數量：{confirmation['qty']} {confirmation['unit']}",
+        f"數量：{confirmation['qty']} {confirmation['unit']}" + (f"（{confirmation['lot']}）" if confirmation.get("lot") else ""),
         f"帳號：{confirmation['account_id']}",
         f"模式：{confirmation['mode']}",
     ]
@@ -181,7 +206,8 @@ def confirm(mode: str, auto_yes: bool) -> bool:
         print("（--yes：模擬模式自動確認）")
         return True
     reply = input("輸入「確認」以送出委託：")
-    return reply.strip() == "確認"
+    # a stray BOM or a CRLF from a Windows pipe must not turn 確認 into a refusal
+    return reply.strip().lstrip("\ufeff") == "確認"
 
 
 def find_trade_by_id(trades, order_id: str):
@@ -319,16 +345,18 @@ def enter_session(args, user_cfg: dict, project_cfg: dict, action: str, extra: d
     """Shared place/status/cancel prologue: resolve mode, refuse or log the
     --live/--yes-ignored notices, load the env, chdir + import shioaji, log
     in. Returns (mode, api, sj) or None if refused (already printed/logged)."""
+    # the env file first: order.caPasswordEnv may name a variable that only
+    # it sets, and ca_configured() reads the environment
+    env_path = resolve_env_path(args, user_cfg)
+    load_env(env_path, "SINOBON_API_KEY / SINOBON_SECRET_KEY")
+    api_key, secret_key = require_keys()
+
     mode = resolve_mode(user_cfg, project_cfg, args.live, ca_configured(user_cfg))
     if args.live and mode == "sim":
         print("--live 被忽略：user-level order.live 不是 true，仍為模擬", file=sys.stderr)
     if isinstance(mode, tuple):
         refuse(action, mode[1], extra)
         return None
-
-    env_path = resolve_env_path(args, user_cfg)
-    load_env(env_path, "SINOBON_API_KEY / SINOBON_SECRET_KEY")
-    api_key, secret_key = require_keys()
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     # Shioaji writes its own shioaji.log into whatever directory the process
@@ -370,7 +398,7 @@ def cmd_place(args, user_cfg: dict, project_cfg: dict) -> None:
             refuse("place", f"查不到合約：{args.code}", {"code": args.code})
             return
 
-        price_status, price_message = guard_price(contract, args.price)
+        price_status, price_message = guard_price(contract, args.price, live=(mode == "live"))
         if price_status == "skip":
             print(f"SKIPPED：{price_message}", file=sys.stderr)
         elif price_status == "reject":
@@ -397,7 +425,22 @@ def cmd_place(args, user_cfg: dict, project_cfg: dict) -> None:
             log_line(ORDERS_LOG, {"ts": now_ms(), "action": "place", "mode": mode, "code": args.code, "result": "cancelled_by_user"})
             return
 
-        trade = submit_order(api, contract, sdk_order)
+        # Written BEFORE the call: place_order can raise (timeout, dropped
+        # connection) after the broker already has the order, and a retry
+        # would then place it twice. orders.log keeps the attempt either way.
+        attempt = {"ts": now_ms(), "action": "place", "mode": mode, "code": confirmation["code"], "side": confirmation["side"],
+                   "price": confirmation["price"], "qty": confirmation["qty"], "unit": confirmation["unit"], "result": "submitting"}
+        log_line(ORDERS_LOG, attempt)
+        try:
+            trade = submit_order(api, contract, sdk_order)
+        except Exception as err:  # noqa: BLE001 - any SDK failure here leaves the order's fate unknown
+            log_line(ORDERS_LOG, {**attempt, "ts": now_ms(), "result": "error", "error": f"{type(err).__name__}: {err}"})
+            print(
+                f"送單時出錯：{type(err).__name__}: {err}\n"
+                "狀態未知：委託可能已經送到券商。先跑 status 確認，不要直接重下這筆單。",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(format_trade_line(trade))
         log_line(
             ORDERS_LOG,
@@ -499,7 +542,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     place.add_argument("--side", required=True, choices=["buy", "sell"])
     place.add_argument("--price", required=True, type=float)
     place.add_argument("--qty", required=True, type=int)
-    place.add_argument("--lot", default="common", choices=["common", "odd"], help="stocks only")
+    place.add_argument(
+        "--lot",
+        default="common",
+        choices=list(LOTS),
+        help="stocks only: common = 整股 (張), intraday-odd = 盤中零股 (股, during the session), odd = 盤後零股 (股, 13:40-14:30)",
+    )
     place.add_argument("--octype", default="auto", choices=["auto", "new", "cover"], help="futures only")
 
     status = sub.add_parser("status", help="update_status then list every open trade")
