@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import sys
 import time
@@ -13,7 +15,17 @@ from pathlib import Path
 # the helpers every script here shares - scripts/_common.py, next to this file
 from _common import RUNTIME_DIR_ROOT, field, load_env, utf8_stdio
 
-DEFAULT_MAX_QTY = 1
+DEFAULT_MAX_QTY = 1  # order.maxQty: 張 (common stock) or 口 (futures)
+DEFAULT_MAX_ODD_SHARES = 999  # order.maxOddShares: 股, for either odd-lot kind
+SHARES_PER_LOT = 1000  # 1 張 - an odd-lot order of this many shares is a whole 張, not an odd lot
+# --lot -> (sj.StockOrderLot member, what the confirmation calls it). `odd`
+# is 盤後零股 (after-hours, 13:40-14:30), which is what shioaji's `Odd` is;
+# an odd lot during the session is `intraday-odd`.
+LOTS = {
+    "common": ("Common", "整股"),
+    "intraday-odd": ("IntradayOdd", "盤中零股"),
+    "odd": ("Odd", "盤後零股"),
+}
 RUNTIME_DIR = Path.home() / RUNTIME_DIR_ROOT  # orders.log is per user, not per project
 ORDERS_LOG = RUNTIME_DIR / "orders.log"
 USER_CONFIG_PATH = Path.home() / ".claude" / "stock-band.json"
@@ -63,7 +75,8 @@ def resolve_mode(user_cfg: dict, project_cfg: dict, cli_live: bool, ca_ok: bool)
     config can never enable live trading."""
     del project_cfg
     user_order = user_cfg.get("order") if isinstance(user_cfg, dict) else None
-    user_live = bool(isinstance(user_order, dict) and user_order.get("live"))
+    # `is True`, not truthiness: "live": "false" (a string) must not count as on
+    user_live = isinstance(user_order, dict) and user_order.get("live") is True
     if not (cli_live and user_live):
         return "sim"
     if not ca_ok:
@@ -81,24 +94,46 @@ def ca_configured(user_cfg: dict) -> bool:
     return bool(ca_path) and bool(password_env) and bool(os.environ.get(password_env))
 
 
-def guard_price(contract, price: float):
-    """('ok'|'reject'|'skip', message|None). 'skip' when the contract carries
-    no usable limit_up/limit_down - never silently treated as in-band."""
+def guard_price(contract, price: float, live: bool = False):
+    """('ok'|'reject'|'skip', message|None). A price that is not a positive
+    finite number is rejected outright (`--price nan` compares False against
+    every bound). 'skip' when the contract carries no usable
+    limit_up/limit_down - never silently treated as in-band - and in live
+    mode that is a 'reject' instead: a real order is never sent unchecked."""
+    if not (isinstance(price, (int, float)) and math.isfinite(price) and price > 0):
+        return "reject", f"價格 {price} 不是正數"
     limit_up = field(contract, "limit_up", None)
     limit_down = field(contract, "limit_down", None)
     if not limit_up or not limit_down:
+        if live:
+            return "reject", "合約沒有 limit_up/limit_down，正式模式不送沒檢查過漲跌停的委託"
         return "skip", "合約沒有 limit_up/limit_down，略過漲跌停檢查"
     if price < limit_down or price > limit_up:
         return "reject", f"價格 {price} 超出漲跌停範圍 [{limit_down}, {limit_up}]"
     return "ok", None
 
 
-def guard_qty(user_cfg: dict, qty: int):
-    """None when qty is within order.maxQty (default 1), else a message naming both numbers."""
+def guard_qty(user_cfg: dict, qty: int, odd_lot: bool = False):
+    """None when the quantity is within its cap, else a message.
+
+    The cap has a unit, because the quantities do: `order.maxQty` (default 1)
+    counts 張 for a common-lot stock order and 口 for futures, and
+    `order.maxOddShares` (default 999) counts 股 for an odd-lot order. One
+    number for both would force a choice between refusing "買 50 股" and
+    letting 50 張 through. An odd-lot order of 1000 shares or more is a
+    whole 張 and is refused outright. A cap that is not a positive whole
+    number refuses every order rather than crashing or guessing."""
+    if qty < 1:
+        return f"數量 {qty} 至少要 1"
     order_cfg = user_cfg.get("order") if isinstance(user_cfg, dict) else None
-    max_qty = (order_cfg or {}).get("maxQty", DEFAULT_MAX_QTY)
-    if qty > max_qty:
-        return f"數量 {qty} 超過上限 {max_qty}"
+    key, default, unit = ("maxOddShares", DEFAULT_MAX_ODD_SHARES, "股") if odd_lot else ("maxQty", DEFAULT_MAX_QTY, "張／口")
+    cap = (order_cfg if isinstance(order_cfg, dict) else {}).get(key, default)
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+        return f"order.{key} 設定不是正整數（{cap!r}），不下單"
+    if odd_lot and qty >= SHARES_PER_LOT:
+        return f"零股數量 {qty} 股已經是整張（{SHARES_PER_LOT} 股以上），請用 --lot common 以張下單"
+    if qty > cap:
+        return f"數量 {qty} {unit} 超過上限 {cap}（order.{key}）"
     return None
 
 
@@ -114,9 +149,10 @@ def build_order(intent: dict, contract, accounts):
     price = intent["price"]
     qty = intent["qty"]
 
+    lot_label = None
     if intent["kind"] == "stock":
-        lot_name = "Odd" if intent.get("lot") == "odd" else "Common"
-        unit = "股" if lot_name == "Odd" else "張"
+        lot_name, lot_label = LOTS[intent.get("lot", "common")]
+        unit = "張" if lot_name == "Common" else "股"
         account = accounts.stock_account
         sdk_order = sj.StockOrder(
             action=action,
@@ -150,6 +186,7 @@ def build_order(intent: dict, contract, accounts):
         "price": price,
         "qty": qty,
         "unit": unit,
+        "lot": lot_label,
         "account_id": field(account, "account_id", "?"),
         "mode": None,
     }
@@ -164,11 +201,26 @@ def format_confirmation(confirmation: dict) -> str:
         f"合約：{code_label} {confirmation['name']}",
         f"方向：{confirmation['side']}",
         f"價格：{confirmation['price_type']} {confirmation['price']}",
-        f"數量：{confirmation['qty']} {confirmation['unit']}",
+        f"數量：{confirmation['qty']} {confirmation['unit']}" + (f"（{confirmation['lot']}）" if confirmation.get("lot") else ""),
         f"帳號：{confirmation['account_id']}",
         f"模式：{confirmation['mode']}",
     ]
     return "\n".join(lines)
+
+
+CONFIRMATION_CODE_FIELDS = ("mode", "code", "resolved_code", "side", "price_type", "price", "qty", "unit", "lot", "account_id")
+
+
+def confirmation_code(confirmation: dict) -> str:
+    """8 hex-char sha256 over CONFIRMATION_CODE_FIELDS of `confirmation`,
+    canonical JSON so field order never changes the code. Binds a piped 確認
+    to the exact content it was answering - a re-resolved contract (rolling
+    alias rolled to a new month), a different account or a different price
+    changes the code. Not `name` (display-only) or `octype` (not in this
+    dict - format_confirmation never shows it either)."""
+    bound = {key: confirmation[key] for key in CONFIRMATION_CODE_FIELDS if key in confirmation}
+    canonical = json.dumps(bound, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
 
 
 def should_auto_confirm(auto_yes: bool, live: bool) -> bool:
@@ -180,8 +232,14 @@ def confirm(mode: str, auto_yes: bool) -> bool:
     if should_auto_confirm(auto_yes, mode == "live"):
         print("（--yes：模擬模式自動確認）")
         return True
-    reply = input("輸入「確認」以送出委託：")
-    return reply.strip() == "確認"
+    try:
+        reply = input("輸入「確認」以送出委託：")
+    except EOFError:
+        # no stdin at all (the model's first call, before it has a 確認 to pipe in) -
+        # "not confirmed", not an unlogged traceback
+        return False
+    # a stray BOM or a CRLF from a Windows pipe must not turn 確認 into a refusal
+    return reply.strip().lstrip("\ufeff") == "確認"
 
 
 def find_trade_by_id(trades, order_id: str):
@@ -319,16 +377,18 @@ def enter_session(args, user_cfg: dict, project_cfg: dict, action: str, extra: d
     """Shared place/status/cancel prologue: resolve mode, refuse or log the
     --live/--yes-ignored notices, load the env, chdir + import shioaji, log
     in. Returns (mode, api, sj) or None if refused (already printed/logged)."""
+    # the env file first: order.caPasswordEnv may name a variable that only
+    # it sets, and ca_configured() reads the environment
+    env_path = resolve_env_path(args, user_cfg)
+    load_env(env_path, "SINOBON_API_KEY / SINOBON_SECRET_KEY")
+    api_key, secret_key = require_keys()
+
     mode = resolve_mode(user_cfg, project_cfg, args.live, ca_configured(user_cfg))
     if args.live and mode == "sim":
         print("--live 被忽略：user-level order.live 不是 true，仍為模擬", file=sys.stderr)
     if isinstance(mode, tuple):
         refuse(action, mode[1], extra)
         return None
-
-    env_path = resolve_env_path(args, user_cfg)
-    load_env(env_path, "SINOBON_API_KEY / SINOBON_SECRET_KEY")
-    api_key, secret_key = require_keys()
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     # Shioaji writes its own shioaji.log into whatever directory the process
@@ -355,7 +415,9 @@ def enter_session(args, user_cfg: dict, project_cfg: dict, action: str, extra: d
 
 
 def cmd_place(args, user_cfg: dict, project_cfg: dict) -> None:
-    qty_err = guard_qty(user_cfg, args.qty)
+    # the lot only means anything for a stock; a futures code is always 口
+    odd_lot = classify_code(args.code) == "stock" and args.lot != "common"
+    qty_err = guard_qty(user_cfg, args.qty, odd_lot=odd_lot)
     if qty_err:
         refuse("place", qty_err, {"code": args.code})
         return
@@ -370,7 +432,7 @@ def cmd_place(args, user_cfg: dict, project_cfg: dict) -> None:
             refuse("place", f"查不到合約：{args.code}", {"code": args.code})
             return
 
-        price_status, price_message = guard_price(contract, args.price)
+        price_status, price_message = guard_price(contract, args.price, live=(mode == "live"))
         if price_status == "skip":
             print(f"SKIPPED：{price_message}", file=sys.stderr)
         elif price_status == "reject":
@@ -389,15 +451,61 @@ def cmd_place(args, user_cfg: dict, project_cfg: dict) -> None:
         sdk_order, confirmation = build_order(intent, contract, api)
         confirmation["mode"] = "正式" if mode == "live" else "模擬"
         print(format_confirmation(confirmation))
+        code = confirmation_code(confirmation)
+        print(f"確認碼：{code}")
 
         if args.yes and mode == "live":
             print("--yes 被忽略：正式模式一律詢問確認", file=sys.stderr)
+
+        if args.confirm_code and args.confirm_code != code:
+            # the content someone confirmed no longer matches what would be sent
+            # (rolling alias rolled to a new month, account or price changed) -
+            # never submit on a stale code, whatever it was piped from
+            print(
+                "確認碼不符：確認後內容已改變（例如合約換月、帳號或價格範圍變了），這筆沒有送出。"
+                "請把上面新的確認內容給使用者重新確認。",
+                file=sys.stderr,
+            )
+            log_line(ORDERS_LOG, {"ts": now_ms(), "action": "place", "mode": mode, "code": args.code, "result": "confirm_code_mismatch"})
+            sys.exit(1)
+
+        # no --confirm-code and stdin is not a person typing - a bare piped
+        # 確認 with no code to bind it to must never be read as an answer.
+        # sys.stdin can be None (a fully closed stdin, e.g. `<&-`), which has
+        # no .isatty() to call - that counts as "not a person typing" too.
+        stdin_is_tty = sys.stdin is not None and sys.stdin.isatty()
+        if not args.confirm_code and not should_auto_confirm(args.yes, mode == "live") and not stdin_is_tty:
+            print(
+                f"等待使用者確認：請使用者回覆「確認」後，用同樣參數加上 --confirm-code {code} 重新執行。",
+                file=sys.stderr,
+            )
+            log_line(ORDERS_LOG, {"ts": now_ms(), "action": "place", "mode": mode, "code": args.code, "result": "awaiting_confirmation"})
+            return
+
         if not confirm(mode, args.yes):
             print("已取消：沒有收到「確認」", file=sys.stderr)
             log_line(ORDERS_LOG, {"ts": now_ms(), "action": "place", "mode": mode, "code": args.code, "result": "cancelled_by_user"})
             return
 
-        trade = submit_order(api, contract, sdk_order)
+        # Written BEFORE the call: place_order can raise (timeout, dropped
+        # connection) after the broker already has the order, and a retry
+        # would then place it twice. orders.log keeps the attempt either way.
+        attempt = {"ts": now_ms(), "action": "place", "mode": mode, "code": confirmation["code"], "side": confirmation["side"],
+                   "price": confirmation["price"], "qty": confirmation["qty"], "unit": confirmation["unit"], "result": "submitting"}
+        log_line(ORDERS_LOG, attempt)
+        try:
+            trade = submit_order(api, contract, sdk_order)
+        except BaseException as err:  # noqa: BLE001 - Ctrl-C included: any way out of place_order leaves the order's fate unknown
+            # the warning first: a log write that fails must not swallow it
+            print(
+                f"送單時出錯：{type(err).__name__}: {err}\n"
+                "狀態未知：委託可能已經送到券商。先跑 status 確認，不要直接重下這筆單。",
+                file=sys.stderr,
+            )
+            try:
+                log_line(ORDERS_LOG, {**attempt, "ts": now_ms(), "result": "error", "error": f"{type(err).__name__}: {err}"})
+            finally:
+                sys.exit(1)
         print(format_trade_line(trade))
         log_line(
             ORDERS_LOG,
@@ -499,8 +607,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     place.add_argument("--side", required=True, choices=["buy", "sell"])
     place.add_argument("--price", required=True, type=float)
     place.add_argument("--qty", required=True, type=int)
-    place.add_argument("--lot", default="common", choices=["common", "odd"], help="stocks only")
+    place.add_argument(
+        "--lot",
+        default="common",
+        choices=list(LOTS),
+        help="stocks only: common = 整股 (張), intraday-odd = 盤中零股 (股, during the session), odd = 盤後零股 (股, 13:40-14:30)",
+    )
     place.add_argument("--octype", default="auto", choices=["auto", "new", "cover"], help="futures only")
+    place.add_argument(
+        "--confirm-code",
+        default=None,
+        help="the 確認碼 printed by a prior run of this same command - required to actually submit; "
+        "a piped 確認 with no matching code, or a code that no longer matches (contract re-resolved, "
+        "account or price changed), never submits",
+    )
 
     status = sub.add_parser("status", help="update_status then list every open trade")
     add_common(status)

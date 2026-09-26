@@ -88,6 +88,13 @@ def utf8_stdio() -> None:
             stream.reconfigure(encoding="utf-8", errors="backslashreplace")
         except (AttributeError, ValueError):
             pass  # not a TextIOWrapper (replaced, or closed): leave it be
+    # stdin too: order-shioaji.py reads the literal 確認 from it, and a piped
+    # stdin on Windows decodes with the ANSI codepage, so the UTF-8 bytes of
+    # 確認 would never compare equal - live orders could never be confirmed
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 
 # --- env file and config -----------------------------------------------------

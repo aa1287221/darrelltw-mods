@@ -925,7 +925,8 @@ any hook, and the band never places orders.**
 `sj.Shioaji(simulation=True)` and nothing it does touches a real position.
 
 **Live needs two keys, both true, plus a CA cert.** `"order": { "live": true
-}"` in the USER-level `~/.claude/stock-band.json` — never the project file,
+}"` (the JSON `true` itself — `"true"`, `"false"` or `1` all leave it in
+simulation) in the USER-level `~/.claude/stock-band.json` — never the project file,
 so a checked-in config can never turn live trading on — **and** `--live` on
 the invocation; either alone still runs in simulation. Live additionally
 needs `"order": { "ca": "~/path.pfx", "caPasswordEnv":
@@ -937,9 +938,37 @@ testing an actual cert is out of scope for now.)
 
 **A confirmation gate guards every order.** Before `place_order` the script
 prints the contract, direction, price, quantity (with its unit — 張/股 by
-lot, 口 for futures), account id and mode (模擬/正式), then waits for the
-literal reply `確認` on stdin. `--yes` skips that prompt in simulation only —
-live always prompts, whatever `--yes` says.
+lot, 口 for futures, and for stocks the lot: 整股 / 盤中零股 / 盤後零股),
+account id and mode (模擬/正式), then one more line, `確認碼：<8 hex
+chars>` — a sha256 over exactly those fields (mode, code, resolved code,
+side, price type/value, qty, unit, lot, account id), canonical JSON so key
+order never moves it. `--yes` skips the prompt in simulation only — live
+always prompts, whatever `--yes` says. `--lot` is `common` (整股, the
+default), `intraday-odd` (盤中零股) or `odd` (盤後零股, shioaji's `Odd`,
+matched 13:40–14:30).
+
+**The 確認 that gets piped back in must carry that code.** When stdin is not
+a terminal and `--confirm-code` was not given, the script never calls
+`input()` — it prints `等待使用者確認` and exits 0, instead of `input()`
+raising `EOFError` into an unlogged traceback (as it used to under a model
+with no stdin at all). Re-running the same `place` invocation with
+`--confirm-code <code>` and `確認` on stdin submits only if the code still
+matches what this run builds; a re-resolved contract (a rolling futures
+alias rolled to a new month), a different account or a different price
+band changes it, and a stale or mismatched code refuses with `確認碼不符`
+and exits 1 without ever calling `place_order`.
+
+**Guards before the gate.** The price must be a positive finite number and
+the quantity at least 1 and within its cap, which has a unit:
+`order.maxQty` (default 1) counts 張 for a common-lot stock order and 口 for
+futures, and `order.maxOddShares` (default 999) counts 股 for either odd-lot
+kind. An odd-lot order of 1000 shares or more is a whole 張 and is refused.
+A cap that is not a positive whole number refuses every order. A contract with no
+limit-up/limit-down band is skipped with a `SKIPPED` note in simulation and
+refused in live mode. If `place_order` itself fails, the order may already
+be at the broker: the script logs the attempt and the error to `orders.log`,
+says the state is unknown, and exits 1 — run `status` before placing it
+again.
 
 **Keep the Bash approval prompt in the loop.** Under `/tw-stock-mod:order` it
 is Claude that passes your `確認` to the script's stdin, so once live trading

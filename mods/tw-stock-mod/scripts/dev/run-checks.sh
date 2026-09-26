@@ -290,7 +290,8 @@ run_check() {
 
 # cd first: scripts/tests loads fetch-quotes-shioaji.py by path (no
 # pytest.ini/conftest), but the documented invocation is run from here.
-run_pytest() { (cd "$MOD_DIR" && "$PYTHON" -m pytest scripts/tests -q); }
+# -rs: a skip is named, so a missing SDK never passes for a tested order path
+run_pytest() { (cd "$MOD_DIR" && "$PYTHON" -m pytest scripts/tests -q -rs); }
 
 # SKIP_NETWORK=1 (CI) leaves out the two checks that hit the real Yahoo
 # endpoint: a runner's IP gets 429'd or blocked often enough that a red
