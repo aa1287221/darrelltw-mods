@@ -25,9 +25,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install pytest, ripgrep and the claude CLI
+      - name: Install pytest, shioaji, ripgrep and the claude CLI
         run: |
-          python -m pip install --quiet pytest
+          # shioaji: test_order.py builds real sj order objects - the order
+          # path is never allowed to skip here (REQUIRE_SHIOAJI below).
+          # Pinned for the same reason as the CLI.
+          python -m pip install --quiet pytest shioaji==1.7.6
           # `claude plugin validate` runs the engine's own load-time scan; no login needed
           # pinned: a new CLI can change what validate checks without a change here
           npm install -g --silent @anthropic-ai/claude-code@2.1.281
@@ -40,6 +43,7 @@ jobs:
         run: bash scripts/dev/run-checks.sh
         env:
           SKIP_NETWORK: "1"
+          REQUIRE_SHIOAJI: "1"
 
   # The 群益 fetcher is Windows-only, and its pidfile guard asks the Windows
   # kernel (_common._windows_pid_alive) - a stub can only check the logic, so
