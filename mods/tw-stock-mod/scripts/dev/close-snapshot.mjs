@@ -23,6 +23,11 @@
 //   (9) US daylight saving switches at 02:00 New York time, not at 00:00 UTC;
 //       and lastCloseAt is the close's own minute (at 13:30:20 it used to
 //       answer 13:30:20, which a price traded at 13:30:00 never reaches)
+//  (10) a held broker file does not hide a close Yahoo fetched after it; 台指期
+//       lets its fetcher go at the close; a legacy override naming no market
+//       is not the US close
+//  (11) the grace cap and the fetchers' 2-minute health rule, a Yahoo close of
+//       0, and a Friday file expiring at Monday's open
 //
 // Usage: node close-snapshot.mjs $OUT/register.js $OUT/markets.js   (no network)
 import { pathToFileURL } from 'node:url'
@@ -46,13 +51,13 @@ const walk = (n, f) => {
   for (const k of [...(n.kids ?? []), ...(n.props?.children != null ? [n.props.children].flat() : [])]) walk(k, f)
 }
 
-/** a spark answer pricing 2330 (and the index) as traded at `tradedAt` */
-const sparkBody = (tradedAt, price = 1000) =>
+/** a spark answer pricing 2330 and AAPL (and the index) as traded at `tradedAt` */
+const sparkBody = (tradedAt, price = 1000, previousClose = 990) =>
   JSON.stringify({
     spark: {
-      result: ['2330.TW', '^TWII'].map(symbol => ({
+      result: ['2330.TW', '^TWII', 'AAPL'].map(symbol => ({
         symbol,
-        response: [{ meta: { regularMarketPrice: price, previousClose: 990, regularMarketTime: tradedAt / 1000 } }],
+        response: [{ meta: { regularMarketPrice: price, previousClose, regularMarketTime: tradedAt / 1000 } }],
       })),
     },
   })
@@ -79,7 +84,7 @@ async function boot({ config, files: extraFiles = {}, clock: start, tradedAt = s
   const logs = []
   const timers = []
   let clock = start
-  const net = { tradedAt }
+  const net = { tradedAt, price: 1000, previousClose: 990 }
   const $ = {
     clock: { now: async () => clock, every: (ms, fn) => timers.push({ ms, fn }) },
     fs: {
@@ -101,7 +106,7 @@ async function boot({ config, files: extraFiles = {}, clock: start, tradedAt = s
       fetch: async u => {
         if (u.includes('/v7/finance/spark')) {
           sparks.push(clock)
-          return { ok: true, status: 200, headers: {}, text: sparkBody(net.tradedAt) }
+          return { ok: true, status: 200, headers: {}, text: sparkBody(net.tradedAt, net.price, net.previousClose) }
         }
         if (u.includes('/v8/finance/chart')) {
           charts.push(clock)
@@ -308,6 +313,89 @@ const futuresFile = (asOf, prevClose) => JSON.stringify({
   // what (1) and (3) stand on: the close is a minute boundary, not `now` less whole minutes
   ok(lastCloseAt(taipei(22, 13, 30, 20), 'tw') === taipei(22, 13, 30), '(1) at 13:30:20 the last close is 13:30:00')
   ok(lastCloseAt(taipei(26, 10, 0, 45), 'tw') === taipei(25, 13, 30), '(3) on Saturday the last close is Friday 13:30:00')
+}
+
+// --- (10) the verifier's follow-ups on 3bada85 ---------------------------------
+// a 永豐 file that died at 13:28:30 (a 13:25 price) does not paint over the
+// 13:30 close Yahoo fetched after it
+{
+  const file = { asOf: taipei(22, 13, 28, 30), dataAt: taipei(22, 13, 25), market: 'tw', source: '永豐 即時', quotes: { 2330: { price: 1001, prevClose: 990 } } }
+  const s = await boot({
+    config: { ...TW_YAHOO, twSources: ['shioaji', 'yahoo'] },
+    files: { [`${RUNTIME}stock-quotes.json`]: JSON.stringify(file) },
+    clock: taipei(22, 13, 30, 20), tradedAt: taipei(22, 13, 30),
+  })
+  await s.run(5 * MIN)
+  const { props } = await s.draw()
+  const row = props.quotes.find(q => q.code === '2330')
+  ok(s.sparks.length > 0 && row?.price === 1000 && props.source === 'live', `(10) the fetched 13:30 close wins over a held 13:25 file (price=${row?.price} source=${props.source})`)
+}
+// 台指期 lets its fetcher go at the close: no heartbeat, no respawn of a dead one
+{
+  const s = await boot({ config: TF, files: { [`${RUNTIME}futures-quotes.json`]: futuresFile(taipei(22, 13, 44, 55), 22900) }, clock: taipei(22, 13, 45, 30) })
+  await s.run(30 * MIN)
+  const tfBeats = s.heartbeats.filter(b => b.markets.includes('tf'))
+  ok(tfBeats.length === 0 && s.spawns.length === 0, `(10) after 13:45 the heartbeat never names tf and nothing respawns (${tfBeats.length} beats, ${s.spawns.length} spawns)`)
+}
+// a legacy override naming no market is not the US close
+{
+  const legacy = { asOf: taipei(22, 10, 0), quotes: { 2330: { price: 1005, prevClose: 1000 } } }
+  const s = await boot({
+    config: { market: 'us', feed: 'us', feedMs: 30000, refreshMs: 3000, pageMs: 0, us: [{ code: 'AAPL', name: 'Apple' }], tw: [] },
+    files: { '.claude/stock-quotes.json': JSON.stringify(legacy) },
+    clock: taipei(22, 10, 0, 30), // 22:00 ET the evening before: US closed
+    tradedAt: Date.UTC(2026, 8, 21, 20, 0), // Mon 16:00 ET
+  })
+  await s.run(5 * MIN)
+  const { props } = await s.draw()
+  ok(props.source === 'live' && s.sparks[0] <= taipei(22, 10, 1, 30), `(10) the US board takes Yahoo's close, not a Taiwan override with no market - asked on the first tick (source=${props.source}, ${s.sparks.length} requests)`)
+}
+
+// --- (11) test gaps the verifier's mutation run found --------------------------
+// a broker file that never reaches the close: the fetcher is kept (and a dead
+// one respawned on the 2-minute rule) until 14:00, and let go after
+{
+  const file = { asOf: taipei(22, 13, 29, 55), dataAt: taipei(22, 13, 29, 50), market: 'tw', quotes: { 2330: { price: 1005, prevClose: 1000 } } }
+  const s = await boot({
+    config: { ...TW_YAHOO, twSources: ['shioaji'] },
+    files: { [`${RUNTIME}stock-quotes.json`]: JSON.stringify(file) },
+    clock: taipei(22, 13, 30, 10),
+  })
+  await s.run(20 * MIN)
+  ok(s.spawns.length >= 2, `(11) a dead fetcher whose file went stale after the close is respawned (${s.spawns.length} spawns by 13:50)`)
+  await s.run(15 * MIN) // to 14:05
+  const late = s.heartbeats.filter(b => b.at > taipei(22, 14, 0) && b.markets.includes('tw'))
+  const before = s.heartbeats.filter(b => b.at < taipei(22, 14, 0) && b.markets.includes('tw'))
+  ok(before.length > 0 && late.length === 0, `(11) the heartbeat names tw until 14:00 and not after (${before.length} before, ${late.length} after)`)
+}
+// an old futures file during the session counts as a dead fetcher
+{
+  const s = await boot({ config: TF, files: { [`${RUNTIME}futures-quotes.json`]: futuresFile(taipei(22, 10, 20), 22900) }, clock: taipei(22, 10, 30) })
+  await s.run(MIN)
+  ok(s.spawns.length >= 1, `(11) a 10-minute-old futures file at 10:30 gets the fetcher respawned (${s.spawns.length} spawns)`)
+}
+// a Yahoo close of 0 is not a close either
+{
+  const s = await boot({ config: TW_YAHOO, clock: taipei(22, 10, 30) })
+  s.net.previousClose = 0
+  await s.run(MIN)
+  const { props } = await s.draw()
+  const row = props.quotes.find(q => q.code === '2330')
+  ok(row?.price === 1000 && row.change === 0, `(11) a Yahoo previousClose of 0 reads flat (change=${row?.change})`)
+}
+// Friday's closing file is gone by Monday 09:05
+{
+  const file = { asOf: taipei(25, 13, 30, 8), dataAt: taipei(25, 13, 30), market: 'tw', quotes: { 2330: { price: 1005, prevClose: 1000 } } }
+  const s = await boot({ config: { ...TW_YAHOO, feed: 'off' }, files: { [`${RUNTIME}stock-quotes.json`]: JSON.stringify(file) }, clock: taipei(28, 9, 5) })
+  const { props } = await s.draw()
+  ok(props.source === 'demo', `(11) Monday 09:05: Friday's file no longer drives the board (source=${props.source})`)
+}
+// ...and on a closed market, a file from before the last close never held at all
+{
+  const file = { asOf: taipei(21, 13, 0), market: 'tw', quotes: { 2330: { price: 1005, prevClose: 1000 } } }
+  const s = await boot({ config: { ...TW_YAHOO, feed: 'off' }, files: { [`${RUNTIME}stock-quotes.json`]: JSON.stringify(file) }, clock: taipei(22, 8, 0) })
+  const { props } = await s.draw()
+  ok(props.source === 'demo', `(11) Tuesday 08:00: a Monday 13:00 file is not Monday's close (source=${props.source})`)
 }
 
 done()

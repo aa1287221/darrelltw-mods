@@ -876,9 +876,9 @@ function setPage(next: number, now: number) {
  * price cannot change, so a snapshot that was still fresh at the close stays
  * true until the next session - expiring it on the same two-minute rule would
  * throw away a real closing price and draw the demo walk (or 無報價) over it.
- * "Fresh at the close", not "taken after it": the 永豐 fetcher stops with the
- * session, so the last futures file it writes is stamped a few seconds
- * before 13:45 or 05:00.
+ * "Fresh at the close", not "taken after it": the heartbeat stops naming tf
+ * at the close (marketNeedsFeed), so the last futures file the 永豐 fetcher
+ * writes is stamped a few seconds before 13:45 or 05:00.
  */
 function snapshotHolds(asOf: number, now: number, market: MarketId): boolean {
   if (phaseOf(now, market) === 'open') return now - asOf <= QUOTE_STALE_MS
@@ -894,17 +894,19 @@ function snapshotHolds(asOf: number, now: number, market: MarketId): boolean {
  */
 function marketNeedsFeed(now: number, market: MarketId): boolean {
   if (phaseOf(now, market) === 'open') return true
-  // A broker fetcher's file (or a hand-written override) prices this market
-  // without ever setting liveBy, so its own snapshot decides: the fetcher
-  // is kept on (the heartbeat names the market) only until the file carries
-  // the closing price, and never past CLOSE_GRACE_MS - otherwise it polls
-  // the broker every 10 s all night and all weekend.
-  const file = quotesFiles[market]
-  if (file) return !hasClosingPrice(file, now, market) && now < lastCloseAt(now, market) + CLOSE_GRACE_MS
   // tf only ever arrives through the file (never publish, so liveBy.tf is
-  // never set): the closing-snapshot rule below would read as "always",
-  // and the heartbeat would keep the fetcher alive all weekend
+  // never set), and the heartbeat stops naming it at the close: the file
+  // fresh at the close (snapshotHolds) is as close as it gets. Waiting for
+  // one stamped after the close would keep respawning a dead fetcher - a
+  // broker login a minute - until CLOSE_GRACE_MS ran out.
   if (market === 'tf') return false
+  // A broker fetcher's file (or a hand-written override naming this market)
+  // prices it without ever setting liveBy, so its own snapshot decides: the
+  // fetcher is kept on (the heartbeat names the market) only until the file
+  // carries the closing price, and never past CLOSE_GRACE_MS - otherwise it
+  // polls the broker every 10 s all night and all weekend.
+  const file = quotesFiles[market]
+  if (file?.market === market) return !hasClosingPrice(file, now, market) && now < lastCloseAt(now, market) + CLOSE_GRACE_MS
   const snap = liveBy[market]
   // never fetched, or the snapshot is not the closing price yet
   return !snap || !hasClosingPrice(snap.file, now, market)
@@ -971,13 +973,20 @@ function withLiveBars(
  * saying `tf`, or a futures file saying `tw`, drives nothing), or every one
  * of them when it names none - the pre-tf override semantics for tw/us. Each
  * slot takes the first of `files` that still holds for that market
- * (snapshotHolds): a broker file written after 13:30 keeps 台股 on its
- * closing prices all night instead of dropping to 無報價 two minutes later,
- * while the same file expires as usual for a market still trading.
+ * (snapshotHolds): a broker file fresh at 13:30 keeps 台股 on its closing
+ * prices all night instead of dropping to 無報價 two minutes later, while
+ * the same file expires as usual for a market still trading.
  */
 function fillQuoteSlots(files: (QuotesFile | undefined)[], allowed: MarketId[], now: number): void {
   for (const market of allowed) {
-    const file = files.find(f => f && (!f.market || f.market === market) && snapshotHolds(f.asOf, now, market))
+    const file = files.find(f => {
+      if (!f || (f.market && f.market !== market)) return false
+      // only a file that names this market carries its close: one naming
+      // none (a legacy override) was written for whichever market was
+      // trading, and holding it all night for the other would pass a
+      // Taiwan snapshot off as the US close
+      return f.market === market ? snapshotHolds(f.asOf, now, market) : now - f.asOf <= QUOTE_STALE_MS
+    })
     if (file) quotesFiles[market] = file
   }
 }
@@ -993,7 +1002,14 @@ function fillHoldingsSlots(file: HoldingsFile | undefined, allowed: MarketId[]):
 // 示範資料 tag is for.
 function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
   const file = quotesFiles[market]
-  if (file) {
+  // A held file that never saw the close (a fetcher that died at 13:28 with
+  // a 13:25 price) must not paint over a close the built-in feed did fetch:
+  // past the close, whichever of the two carries the closing price wins.
+  const live = liveBy[market]
+  const bridgeCloses =
+    file !== undefined && live !== undefined && phaseOf(now, market) !== 'open' &&
+    !hasClosingPrice(file, now, market) && hasClosingPrice(live.file, now, market)
+  if (file && !bridgeCloses) {
     // The override file wins, but it does not have to be COMPLETE to win: a
     // fetcher whose own watchlist is narrower than the band's (or briefly
     // out of date) can leave a code the table draws with no quote at all.

@@ -613,7 +613,8 @@ instead of faking prices (the footer tag changes from 示範資料 to 報價檔)
 than 120 seconds while the market trades, malformed, or missing and it falls
 back to demo prices — so a failed fetch should simply leave the file alone
 rather than write a stale price that looks live. Once the market closes, a file
-that was fresh at the close holds until the next session. A `prevClose` of 0
+that names its `market` and was fresh at the close holds until the next
+session (one naming none only ever lasts its 120 seconds). A `prevClose` of 0
 or less counts as unknown: the row reads flat instead of showing the whole
 price as the day's change.
 
