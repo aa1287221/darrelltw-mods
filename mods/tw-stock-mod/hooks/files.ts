@@ -1,11 +1,11 @@
 // The quotes and holdings files: parsing, staleness, and pricing holdings off
 // them.
 
-import { QUOTE_FUTURE_SLACK_MS, QUOTE_STALE_MS } from './constants.ts'
+import { QUOTE_FUTURE_SLACK_MS } from './constants.ts'
 import type { MarketId } from './markets.ts'
 import { TIMEFRAMES } from './quotes.ts'
 import type { Bar, FileQuote, Holding, IndexRow, PricedHolding, Timeframe } from './quotes.ts'
-import { asRecord, num, parseHoldingsList, str } from './config.ts'
+import { asRecord, num, parseHoldingsList, positive, str } from './config.ts'
 import type { Config } from './config.ts'
 
 export type QuotesFile = {
@@ -80,8 +80,11 @@ function parseBarsBy(value: unknown): Partial<Record<Timeframe, Bar[]>> | undefi
 // it came from (runtime-dir or the project's `.claude/`, see runtimeDir and
 // the header comment), or the fetcher's `futures-quotes.json` (same shape,
 // `market: "tf"`, plus multiplier/decimals/resolved per quote); see
-// stock-band.example.json for the shape. Anything stale or malformed is
-// ignored and the band falls back to demo prices (no-data rows for tf).
+// stock-band.example.json for the shape. Anything malformed or stamped in
+// the future is ignored. Staleness is NOT decided here: whether a file still
+// describes a market depends on that market's session (a closing snapshot
+// holds all night), and a stock file naming no market serves three of them -
+// the poll applies snapshotHolds per market slot.
 // The poll re-reads every quotes file each refreshMs, and a file that has
 // not been rewritten since returns the same text - re-parsing it (a futures
 // file carries every K bar) is work for nothing. One entry per file slot, the
@@ -101,11 +104,10 @@ export function parseQuotes(text: string | undefined, now: number, slot?: Quotes
     file = parseQuotesUncached(text)
     if (slot) quotesParseCache[slot] = { text, file }
   }
-  // staleness is the one part that depends on `now`, so it stays outside the cache
-  if (!file || now - file.asOf > QUOTE_STALE_MS) return undefined
-  // a file stamped in the future would pass the rule above forever - a
-  // committed .claude/stock-quotes.json could pin made-up prices on the board
-  if (file.asOf - now > QUOTE_FUTURE_SLACK_MS) return undefined
+  // the one part that depends on `now`, so it stays outside the cache: a file
+  // stamped in the future would never go stale - a committed
+  // .claude/stock-quotes.json could pin made-up prices on the board
+  if (!file || file.asOf - now > QUOTE_FUTURE_SLACK_MS) return undefined
   return file
 }
 
@@ -133,7 +135,7 @@ function parseQuotesUncached(text: string): QuotesFile | undefined {
     const barsBy = parseBarsBy(entry.barsBy)
     quotes[code] = {
       price,
-      prevClose: typeof entry.prevClose === 'number' ? entry.prevClose : undefined,
+      prevClose: positive(entry.prevClose),
       name: typeof entry.name === 'string' ? entry.name : undefined,
       // the 永豐 futures fetcher writes barsBy alone, no copy of its 5 分 set
       bars: parseBars(entry.bars) ?? barsBy?.['5'],

@@ -143,10 +143,13 @@ bars, and the band just draws a plainer row. `indices` (plural) is what the
 footer's split-flap index board flips through; `index` (singular) is the
 older single-index shape and still works.
 
-**Freshness rule.** Older than 120 seconds, malformed, or missing, and the
-band ignores the file and falls back to whatever the built-in feed has (or to
-demo prices if neither is fresh). There is no partial trust — a stale file is
-treated exactly like no file.
+**Freshness rule.** Older than 120 seconds while the market trades,
+malformed, or missing, and the band ignores the file and falls back to
+whatever the built-in feed has (or to demo prices if neither is fresh). There
+is no partial trust — a stale file is treated exactly like no file. Once the
+market closes, a file that was fresh at the close holds until the next
+session: its prices are the close and cannot change. A `prevClose` of 0 or
+less counts as unknown (the row reads flat).
 
 **How to tell it took.** The footer shows whatever string you put in
 `source`; leave it out and it falls back to `報價檔`.
