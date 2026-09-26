@@ -416,6 +416,50 @@ export function feedInterval(cfg: Config, extras: FeedExtras = {}): number {
   return Math.max(cfg.feedMs, FEED_MS_MIN, budgetFloor)
 }
 
+/**
+ * The broker keys a project's stock-band.json may NOT set: each names a
+ * program the band executes (`python`) or a file that program trusts with
+ * credentials or loads code from (`env`, `dll`). A project file travels with
+ * a cloned repo, so taking these from it would let any repo make the band run
+ * its own program the moment a session opens there. Only the user-level file
+ * (~/.claude/stock-band.json) sets them.
+ */
+export const USER_ONLY_KEYS: Record<'shioaji' | 'capital', string[]> = {
+  shioaji: ['python', 'env'],
+  capital: ['python', 'env', 'dll'],
+}
+
+/**
+ * user-level root < project root, key by key: the project file wins every
+ * top-level key it states, except that the `shioaji`/`capital` blocks merge
+ * per key (a project stating only `interval` keeps the user's paths) and
+ * never take a USER_ONLY_KEYS value from the project. `ignored` names the
+ * project values dropped that way, e.g. "shioaji.python", for the caller to
+ * log once.
+ */
+export function mergeConfigRoots(
+  user: Record<string, unknown> | undefined,
+  project: Record<string, unknown> | undefined,
+): { root: Record<string, unknown> | undefined; ignored: string[] } {
+  if (!user && !project) return { root: undefined, ignored: [] }
+  const root: Record<string, unknown> = { ...user, ...project }
+  const ignored: string[] = []
+  for (const block of ['shioaji', 'capital'] as const) {
+    const fromUser = asRecord(user?.[block])
+    const fromProject = asRecord(project?.[block])
+    if (!fromProject) continue
+    const merged: Record<string, unknown> = { ...fromUser, ...fromProject }
+    for (const key of USER_ONLY_KEYS[block]) {
+      if (!(key in fromProject)) continue
+      ignored.push(`${block}.${key}`)
+      if (fromUser && key in fromUser) merged[key] = fromUser[key]
+      else delete merged[key]
+    }
+    root[block] = merged
+  }
+  return { root, ignored }
+}
+
 /** reads text as a JSON object, or undefined for anything that is not one - malformed, missing, or a non-object */
 export function parseJsonRecord(text: string | undefined): Record<string, unknown> | undefined {
   if (!text) return undefined

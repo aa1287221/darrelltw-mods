@@ -5,7 +5,7 @@ import { CRYPTO_COINGECKO_ID, MARKETS, currentSession, hasFutures, hhmm, lastClo
 import type { MarketId, MarketMode, MarketSwitcher, Phase, SortKey, Ticker, TwSourceName, View } from './markets.ts'
 import { PNL_SORT_KEYS, PNL_SORT_LABELS, TIMEFRAMES, demoBars, demoPrice, quoteRow, roundPrice, sortHoldings } from './quotes.ts'
 import type { Bar, ChartMode, FileQuote, IndexRow, PnlSortKey, PricedHolding, QuoteRow, Timeframe } from './quotes.ts'
-import { asRecord, defaultConfig, effectiveColumns, feedInterval, feedMarkets, fitBand, num, parseConfigRoot, parseJsonRecord, requestsPerTick, str } from './config.ts'
+import { asRecord, defaultConfig, effectiveColumns, feedInterval, feedMarkets, fitBand, mergeConfigRoots, num, parseConfigRoot, parseJsonRecord, requestsPerTick, str } from './config.ts'
 import type { BoardLayout, Config, FeedExtras, Fit } from './config.ts'
 import { holdingsFor, parseHoldingsFile, parseQuotes, pricedHoldings } from './files.ts'
 import type { HoldingsFile, QuotesFile } from './files.ts'
@@ -599,6 +599,8 @@ let loggedLegacyProjectHoldings = false
 // same idea for invalid `futures` entries: the poll re-parses the config
 // every tick, and one typo is worth one line, not one per tick
 let loggedDroppedFutures = false
+/** project-file broker paths mergeConfigRoots dropped, each logged once */
+const loggedIgnoredKeys = new Set<string>()
 // whether the runtime-dir quotes file specifically (not the project
 // override) is fresh - feedTwFetcher's own health signal, set every poll
 let runtimeQuotesFresh = false
@@ -1117,14 +1119,21 @@ export const register: Register = on => {
       const now = await $.clock.now()
       // Merge order: built-in defaults < user-level file < project file -
       // each later root overrides a key the earlier ones set, so a shared
-      // project's stock-band.json can stay neutral (no twSources, no
-      // broker paths) while ~/.claude/stock-band.json carries one person's
-      // own preference order. A key only one side states still applies.
+      // project's stock-band.json can stay neutral (no twSources) while
+      // ~/.claude/stock-band.json carries one person's own preference
+      // order. A key only one side states still applies. The broker paths
+      // (shioaji/capital python, env, dll) are the exception: they come
+      // from the user-level file only - see mergeConfigRoots.
       const userConfigText = userConfigPath ? await readOptional(userConfigPath) : undefined
       const projectConfigText = await readOptional(CONFIG_PATH)
       const userRoot = parseJsonRecord(userConfigText)
       const projectRoot = parseJsonRecord(projectConfigText)
-      const mergedRoot = userRoot || projectRoot ? { ...userRoot, ...projectRoot } : undefined
+      const { root: mergedRoot, ignored } = mergeConfigRoots(userRoot, projectRoot)
+      for (const key of ignored) {
+        if (loggedIgnoredKeys.has(key)) continue
+        loggedIgnoredKeys.add(key)
+        $.ui.log(`tw-stock-mod: 專案的 .claude/stock-band.json 設了 ${key}，已忽略——這個設定只認 ~/.claude/stock-band.json`)
+      }
       // Quotes: the runtime-dir file (the Shioaji fetcher's own output)
       // wins while fresh, then the project's file as the manual override
       // seam, then nothing (the built-in feed takes over). Holdings follow
@@ -1873,7 +1882,11 @@ export const register: Register = on => {
         extraArgs: ['--env', expandHome(config.shioaji.env), '--futures', futures],
         logPath,
         pidPath: `${runtime}stock-shioaji.pid`,
-        wrap: args => ['/bin/sh', '-c', `nohup "$0" "$@" >>"${logPath}" 2>&1 &`, python, script, ...args],
+        // the log path travels as an argument, never inside the script
+        // text: it carries the project's directory name, and a name with
+        // `$(...)`, a backtick or a `"` in it would otherwise be run (or
+        // break the quoting) by this shell
+        wrap: args => ['/bin/sh', '-c', 'log=$1; shift; nohup "$@" >>"$log" 2>&1 &', 'sh', logPath, python, script, ...args],
       }
     }
     const feedTwShioaji = (now: number): Promise<boolean> => feedTwFetcher(now, shioajiSpec())

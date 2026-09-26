@@ -3,8 +3,8 @@
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
 # file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view /
-# fit-rows / pytest / feed-errors / feed-budget / crypto-feed / crypto-sort / market-select
-# against them (feed-errors, crypto-feed, crypto-sort and market-select build their own stub config
+# fit-rows / pytest / feed-errors / feed-budget / spawn-safety / crypto-feed / crypto-sort / market-select
+# against them (feed-errors, spawn-safety, crypto-feed, crypto-sort and market-select build their own stub config
 # in-process instead, so they need no fixture directory) plus
 # tsc (typecheck), check-engine-rules.sh, `claude plugin validate` (when the CLI is on PATH)
 # and check-personal.sh, and prints a PASS/FAIL line
@@ -312,6 +312,7 @@ run_check "fit-rows"       node "$SCRIPT_DIR/fit-rows.mjs"    "$OUT/register.js"
 run_check "pytest"         run_pytest
 run_check "feed-errors"    node "$SCRIPT_DIR/feed-errors.mjs" "$OUT/register.js"
 run_check "feed-budget"    node "$SCRIPT_DIR/feed-budget.mjs" "$OUT/register.js"
+run_check "spawn-safety"   node "$SCRIPT_DIR/spawn-safety.mjs" "$OUT/register.js"
 run_check "crypto-feed"    node "$SCRIPT_DIR/crypto-feed.mjs" "$OUT/register.js"
 run_check "crypto-sort"    node "$SCRIPT_DIR/crypto-sort.mjs" "$OUT/register.js"
 run_check "market-select"  node "$SCRIPT_DIR/market-select.mjs" "$OUT/register.js"

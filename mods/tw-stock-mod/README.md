@@ -90,8 +90,9 @@ not set `HOME`.
 
 **哪個檔放哪裡.** `~/.claude/stock-band.json`（使用者層級，不進版控）放個人偏好——
 `twSources`、`shioaji`／`capital` 的券商路徑；`<project>/.claude/stock-band.json`
-（可進版控）放觀察清單，包含 `futures`。專案檔的 key 蓋掉個人檔同名的 key，見
-[Configure](#configure)。
+（可進版控）放觀察清單，包含 `futures`。專案檔的 key 蓋掉個人檔同名的 key，但
+`shioaji`／`capital` 裡的 `python`、`env`、`dll` 只認個人檔——專案檔寫了會被忽略並記一行
+log，免得 clone 下來的 repo 能指定 band 要執行的程式。見 [Configure](#configure)。
 
 **band 不會在你的 repo 裡寫任何檔。** 報價、庫存、心跳、券商 log、券商 pid 這幾類
 執行期檔案都寫進 `~/.claude/stock-band/<專案路徑 slug>/`，不再寫進專案的 `.claude/`
@@ -399,6 +400,13 @@ source order and broker paths (`twSources`, `shioaji`, `capital`) belong in the
 user-level file, so a shared project's config stays neutral and each person
 who opens it keeps their own preference — see
 [Your own source order](#your-own-source-order).
+
+The broker paths are more than a preference: `shioaji.python`/`capital.python`
+name the program the band runs, `*.env` the file it reads credentials from and
+`capital.dll` a directory it loads code from. A project file comes with a
+cloned repository, so those five keys are **user-level only** — a project file
+that sets one is ignored for that key (the band logs it once), and the rest of
+its `shioaji`/`capital` block (`interval`, `indices`) still merges key by key.
 
 | key | default | meaning |
 | --- | --- | --- |
@@ -932,6 +940,13 @@ prints the contract, direction, price, quantity (with its unit — 張/股 by
 lot, 口 for futures), account id and mode (模擬/正式), then waits for the
 literal reply `確認` on stdin. `--yes` skips that prompt in simulation only —
 live always prompts, whatever `--yes` says.
+
+**Keep the Bash approval prompt in the loop.** Under `/tw-stock-mod:order` it
+is Claude that passes your `確認` to the script's stdin, so once live trading
+is on, the last gate you control directly is Claude Code asking whether to run
+that Bash command. Never add the order command to an allow list (a
+`permissions.allow` rule, "don't ask again" for it) — approve each live order
+by hand.
 
 **Every place, status and cancel appends one JSON line** to
 `~/.claude/stock-band/orders.log` (a single runtime file, not per-project —
