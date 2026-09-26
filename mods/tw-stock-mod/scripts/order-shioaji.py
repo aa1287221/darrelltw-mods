@@ -14,7 +14,9 @@ from pathlib import Path
 # the helpers every script here shares - scripts/_common.py, next to this file
 from _common import RUNTIME_DIR_ROOT, field, load_env, utf8_stdio
 
-DEFAULT_MAX_QTY = 1
+DEFAULT_MAX_QTY = 1  # order.maxQty: 張 (common stock) or 口 (futures)
+DEFAULT_MAX_ODD_SHARES = 999  # order.maxOddShares: 股, for either odd-lot kind
+SHARES_PER_LOT = 1000  # 1 張 - an odd-lot order of this many shares is a whole 張, not an odd lot
 # --lot -> (sj.StockOrderLot member, what the confirmation calls it). `odd`
 # is 盤後零股 (after-hours, 13:40-14:30), which is what shioaji's `Odd` is;
 # an odd lot during the session is `intraday-odd`.
@@ -110,18 +112,27 @@ def guard_price(contract, price: float, live: bool = False):
     return "ok", None
 
 
-def guard_qty(user_cfg: dict, qty: int):
-    """None when 1 <= qty <= order.maxQty (default 1), else a message. A
-    maxQty that is not a positive whole number refuses every order rather
-    than crashing or guessing what was meant."""
+def guard_qty(user_cfg: dict, qty: int, odd_lot: bool = False):
+    """None when the quantity is within its cap, else a message.
+
+    The cap has a unit, because the quantities do: `order.maxQty` (default 1)
+    counts 張 for a common-lot stock order and 口 for futures, and
+    `order.maxOddShares` (default 999) counts 股 for an odd-lot order. One
+    number for both would force a choice between refusing "買 50 股" and
+    letting 50 張 through. An odd-lot order of 1000 shares or more is a
+    whole 張 and is refused outright. A cap that is not a positive whole
+    number refuses every order rather than crashing or guessing."""
     if qty < 1:
         return f"數量 {qty} 至少要 1"
     order_cfg = user_cfg.get("order") if isinstance(user_cfg, dict) else None
-    max_qty = (order_cfg if isinstance(order_cfg, dict) else {}).get("maxQty", DEFAULT_MAX_QTY)
-    if isinstance(max_qty, bool) or not isinstance(max_qty, int) or max_qty < 1:
-        return f"order.maxQty 設定不是正整數（{max_qty!r}），不下單"
-    if qty > max_qty:
-        return f"數量 {qty} 超過上限 {max_qty}"
+    key, default, unit = ("maxOddShares", DEFAULT_MAX_ODD_SHARES, "股") if odd_lot else ("maxQty", DEFAULT_MAX_QTY, "張／口")
+    cap = (order_cfg if isinstance(order_cfg, dict) else {}).get(key, default)
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+        return f"order.{key} 設定不是正整數（{cap!r}），不下單"
+    if odd_lot and qty >= SHARES_PER_LOT:
+        return f"零股數量 {qty} 股已經是整張（{SHARES_PER_LOT} 股以上），請用 --lot common 以張下單"
+    if qty > cap:
+        return f"數量 {qty} {unit} 超過上限 {cap}（order.{key}）"
     return None
 
 
@@ -383,7 +394,9 @@ def enter_session(args, user_cfg: dict, project_cfg: dict, action: str, extra: d
 
 
 def cmd_place(args, user_cfg: dict, project_cfg: dict) -> None:
-    qty_err = guard_qty(user_cfg, args.qty)
+    # the lot only means anything for a stock; a futures code is always 口
+    odd_lot = classify_code(args.code) == "stock" and args.lot != "common"
+    qty_err = guard_qty(user_cfg, args.qty, odd_lot=odd_lot)
     if qty_err:
         refuse("place", qty_err, {"code": args.code})
         return
@@ -433,14 +446,17 @@ def cmd_place(args, user_cfg: dict, project_cfg: dict) -> None:
         log_line(ORDERS_LOG, attempt)
         try:
             trade = submit_order(api, contract, sdk_order)
-        except Exception as err:  # noqa: BLE001 - any SDK failure here leaves the order's fate unknown
-            log_line(ORDERS_LOG, {**attempt, "ts": now_ms(), "result": "error", "error": f"{type(err).__name__}: {err}"})
+        except BaseException as err:  # noqa: BLE001 - Ctrl-C included: any way out of place_order leaves the order's fate unknown
+            # the warning first: a log write that fails must not swallow it
             print(
                 f"送單時出錯：{type(err).__name__}: {err}\n"
                 "狀態未知：委託可能已經送到券商。先跑 status 確認，不要直接重下這筆單。",
                 file=sys.stderr,
             )
-            sys.exit(1)
+            try:
+                log_line(ORDERS_LOG, {**attempt, "ts": now_ms(), "result": "error", "error": f"{type(err).__name__}: {err}"})
+            finally:
+                sys.exit(1)
         print(format_trade_line(trade))
         log_line(
             ORDERS_LOG,

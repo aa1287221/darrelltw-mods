@@ -946,8 +946,11 @@ whatever `--yes` says. `--lot` is `common` (整股, the default),
 13:40–14:30).
 
 **Guards before the gate.** The price must be a positive finite number and
-the quantity at least 1 and at most `order.maxQty` (a whole number, default
-1 — anything else there refuses every order). A contract with no
+the quantity at least 1 and within its cap, which has a unit:
+`order.maxQty` (default 1) counts 張 for a common-lot stock order and 口 for
+futures, and `order.maxOddShares` (default 999) counts 股 for either odd-lot
+kind. An odd-lot order of 1000 shares or more is a whole 張 and is refused.
+A cap that is not a positive whole number refuses every order. A contract with no
 limit-up/limit-down band is skipped with a `SKIPPED` note in simulation and
 refused in live mode. If `place_order` itself fails, the order may already
 be at the broker: the script logs the attempt and the error to `orders.log`,

@@ -501,8 +501,9 @@ def test_the_env_file_is_loaded_before_the_ca_check(tmp_path, monkeypatch):
     # it after resolve_mode refused live with 需要 CA 憑證
     env = tmp_path / "sinobon.env"
     env.write_text("SINOBON_API_KEY=k\nSINOBON_SECRET_KEY=s\nMY_CA_PW=pw\n", encoding="utf-8")
-    for key in ("SINOBON_API_KEY", "SINOBON_SECRET_KEY", "MY_CA_PW"):
-        monkeypatch.delenv(key, raising=False)
+    # load_env writes os.environ with setdefault: give it a copy that the
+    # monkeypatch puts back, so nothing it exports outlives this test
+    monkeypatch.setattr(os, "environ", {k: v for k, v in os.environ.items() if k not in ("SINOBON_API_KEY", "SINOBON_SECRET_KEY", "MY_CA_PW")})
     monkeypatch.setattr(order, "RUNTIME_DIR", tmp_path / "runtime")
     monkeypatch.setattr(order, "ORDERS_LOG", tmp_path / "runtime" / "orders.log")
     monkeypatch.setitem(sys.modules, "shioaji", types.SimpleNamespace())
@@ -512,3 +513,111 @@ def test_the_env_file_is_loaded_before_the_ca_check(tmp_path, monkeypatch):
     user_cfg = {"order": {"live": True, "ca": "~/ca.pfx", "caPasswordEnv": "MY_CA_PW"}}
     session = order.enter_session(place_args(live=True, env=str(env)), user_cfg, {}, "place", {})
     assert session is not None and session[0] == "live"
+
+
+# ---------------------------------------------------------------------------
+# quantity caps carry a unit: 張／口 (maxQty) apart from odd-lot 股 (maxOddShares)
+# ---------------------------------------------------------------------------
+
+def test_an_odd_lot_order_is_capped_in_shares_not_by_max_qty():
+    cfg = {"order": {"maxQty": 1}}
+    assert order.guard_qty(cfg, 50, odd_lot=True) is None  # 50 股 under the default 999
+    assert order.guard_qty(cfg, 50, odd_lot=False) is not None  # ...but 50 張 is still over 1
+
+
+def test_max_odd_shares_is_its_own_setting():
+    cfg = {"order": {"maxQty": 1000, "maxOddShares": 100}}
+    assert order.guard_qty(cfg, 100, odd_lot=True) is None
+    assert "maxOddShares" in order.guard_qty(cfg, 101, odd_lot=True)
+
+
+def test_an_odd_lot_of_a_thousand_shares_or_more_is_refused():
+    cfg = {"order": {"maxOddShares": 5000}}
+    assert "整張" in order.guard_qty(cfg, 1000, odd_lot=True)
+
+
+def test_a_bad_max_odd_shares_refuses_odd_lots():
+    assert "maxOddShares" in order.guard_qty({"order": {"maxOddShares": "50"}}, 1, odd_lot=True)
+
+
+# ---------------------------------------------------------------------------
+# cmd_place wiring: the guards are actually called, with the session's mode
+# ---------------------------------------------------------------------------
+
+def wire_place(monkeypatch, tmp_path, mode, contract, reached):
+    """cmd_place with the SDK edges stubbed; `reached` records which of
+    enter_session / submit_order it got to."""
+    monkeypatch.setattr(order, "ORDERS_LOG", tmp_path / "orders.log")
+    api = types.SimpleNamespace(logout=lambda: None)
+
+    def enter(*a):
+        reached.append("enter_session")
+        return (mode, api, None)
+
+    monkeypatch.setattr(order, "enter_session", enter)
+    monkeypatch.setattr(order, "resolve_contract", lambda api, code: ("stock", contract))
+    monkeypatch.setattr(order, "build_order", lambda intent, contract, accounts: (object(), {
+        "code": "2330", "resolved_code": None, "name": "台積電", "side": "買進", "price_type": "LMT",
+        "price": intent["price"], "qty": intent["qty"], "unit": "張", "lot": "整股", "account_id": "acct", "mode": None,
+    }))
+    monkeypatch.setattr(order, "confirm", lambda mode, auto_yes: True)
+    monkeypatch.setattr(order, "submit_order", lambda api, contract, sdk_order: reached.append("submit_order") or types.SimpleNamespace())
+    monkeypatch.setattr(order, "format_trade_line", lambda trade: "trade")
+
+
+def test_a_live_order_on_a_contract_with_no_band_never_reaches_the_broker(tmp_path, monkeypatch):
+    reached = []
+    wire_place(monkeypatch, tmp_path, "live", make_contract("2330", "台積電", None, None), reached)
+    order.cmd_place(place_args(live=True), {"order": {"live": True}}, {})
+    assert reached == ["enter_session"]
+
+
+def test_a_sim_order_on_a_contract_with_no_band_is_still_placed(tmp_path, monkeypatch):
+    reached = []
+    wire_place(monkeypatch, tmp_path, "sim", make_contract("2330", "台積電", None, None), reached)
+    order.cmd_place(place_args(), {}, {})
+    assert reached == ["enter_session", "submit_order"]
+
+
+def test_a_rejected_price_never_reaches_the_broker(tmp_path, monkeypatch):
+    reached = []
+    wire_place(monkeypatch, tmp_path, "sim", STOCK_CONTRACT, reached)
+    order.cmd_place(place_args(price=float("nan")), {}, {})
+    assert reached == ["enter_session"]
+
+
+def test_an_over_cap_quantity_never_logs_in(tmp_path, monkeypatch):
+    reached = []
+    wire_place(monkeypatch, tmp_path, "sim", STOCK_CONTRACT, reached)
+    order.cmd_place(place_args(qty=2), {}, {})  # default maxQty 1 張
+    assert reached == []
+
+
+def test_an_odd_lot_quantity_is_capped_in_shares_at_the_command(tmp_path, monkeypatch):
+    reached = []
+    wire_place(monkeypatch, tmp_path, "sim", STOCK_CONTRACT, reached)
+    order.cmd_place(place_args(qty=50, lot="intraday-odd"), {}, {})
+    assert reached == ["enter_session", "submit_order"]
+    reached.clear()
+    order.cmd_place(place_args(qty=50, lot="common"), {}, {})  # 50 張 is still over maxQty 1
+    assert reached == []
+
+
+def test_an_interrupted_place_order_is_logged_as_unknown(tmp_path, monkeypatch, capsys):
+    reached = []
+    wire_place(monkeypatch, tmp_path, "sim", STOCK_CONTRACT, reached)
+
+    class Interrupted(BaseException):
+        """stands in for Ctrl-C: a BaseException that `except Exception` misses
+        (a real KeyboardInterrupt would abort pytest itself on that mutation)"""
+
+    def interrupted(api, contract, sdk_order):
+        raise Interrupted
+
+    monkeypatch.setattr(order, "submit_order", interrupted)
+    with pytest.raises(SystemExit) as exit_info:
+        order.cmd_place(place_args(), {}, {})
+    assert exit_info.value.code == 1
+    records = [json.loads(line) for line in (tmp_path / "orders.log").read_text(encoding="utf-8").splitlines()]
+    assert [r["result"] for r in records] == ["submitting", "error"]
+    assert "狀態未知" in capsys.readouterr().err
