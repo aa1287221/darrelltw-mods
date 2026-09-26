@@ -48,7 +48,7 @@ point at a venv's own interpreter (e.g. `~/some/venv/.venv/bin/python3`) if
 the system `python3` does not have `shioaji` installed. Footer tag: `永豐
 即時`. The same script also writes `stock-holdings.json` (runtime dir) every
 tick (from `list_positions`), which is what feeds the 損益 view. First run
-`<python> scripts/fetch-quotes-shioaji.py --check` to confirm the account,
+`<python> "${CLAUDE_PLUGIN_ROOT}/scripts/fetch-quotes-shioaji.py" --check` to confirm the account,
 env file and login all work before wiring it in.
 
 **永豐 Shioaji, run by hand.** Same script, started yourself instead of by the
@@ -56,7 +56,7 @@ band — useful outside a Claude Code session, or to debug the feed:
 
 ```sh
 python3 \
-  mods/tw-stock-mod/scripts/fetch-quotes-shioaji.py \
+  "${CLAUDE_PLUGIN_ROOT}/scripts/fetch-quotes-shioaji.py" \
   --project . --interval 10
 ```
 
@@ -89,7 +89,7 @@ contract as Shioaji (runtime dir, nothing to run by hand); the script detaches
 itself rather than via `nohup`, which Windows does not have. Footer tag:
 `群益 即時`. The same script writes `stock-holdings.json` every tick from
 未實現損益彙總, which is what feeds the 損益 view. First run
-`<python> scripts/fetch-quotes-capital.py --check` — it walks the platform,
+`<python> "${CLAUDE_PLUGIN_ROOT}/scripts/fetch-quotes-capital.py" --check` — it walks the platform,
 bitness, comtypes, the DLL path, the registration, the env file, a real login,
 the quote host, every watchlist and index code, and the 證券 account, one ✅/❌
 line each.

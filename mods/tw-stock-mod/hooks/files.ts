@@ -1,7 +1,7 @@
 // The quotes and holdings files: parsing, staleness, and pricing holdings off
 // them.
 
-import { QUOTE_STALE_MS } from './constants.ts'
+import { QUOTE_FUTURE_SLACK_MS, QUOTE_STALE_MS } from './constants.ts'
 import type { MarketId } from './markets.ts'
 import { TIMEFRAMES } from './quotes.ts'
 import type { Bar, FileQuote, Holding, IndexRow, PricedHolding, Timeframe } from './quotes.ts'
@@ -103,6 +103,9 @@ export function parseQuotes(text: string | undefined, now: number, slot?: Quotes
   }
   // staleness is the one part that depends on `now`, so it stays outside the cache
   if (!file || now - file.asOf > QUOTE_STALE_MS) return undefined
+  // a file stamped in the future would pass the rule above forever - a
+  // committed .claude/stock-quotes.json could pin made-up prices on the board
+  if (file.asOf - now > QUOTE_FUTURE_SLACK_MS) return undefined
   return file
 }
 

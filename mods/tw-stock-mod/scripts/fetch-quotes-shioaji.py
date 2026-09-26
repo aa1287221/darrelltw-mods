@@ -62,9 +62,9 @@ Three ways to run it:
 What you need:
   * a 永豐金 account with the API enabled and 簽署中心 passed
   * SINOBON_API_KEY / SINOBON_SECRET_KEY in an env file (never in the repo;
-    --env, when not given, reads shioaji.env out of ~/.claude/stock-band.json
-    or --project's stock-band.json (project wins), falling back to
-    ~/.sinobon.env when neither sets it - see read_config_shioaji_env())
+    --env, when not given, reads shioaji.env out of ~/.claude/stock-band.json,
+    falling back to ~/.sinobon.env when it sets none - see
+    read_config_shioaji_env(); a project's stock-band.json never names it)
   * shioaji installed on Python 3.10-3.13 (3.12/3.13 is what SinoPac tests
     against) - `--check` verifies all of this, including a real login
 """
@@ -119,13 +119,14 @@ TAIPEI_OFFSET_MS = 8 * 3600 * 1000
 
 
 def read_config_shioaji_env(*config_paths: Path) -> str | None:
-    """`shioaji.env` out of one or more stock-band.json files, same merge
-    order as register.tsx's poll() (user-level file first, project file
-    second - a later path's value wins). Returns None when neither config
-    sets it, so the caller falls back to the shared ~/.sinobon.env default -
-    this is what keeps `--check` (and a by-hand run with no --env) agreeing
-    with whatever path the band itself would actually spawn this script
-    with, instead of a fixed default no real project uses."""
+    """`shioaji.env` out of one or more stock-band.json files, a later
+    path's value winning. Returns None when none sets it, so the caller
+    falls back to the shared ~/.sinobon.env default - this is what keeps
+    `--check` (and a by-hand run with no --env) agreeing with whatever path
+    the band itself would actually spawn this script with. The caller passes
+    the user-level file only: like register.tsx's mergeConfigRoots, a
+    project's stock-band.json travels with a cloned repo and never gets to
+    name the file credentials are read from."""
     env_value: str | None = None
     for config_path in config_paths:
         if not config_path.exists():
@@ -973,8 +974,8 @@ def main() -> None:
         "--env",
         default=None,
         help="file holding SINOBON_API_KEY / SINOBON_SECRET_KEY; defaults to whatever "
-        "shioaji.env ~/.claude/stock-band.json or --project's stock-band.json sets "
-        "(project wins), falling back to ~/.sinobon.env when neither sets it",
+        "shioaji.env ~/.claude/stock-band.json sets (a project's stock-band.json is "
+        "never read for it), falling back to ~/.sinobon.env",
     )
     parser.add_argument("--interval", type=float, default=10, help="seconds between snapshots; 0 writes once and exits")
     parser.add_argument("--codes", default="", help="comma-separated codes, overriding the band's own watchlist")
@@ -994,14 +995,12 @@ def main() -> None:
     home = user_home()
 
     # --env not given: read the same shioaji.env the band itself would spawn
-    # this script with (user-level file, then project file - project wins),
-    # before falling back to the shared ~/.sinobon.env default. Keeps a
-    # by-hand run and `--check` honest about the env file a real spawn uses,
-    # instead of a fixed default that no project with a custom path matches.
+    # this script with - the user-level file only, never the project's (see
+    # read_config_shioaji_env) - before falling back to the shared
+    # ~/.sinobon.env default. Keeps a by-hand run and `--check` honest about
+    # the env file a real spawn uses.
     if args.env is None:
-        config_paths = [project / ".claude" / "stock-band.json"]
-        if home:
-            config_paths.insert(0, Path(home) / ".claude" / "stock-band.json")
+        config_paths = [Path(home) / ".claude" / "stock-band.json"] if home else []
         args.env = read_config_shioaji_env(*config_paths) or "~/.sinobon.env"
 
     # Resolve every path arg against the caller's cwd now, before the chdir

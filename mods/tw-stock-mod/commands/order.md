@@ -4,7 +4,7 @@ description: 用永豐 Shioaji 下單、查委託狀態、取消委託——模�
 
 # 下單 / 查詢 / 取消
 
-呼叫 `scripts/order-shioaji.py`。**這支腳本跟 band／看板無關**——band 從不下單，這是獨立工具。
+呼叫 `${CLAUDE_PLUGIN_ROOT}/scripts/order-shioaji.py`（plugin 自己的絕對路徑，不是目前專案底下的相對路徑）。**這支腳本跟 band／看板無關**——band 從不下單，這是獨立工具。
 **模擬是預設值**：不加 `--live`，一律用 `sj.Shioaji(simulation=True)` 登入，不會動到真實部位。
 
 正式交易需要**兩個條件同時成立**：user-level `~/.claude/stock-band.json` 要有
@@ -32,7 +32,7 @@ CA 憑證設定好並啟用成功，沒設定或啟用失敗，腳本會印 `需
 從使用者的描述抽出代號、買賣方向、價格、數量，組成一行指令，例如「幫我用 105 塊買一張 2330」→
 
 ```sh
-~/.claude/stock-band-venv/bin/python mods/tw-stock-mod/scripts/order-shioaji.py \
+~/.claude/stock-band-venv/bin/python "${CLAUDE_PLUGIN_ROOT}/scripts/order-shioaji.py" \
   place --code 2330 --side buy --price 105 --qty 1
 ```
 
@@ -54,6 +54,10 @@ CA 憑證設定好並啟用成功，沒設定或啟用失敗，腳本會印 `需
   不要追問「你確定要取消嗎」，除非使用者自己重新要求下單。
 
 `status`／`cancel` 沒有這個確認關卡，執行完直接把腳本輸出貼給使用者。
+
+正式模式下，使用者自己能控制的最後一道門，是 Claude Code 問「要不要執行這個 Bash 指令」的那個核准
+提示。不要建議使用者把下單指令加進允許清單（`permissions.allow`、「不要再問」），也不要用任何方式
+繞過那個提示。
 
 ## 永遠原樣轉述腳本輸出
 

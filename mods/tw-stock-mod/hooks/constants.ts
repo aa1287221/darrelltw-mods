@@ -33,6 +33,10 @@ export function runtimeDir(home: string, project: string): string {
 
 export const DEFAULT_REFRESH_MS = 3000
 export const QUOTE_STALE_MS = 120_000
+// how far ahead of the band's clock a quotes file's asOf may be (writers are
+// on the same machine; this is slack for a clock stepped back since): a file
+// stamped further out would never go stale, so it is refused
+export const QUOTE_FUTURE_SLACK_MS = 60_000
 export const SNOOZE_MS = 30 * 60 * 1000
 // The table is header + rule + quote rows + footer and the 損益 view title +
 // header + holding rows + totals, each sized off the band's `maxRows` (#13,

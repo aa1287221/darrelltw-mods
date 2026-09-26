@@ -212,6 +212,26 @@ def read_config_capital(*config_paths: Path) -> dict:
     return merged
 
 
+# the capital keys a project's stock-band.json may not set - the same line
+# hooks/config.ts's USER_ONLY_KEYS draws: `dll` is put first on PATH and
+# handed to add_dll_directory before SKCOM loads, `env` is exported into
+# this process, and a project file comes with a cloned repo
+USER_ONLY_CAPITAL_KEYS = ("python", "env", "dll")
+
+
+def read_capital_config(user_config: Path | None, project_config: Path) -> dict:
+    """read_config_capital(user, project), except that USER_ONLY_CAPITAL_KEYS
+    come from the user-level file alone."""
+    user_block = read_config_capital(user_config) if user_config else {}
+    merged = read_config_capital(*([user_config] if user_config else []), project_config)
+    for key in USER_ONLY_CAPITAL_KEYS:
+        if key in user_block:
+            merged[key] = user_block[key]
+        else:
+            merged.pop(key, None)
+    return merged
+
+
 def parse_indices(value) -> list[tuple[str, str]]:
     """`capital.indices` / --indices -> [(code, name)]; anything unusable falls back to DEFAULT_INDICES."""
     out: list[tuple[str, str]] = []
@@ -894,8 +914,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--project", default=os.getcwd(), help="the project whose .claude/stock-band.json holds the `tw` watchlist; also, when --out-dir is unset, what the runtime-dir slug is built from")
     parser.add_argument("--out-dir", default="", help="where stock-quotes.json / stock-holdings.json go; default is the same runtime dir hooks/register.tsx computes for --project")
-    parser.add_argument("--env", default=None, help="file holding CAPITAL_USER_ID / CAPITAL_PASSWORD; defaults to whatever capital.env the stock-band.json files set (project wins), falling back to ~/.capital.env")
-    parser.add_argument("--dll", default=None, help="path to the registered SKCOM.dll; defaults to capital.dll out of stock-band.json")
+    parser.add_argument("--env", default=None, help="file holding CAPITAL_USER_ID / CAPITAL_PASSWORD; defaults to whatever capital.env ~/.claude/stock-band.json sets (a project's stock-band.json is never read for it), falling back to ~/.capital.env")
+    parser.add_argument("--dll", default=None, help="path to the registered SKCOM.dll; defaults to capital.dll out of ~/.claude/stock-band.json (never a project's)")
     parser.add_argument("--indices", default=None, help='footer indices as "CODE:NAME,CODE:NAME"; defaults to capital.indices, then TSEA:TAIEX,OTCA:TPEx')
     parser.add_argument("--interval", type=float, default=10, help="seconds between snapshots; 0 writes once and exits")
     parser.add_argument(
@@ -923,13 +943,11 @@ def main() -> None:
     project = Path(project_str)
     home = user_home()
 
-    # Config-backed defaults, read the same way and in the same order the
-    # band itself would (user-level file, then project file - project wins),
-    # so `--check` and a by-hand run agree with what a real spawn uses.
-    config_paths = [project / ".claude" / "stock-band.json"]
-    if home:
-        config_paths.insert(0, Path(home) / ".claude" / "stock-band.json")
-    block = read_config_capital(*config_paths)
+    # Config-backed defaults, read the same way the band itself would
+    # (user-level file, then project file - project wins, except that env /
+    # dll come from the user-level file only), so `--check` and a by-hand
+    # run agree with what a real spawn uses.
+    block = read_capital_config(Path(home) / ".claude" / "stock-band.json" if home else None, project / ".claude" / "stock-band.json")
     if args.env is None:
         args.env = str(block.get("env") or "~/.capital.env")
     if args.dll is None:

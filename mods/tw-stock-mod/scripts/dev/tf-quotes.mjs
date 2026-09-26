@@ -244,6 +244,17 @@ await band.poll()
 ;({ props: q } = await band.draw())
 ok(q.quotes.every(r => !r.noData), 'file aged exactly QUOTE_STALE_MS is still used')
 
+// a file stamped in the future would never go stale: past a minute of clock
+// slack it is refused, inside it it is used
+await writeFutures(tfDir, CLOCK + 10 * 60_000)
+await band.poll()
+;({ props: q } = await band.draw())
+ok(q.quotes.every(r => r.noData), 'a file stamped 10 min in the future is not used')
+await writeFutures(tfDir, CLOCK + 30_000)
+await band.poll()
+;({ props: q } = await band.draw())
+ok(q.quotes.every(r => !r.noData), 'a file 30 s ahead (clock slack) is still used')
+
 // --- path 3 guard: the stock override is untouched, and never leaks into tf -
 {
   const quotesPath = `${twDir}/.claude/stock-quotes.json`
