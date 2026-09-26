@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -207,6 +208,21 @@ def format_confirmation(confirmation: dict) -> str:
     return "\n".join(lines)
 
 
+CONFIRMATION_CODE_FIELDS = ("mode", "code", "resolved_code", "side", "price_type", "price", "qty", "unit", "lot", "account_id")
+
+
+def confirmation_code(confirmation: dict) -> str:
+    """8 hex-char sha256 over CONFIRMATION_CODE_FIELDS of `confirmation`,
+    canonical JSON so field order never changes the code. Binds a piped 確認
+    to the exact content it was answering - a re-resolved contract (rolling
+    alias rolled to a new month), a different account or a different price
+    changes the code. Not `name` (display-only) or `octype` (not in this
+    dict - format_confirmation never shows it either)."""
+    bound = {key: confirmation[key] for key in CONFIRMATION_CODE_FIELDS if key in confirmation}
+    canonical = json.dumps(bound, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
+
+
 def should_auto_confirm(auto_yes: bool, live: bool) -> bool:
     """--yes only auto-confirms in simulation - live always prompts, whatever --yes says."""
     return auto_yes and not live
@@ -216,7 +232,12 @@ def confirm(mode: str, auto_yes: bool) -> bool:
     if should_auto_confirm(auto_yes, mode == "live"):
         print("（--yes：模擬模式自動確認）")
         return True
-    reply = input("輸入「確認」以送出委託：")
+    try:
+        reply = input("輸入「確認」以送出委託：")
+    except EOFError:
+        # no stdin at all (the model's first call, before it has a 確認 to pipe in) -
+        # "not confirmed", not an unlogged traceback
+        return False
     # a stray BOM or a CRLF from a Windows pipe must not turn 確認 into a refusal
     return reply.strip().lstrip("\ufeff") == "確認"
 
@@ -430,9 +451,37 @@ def cmd_place(args, user_cfg: dict, project_cfg: dict) -> None:
         sdk_order, confirmation = build_order(intent, contract, api)
         confirmation["mode"] = "正式" if mode == "live" else "模擬"
         print(format_confirmation(confirmation))
+        code = confirmation_code(confirmation)
+        print(f"確認碼：{code}")
 
         if args.yes and mode == "live":
             print("--yes 被忽略：正式模式一律詢問確認", file=sys.stderr)
+
+        if args.confirm_code and args.confirm_code != code:
+            # the content someone confirmed no longer matches what would be sent
+            # (rolling alias rolled to a new month, account or price changed) -
+            # never submit on a stale code, whatever it was piped from
+            print(
+                "確認碼不符：確認後內容已改變（例如合約換月、帳號或價格範圍變了），這筆沒有送出。"
+                "請把上面新的確認內容給使用者重新確認。",
+                file=sys.stderr,
+            )
+            log_line(ORDERS_LOG, {"ts": now_ms(), "action": "place", "mode": mode, "code": args.code, "result": "confirm_code_mismatch"})
+            sys.exit(1)
+
+        # no --confirm-code and stdin is not a person typing - a bare piped
+        # 確認 with no code to bind it to must never be read as an answer.
+        # sys.stdin can be None (a fully closed stdin, e.g. `<&-`), which has
+        # no .isatty() to call - that counts as "not a person typing" too.
+        stdin_is_tty = sys.stdin is not None and sys.stdin.isatty()
+        if not args.confirm_code and not should_auto_confirm(args.yes, mode == "live") and not stdin_is_tty:
+            print(
+                f"等待使用者確認：請使用者回覆「確認」後，用同樣參數加上 --confirm-code {code} 重新執行。",
+                file=sys.stderr,
+            )
+            log_line(ORDERS_LOG, {"ts": now_ms(), "action": "place", "mode": mode, "code": args.code, "result": "awaiting_confirmation"})
+            return
+
         if not confirm(mode, args.yes):
             print("已取消：沒有收到「確認」", file=sys.stderr)
             log_line(ORDERS_LOG, {"ts": now_ms(), "action": "place", "mode": mode, "code": args.code, "result": "cancelled_by_user"})
@@ -565,6 +614,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="stocks only: common = 整股 (張), intraday-odd = 盤中零股 (股, during the session), odd = 盤後零股 (股, 13:40-14:30)",
     )
     place.add_argument("--octype", default="auto", choices=["auto", "new", "cover"], help="futures only")
+    place.add_argument(
+        "--confirm-code",
+        default=None,
+        help="the 確認碼 printed by a prior run of this same command - required to actually submit; "
+        "a piped 確認 with no matching code, or a code that no longer matches (contract re-resolved, "
+        "account or price changed), never submits",
+    )
 
     status = sub.add_parser("status", help="update_status then list every open trade")
     add_common(status)

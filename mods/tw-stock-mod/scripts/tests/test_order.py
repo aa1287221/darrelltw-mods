@@ -466,8 +466,75 @@ def test_confirm_accepts_the_word_with_a_bom_or_crlf(monkeypatch):
     assert order.confirm("live", auto_yes=False) is False
 
 
+def test_confirm_treats_eof_as_not_confirmed(monkeypatch):
+    # the model's first call has no stdin at all - input() raising EOFError
+    # must read as "not confirmed", not propagate as an unlogged traceback
+    def raise_eof(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+    assert order.confirm("sim", auto_yes=False) is False
+
+
+# ---------------------------------------------------------------------------
+# confirmation_code: an 8 hex-char sha256 over the fields the confirmation
+# text shows, binding a piped 確認 to what the user actually saw
+# ---------------------------------------------------------------------------
+
+BASE_CONFIRMATION_FOR_CODE = {
+    "code": "2330", "resolved_code": None, "name": "台積電", "side": "買進",
+    "price_type": "LMT", "price": 1188.0, "qty": 1, "unit": "張", "lot": "整股",
+    "account_id": "acct-stock", "mode": "模擬",
+}
+
+
+def confirmation_for_code(**overrides):
+    conf = dict(BASE_CONFIRMATION_FOR_CODE)
+    conf.update(overrides)
+    return conf
+
+
+def test_confirmation_code_is_eight_hex_chars():
+    code = order.confirmation_code(confirmation_for_code())
+    assert len(code) == 8
+    assert all(c in "0123456789abcdef" for c in code)
+
+
+def test_confirmation_code_is_stable_for_identical_confirmations():
+    assert order.confirmation_code(confirmation_for_code()) == order.confirmation_code(confirmation_for_code())
+
+
+def test_confirmation_code_ignores_the_display_only_name_field():
+    # `name` is shown in the confirmation text but is not one of the fields
+    # that defines the order - changing it must not change the code
+    assert order.confirmation_code(confirmation_for_code()) == order.confirmation_code(
+        confirmation_for_code(name="不同名字")
+    )
+
+
+@pytest.mark.parametrize("field,new_value", [
+    ("mode", "正式"),
+    ("code", "2317"),
+    ("resolved_code", "TXFJ6"),
+    ("side", "賣出"),
+    ("price_type", "MKT"),
+    ("price", 1200.0),
+    ("qty", 2),
+    ("unit", "股"),
+    ("lot", "盤中零股"),
+    ("account_id", "acct-other"),
+])
+def test_confirmation_code_changes_when_a_bound_field_changes(field, new_value):
+    base = order.confirmation_code(confirmation_for_code())
+    changed = order.confirmation_code(confirmation_for_code(**{field: new_value}))
+    assert base != changed
+
+
 def place_args(**kw):
-    base = dict(code="2330", side="buy", price=1188.0, qty=1, lot="common", octype="auto", yes=True, live=False, env=None)
+    base = dict(
+        code="2330", side="buy", price=1188.0, qty=1, lot="common", octype="auto",
+        yes=True, live=False, env=None, confirm_code=None,
+    )
     base.update(kw)
     return types.SimpleNamespace(**base)
 
@@ -565,6 +632,44 @@ def wire_place(monkeypatch, tmp_path, mode, contract, reached):
     monkeypatch.setattr(order, "format_trade_line", lambda trade: "trade")
 
 
+def wire_place_confirmable(monkeypatch, tmp_path, mode, contract, reached, confirmation_extra=None):
+    """Like wire_place, but leaves `confirm` real so the --confirm-code and
+    non-interactive-stdin gates in cmd_place actually run."""
+    monkeypatch.setattr(order, "ORDERS_LOG", tmp_path / "orders.log")
+    api = types.SimpleNamespace(logout=lambda: None)
+
+    def enter(*a):
+        reached.append("enter_session")
+        return (mode, api, None)
+
+    monkeypatch.setattr(order, "enter_session", enter)
+    monkeypatch.setattr(order, "resolve_contract", lambda api, code: ("stock", contract))
+
+    def fake_build_order(intent, contract, accounts):
+        built = {
+            "code": "2330", "resolved_code": None, "name": "台積電", "side": "買進", "price_type": "LMT",
+            "price": intent["price"], "qty": intent["qty"], "unit": "張", "lot": "整股", "account_id": "acct", "mode": None,
+        }
+        built.update(confirmation_extra or {})
+        return object(), built
+
+    monkeypatch.setattr(order, "build_order", fake_build_order)
+    monkeypatch.setattr(order, "submit_order", lambda api, contract, sdk_order: reached.append("submit_order") or types.SimpleNamespace())
+    monkeypatch.setattr(order, "format_trade_line", lambda trade: "trade")
+
+
+# what fake_build_order above produces, minus "mode" (cmd_place fills that in
+# from the session) - tests compute the expected code from this
+STUB_PLACE_CONFIRMATION = {
+    "code": "2330", "resolved_code": None, "side": "買進", "price_type": "LMT",
+    "price": 1188.0, "qty": 1, "unit": "張", "lot": "整股", "account_id": "acct",
+}
+
+
+def _unexpected_input(_prompt):
+    raise AssertionError("stdin must not be read here")
+
+
 def test_a_live_order_on_a_contract_with_no_band_never_reaches_the_broker(tmp_path, monkeypatch):
     reached = []
     wire_place(monkeypatch, tmp_path, "live", make_contract("2330", "台積電", None, None), reached)
@@ -601,6 +706,132 @@ def test_an_odd_lot_quantity_is_capped_in_shares_at_the_command(tmp_path, monkey
     reached.clear()
     order.cmd_place(place_args(qty=50, lot="common"), {}, {})  # 50 張 is still over maxQty 1
     assert reached == []
+
+
+def test_sim_yes_auto_confirms_without_reading_stdin_even_non_interactive(tmp_path, monkeypatch):
+    # bullet 1 of the spec: sim + --yes stays unchanged even now that a
+    # non-interactive stdin normally triggers the awaiting-confirmation gate
+    reached = []
+    wire_place_confirmable(monkeypatch, tmp_path, "sim", STOCK_CONTRACT, reached)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", _unexpected_input)
+
+    order.cmd_place(place_args(yes=True, confirm_code=None), {}, {})
+
+    assert reached == ["enter_session", "submit_order"]
+
+
+def test_live_yes_is_ignored_even_with_a_matching_confirm_code(tmp_path, monkeypatch, capsys):
+    reached = []
+    wire_place_confirmable(monkeypatch, tmp_path, "live", STOCK_CONTRACT, reached)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "確認")
+    code = order.confirmation_code({**STUB_PLACE_CONFIRMATION, "mode": "正式"})
+
+    order.cmd_place(place_args(yes=True, live=True, confirm_code=code), {"order": {"live": True}}, {})
+
+    assert reached == ["enter_session", "submit_order"]
+    assert "--yes 被忽略" in capsys.readouterr().err
+
+
+def test_matching_confirm_code_with_piped_reply_submits_once(tmp_path, monkeypatch):
+    reached = []
+    wire_place_confirmable(monkeypatch, tmp_path, "sim", STOCK_CONTRACT, reached)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "確認")
+    code = order.confirmation_code({**STUB_PLACE_CONFIRMATION, "mode": "模擬"})
+
+    order.cmd_place(place_args(yes=False, confirm_code=code), {}, {})
+
+    assert reached == ["enter_session", "submit_order"]
+    records = [json.loads(line) for line in (tmp_path / "orders.log").read_text(encoding="utf-8").splitlines()]
+    # a successful submit logs "submitting" then a final line with order_id,
+    # not any of the refuse/wait/cancel outcomes
+    assert [r.get("result") for r in records] == ["submitting", None]
+    assert "order_id" in records[-1]
+
+
+def test_mismatching_confirm_code_refuses_and_never_submits(tmp_path, monkeypatch):
+    # the contract re-resolved to a different month (resolved_code changed)
+    # since the code the user confirmed was computed
+    reached = []
+    wire_place_confirmable(monkeypatch, tmp_path, "sim", STOCK_CONTRACT, reached, confirmation_extra={"resolved_code": "TXFJ6"})
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", _unexpected_input)
+    stale_code = order.confirmation_code({**STUB_PLACE_CONFIRMATION, "mode": "模擬"})
+
+    with pytest.raises(SystemExit) as exit_info:
+        order.cmd_place(place_args(yes=False, confirm_code=stale_code), {}, {})
+
+    assert exit_info.value.code != 0
+    assert reached == ["enter_session"]
+    records = [json.loads(line) for line in (tmp_path / "orders.log").read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["result"] == "confirm_code_mismatch"
+
+
+def test_no_confirm_code_on_non_interactive_stdin_waits_without_reading_it(tmp_path, monkeypatch, capsys):
+    reached = []
+    wire_place_confirmable(monkeypatch, tmp_path, "live", STOCK_CONTRACT, reached)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", _unexpected_input)
+
+    order.cmd_place(place_args(yes=True, live=True, confirm_code=None), {"order": {"live": True}}, {})
+
+    assert reached == ["enter_session"]
+    out, err = capsys.readouterr()
+    assert "等待使用者確認" in err
+    assert "確認碼：" in out
+    records = [json.loads(line) for line in (tmp_path / "orders.log").read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["result"] == "awaiting_confirmation"
+
+
+def test_matching_code_but_a_different_reply_is_cancelled_without_a_traceback(tmp_path, monkeypatch, capsys):
+    reached = []
+    wire_place_confirmable(monkeypatch, tmp_path, "sim", STOCK_CONTRACT, reached)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "好")
+    code = order.confirmation_code({**STUB_PLACE_CONFIRMATION, "mode": "模擬"})
+
+    order.cmd_place(place_args(yes=False, confirm_code=code), {}, {})
+
+    assert reached == ["enter_session"]
+    records = [json.loads(line) for line in (tmp_path / "orders.log").read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["result"] == "cancelled_by_user"
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_matching_code_but_an_empty_reply_is_cancelled_without_a_traceback(tmp_path, monkeypatch, capsys):
+    reached = []
+    wire_place_confirmable(monkeypatch, tmp_path, "sim", STOCK_CONTRACT, reached)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    code = order.confirmation_code({**STUB_PLACE_CONFIRMATION, "mode": "模擬"})
+
+    order.cmd_place(place_args(yes=False, confirm_code=code), {}, {})
+
+    assert reached == ["enter_session"]
+    records = [json.loads(line) for line in (tmp_path / "orders.log").read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["result"] == "cancelled_by_user"
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_matching_code_but_eof_on_stdin_is_cancelled_without_a_traceback(tmp_path, monkeypatch, capsys):
+    reached = []
+    wire_place_confirmable(monkeypatch, tmp_path, "sim", STOCK_CONTRACT, reached)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    def raise_eof(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+    code = order.confirmation_code({**STUB_PLACE_CONFIRMATION, "mode": "模擬"})
+
+    order.cmd_place(place_args(yes=False, confirm_code=code), {}, {})
+
+    assert reached == ["enter_session"]
+    records = [json.loads(line) for line in (tmp_path / "orders.log").read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["result"] == "cancelled_by_user"
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_an_interrupted_place_order_is_logged_as_unknown(tmp_path, monkeypatch, capsys):

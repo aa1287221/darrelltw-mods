@@ -939,11 +939,24 @@ testing an actual cert is out of scope for now.)
 **A confirmation gate guards every order.** Before `place_order` the script
 prints the contract, direction, price, quantity (with its unit — 張/股 by
 lot, 口 for futures, and for stocks the lot: 整股 / 盤中零股 / 盤後零股),
-account id and mode (模擬/正式), then waits for the literal reply `確認` on
-stdin. `--yes` skips that prompt in simulation only — live always prompts,
-whatever `--yes` says. `--lot` is `common` (整股, the default),
-`intraday-odd` (盤中零股) or `odd` (盤後零股, shioaji's `Odd`, matched
-13:40–14:30).
+account id and mode (模擬/正式), then one more line, `確認碼：<8 hex
+chars>` — a sha256 over exactly those fields (mode, code, resolved code,
+side, price type/value, qty, unit, lot, account id), canonical JSON so key
+order never moves it. `--yes` skips the prompt in simulation only — live
+always prompts, whatever `--yes` says. `--lot` is `common` (整股, the
+default), `intraday-odd` (盤中零股) or `odd` (盤後零股, shioaji's `Odd`,
+matched 13:40–14:30).
+
+**The 確認 that gets piped back in must carry that code.** When stdin is not
+a terminal and `--confirm-code` was not given, the script never calls
+`input()` — it prints `等待使用者確認` and exits 0, instead of `input()`
+raising `EOFError` into an unlogged traceback (as it used to under a model
+with no stdin at all). Re-running the same `place` invocation with
+`--confirm-code <code>` and `確認` on stdin submits only if the code still
+matches what this run builds; a re-resolved contract (a rolling futures
+alias rolled to a new month), a different account or a different price
+band changes it, and a stale or mismatched code refuses with `確認碼不符`
+and exits 1 without ever calling `place_order`.
 
 **Guards before the gate.** The price must be a positive finite number and
 the quantity at least 1 and within its cap, which has a unit:
