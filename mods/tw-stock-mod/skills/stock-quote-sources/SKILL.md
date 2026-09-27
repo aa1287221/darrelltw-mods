@@ -108,5 +108,6 @@ The band's footer names its source: `Yahoo 即時` / `Yahoo 延遲` / a
 fetcher's own `source` string, falling back to `報價檔` / `示範資料
 （未接 API）` when nothing is fresh. If the footer still says 示範資料 after
 wiring a route, the feed or the override file is not landing — check the file
-is younger than 120 seconds and re-read the matching section of
+is younger than 120 seconds (while the market trades; after the close, one
+written up to the close holds until the next session) and re-read the matching section of
 `../../references/quote-sources.md`.

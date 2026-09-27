@@ -202,20 +202,21 @@ type MarketConf = {
   defaultSort: SortKey
 }
 
-// Taipei is UTC+8 all year; US eastern is UTC-5, UTC-4 between the 2nd Sunday
-// of March and the 1st Sunday of November. Doing the arithmetic here beats
-// trusting a tz database to exist inside the hooks sandbox.
+// Taipei is UTC+8 all year; US eastern is UTC-5, UTC-4 from 02:00 local on
+// the 2nd Sunday of March (07:00 UTC) to 02:00 local on the 1st Sunday of
+// November (06:00 UTC). Doing the arithmetic here beats trusting a tz
+// database to exist inside the hooks sandbox. The switch is an instant, not
+// a UTC calendar day: flipping at 00:00 UTC put it 5-7 hours early, on the
+// Saturday evening in New York.
 function usEasternOffset(now: number): number {
-  const d = new Date(now)
-  const year = d.getUTCFullYear()
-  const month = d.getUTCMonth() + 1
-  const day = d.getUTCDate()
-  if (month < 3 || month > 11) return -5
-  if (month > 3 && month < 11) return -4
-  const firstDow = new Date(Date.UTC(year, month - 1, 1)).getUTCDay() // 0 = Sunday
-  const firstSunday = 1 + ((7 - firstDow) % 7)
-  if (month === 3) return day >= firstSunday + 7 ? -4 : -5
-  return day >= firstSunday ? -5 : -4
+  const year = new Date(now).getUTCFullYear()
+  const sunday = (month: number, nth: number): number => {
+    const firstDow = new Date(Date.UTC(year, month - 1, 1)).getUTCDay() // 0 = Sunday
+    return 1 + ((7 - firstDow) % 7) + (nth - 1) * 7
+  }
+  const dstStart = Date.UTC(year, 2, sunday(3, 2), 7) // 02:00 EST
+  const dstEnd = Date.UTC(year, 10, sunday(11, 1), 6) // 02:00 EDT
+  return now >= dstStart && now < dstEnd ? -4 : -5
 }
 
 export const MARKETS: Record<MarketId, MarketConf> = {
@@ -385,9 +386,13 @@ function minutesSinceClose(now: number, market: MarketId): number {
 }
 
 /** when this market last closed, as a timestamp - minutesSinceClose walks back
- * over the weekend for us, so this is a real moment on any day of the week */
+ * over the weekend for us, so this is a real moment on any day of the week.
+ * It counts whole minutes, so it is taken from the top of `now`'s minute: at
+ * 13:30:20 the close is 13:30:00, not 13:30:20 (which a price that traded at
+ * 13:30:00 would never reach). Every offset is whole hours, so the top of the
+ * minute is the same instant in any timezone. */
 export function lastCloseAt(now: number, market: MarketId): number {
-  return now - minutesSinceClose(now, market) * 60_000
+  return Math.floor(now / 60_000) * 60_000 - minutesSinceClose(now, market) * 60_000
 }
 
 export function hhmm(minutesFromMidnight: number): string {

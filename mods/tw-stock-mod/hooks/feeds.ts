@@ -96,7 +96,8 @@ export function parseMis(text: string): { quotes: Record<string, FileQuote>; tra
     const prevClose = misNum(entry.y)
     if (!code || price === undefined || !Number.isFinite(prevClose)) continue
     const name = str(entry.n, '')
-    out[code] = { price, prevClose, ...(name ? { name } : {}) }
+    // a 0 close is not a close (see positive in config.ts)
+    out[code] = { price, ...(prevClose > 0 ? { prevClose } : {}), ...(name ? { name } : {}) }
     // tlong is already in milliseconds
     const at = misNum(entry.tlong)
     if (Number.isFinite(at)) tradedAt = Math.max(tradedAt, at)
@@ -134,7 +135,7 @@ export function parseSpark(text: string): { quotes: Record<string, FileQuote>; t
     const price = num(meta.regularMarketPrice, NaN)
     const prevClose = num(meta.previousClose, num(meta.chartPreviousClose, NaN))
     if (!Number.isFinite(price) || !Number.isFinite(prevClose)) continue
-    out[symbol] = { price, prevClose }
+    out[symbol] = { price, ...(prevClose > 0 ? { prevClose } : {}) }
     // Yahoo answers seconds; the band works in milliseconds
     tradedAt = Math.max(tradedAt, num(meta.regularMarketTime, 0) * 1000)
   }

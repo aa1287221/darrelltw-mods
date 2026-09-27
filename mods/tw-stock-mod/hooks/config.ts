@@ -1,7 +1,7 @@
 // stock-band.json: the Config shape, its parsers and defaults, and the
 // layout/request-budget math that follows from it.
 
-import { CHART_ROWS_MIN, COLUMN_MIN_COLS, DEFAULT_CHART_ROWS, DEFAULT_REFRESH_MS, FEED_MS_DEFAULT, FEED_MS_MIN, MAX_COLUMNS, MAX_SYMBOLS, PAGE_MS_DEFAULT, PAGE_MS_MIN, PNL_CHROME_ROWS, REQUESTS_PER_HOUR, SPARK_BATCH, TABLE_CHROME_ROWS, TABLE_QUOTE_ROWS, TICKER_CELL_COLS, TW_INDICES, US_INDICES } from './constants.ts'
+import { BARS_MAX_AGE_MS, CHART_ROWS_MIN, COLUMN_MIN_COLS, DEFAULT_CHART_ROWS, DEFAULT_REFRESH_MS, FEED_MS_DEFAULT, FEED_MS_MIN, MAX_COLUMNS, MAX_SYMBOLS, PAGE_MS_DEFAULT, PAGE_MS_MIN, PNL_CHROME_ROWS, REQUESTS_PER_HOUR, SPARK_BATCH, TABLE_CHROME_ROWS, TABLE_QUOTE_ROWS, TICKER_CELL_COLS, TW_INDICES, US_INDICES } from './constants.ts'
 import { CRYPTO_LIST, TW_LIST, US_LIST, hasFutures } from './markets.ts'
 import type { ColumnMode, MarketId, MarketMode, MarketSwitcher, SortKey, Ticker, TwIndex, TwSourceName } from './markets.ts'
 import type { Holding } from './quotes.ts'
@@ -155,6 +155,16 @@ export function num(value: unknown, fallback: number): number {
 
 export function str(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.length > 0 ? value : fallback
+}
+
+/**
+ * A close is a price, so 0 or less is "not known": the 永豐 fetcher writes 0
+ * for a contract with no reference yet, and read as a real close it made the
+ * whole price the day's change (an index card at +23000, 今日損益 of price x
+ * qty). Missing lets every reader fall back the way it does for an absent one.
+ */
+export function positive(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
 }
 
 // a config entry only has to carry `code`; everything else falls back to the
@@ -366,7 +376,13 @@ export function feedMarkets(cfg: Config, market: MarketId): MarketId[] {
  * batch - and `down` names the HTTP routes currently backed off, which a tw
  * tick falls through past.
  */
-export type FeedExtras = { tw?: number; us?: number; down?: TwSourceName[] }
+export type FeedExtras = {
+  tw?: number
+  us?: number
+  down?: TwSourceName[]
+  /** the chart view is up, so a K-bar request (one Yahoo call per BARS_MAX_AGE_MS at most) shares the budget */
+  bars?: boolean
+}
 
 /** what one market costs per tick, before the chart view's own bar fetch is added */
 function marketRequests(cfg: Config, market: MarketId, extras: FeedExtras = {}): number {
@@ -412,7 +428,10 @@ export function requestsPerTick(cfg: Config, extras: FeedExtras = {}): number {
  * budget into an interval, so no config can get the host banned.
  */
 export function feedInterval(cfg: Config, extras: FeedExtras = {}): number {
-  const budgetFloor = Math.ceil((requestsPerTick(cfg, extras) * 3_600_000) / REQUESTS_PER_HOUR)
+  // the chart's K bars are paid for first, off the top: they are one request
+  // per BARS_MAX_AGE_MS whatever the tick does, so the tick gets the rest
+  const budget = REQUESTS_PER_HOUR - (extras.bars ? Math.ceil(3_600_000 / BARS_MAX_AGE_MS) : 0)
+  const budgetFloor = Math.ceil((requestsPerTick(cfg, extras) * 3_600_000) / budget)
   return Math.max(cfg.feedMs, FEED_MS_MIN, budgetFloor)
 }
 
@@ -618,7 +637,7 @@ export function parseHoldingsList(value: unknown): Holding[] {
       qty: num(entry.qty, 0),
       cost: num(entry.cost, 0),
       price: typeof entry.price === 'number' ? entry.price : undefined,
-      prevClose: typeof entry.prevClose === 'number' ? entry.prevClose : undefined,
+      prevClose: positive(entry.prevClose),
       // `direction` is not kept: the fetcher already signs qty with it
       multiplier: typeof entry.multiplier === 'number' && entry.multiplier > 0 ? entry.multiplier : undefined,
     })

@@ -568,39 +568,55 @@ instead of leaving it on demo prices until the next tick.
 - **A failed fetch never becomes a made-up price.** While the market trades,
   the last good snapshot stands for 120 seconds, then the band falls back to
   the demo walk and the footer tag changes back to 示範資料. Once the market
-  closes that rule is dropped: a snapshot taken after the close stays true
-  until the next session, because the price it holds cannot change.
+  closes that rule is dropped: a snapshot that was still fresh at the close
+  stays true until the next session, because the price it holds cannot
+  change. The same goes for a quotes file — a 永豐 file keeps 台股 on its
+  closing prices all weekend, and the last futures file of a session keeps
+  台指期 priced until the next one opens.
 
-- **A closed market is not polled.** One fetch after the close captures the
-  closing price and then the feed goes quiet until the market opens again —
-  the countdown in the footer disappears with it, rather than counting down to
-  a request that never comes. Left open overnight the band used to spend about
+- **A closed market is not polled.** The feed keeps asking after the close
+  only until an answer has traded at the close — Yahoo's Taiwan quotes run
+  about 20 minutes behind, so the first read after 13:30 is often a 13:10
+  price — and never past 30 minutes after it. Then it goes quiet until the
+  market opens again, and the countdown in the footer disappears with it,
+  rather than counting down to a request that never comes. A broker fetcher is
+  released the same way: once its file carries the close, the heartbeat stops
+  naming that market. With the trend view up, K bars stop being re-read on the
+  same rule and stay drawn. Left open overnight the band used to spend about
   1,900 requests re-reading a number that had stopped moving, against a keyless
   endpoint that answers 429 and bans for minutes.
 
 - **Snoozing stops the feed too.** `收起 30 分` takes the table off screen, so
-  those 30 minutes need no prices.
+  those 30 minutes need no HTTP requests. The broker heartbeat keeps going, so
+  a 永豐 or 群益 fetcher stays logged in, and `展開` asks for prices at once.
 
 - **The request budget is enforced, not just the interval.** `feedMs` alone
   cannot bound the rate once a tick costs more than one request, so the feed
   works out its own floor from a 300 requests/hour budget (see `feedInterval`)
   and logs when it widens the tick. The cost counts what a tick really fetches
   — the watchlist plus any holdings not on it — and holdings that appear
-  mid-session slow the fetches down rather than overrun the budget.
+  mid-session slow the fetches down rather than overrun the budget. The trend
+  view's K bars (one request per two minutes at most) are paid for out of the
+  same budget while it is up.
 
 ## Overriding the feed with a file
 
 **Read order:** the runtime-dir file the band or `fetch-quotes-shioaji.py`
 writes (`~/.claude/stock-band/<slug>/stock-quotes.json`) wins while it is
 fresh, then `<project>/.claude/stock-quotes.json` as the manual override seam
-below, then the built-in feed.
+below, then the built-in feed. This is decided per market: a file naming
+`"market": "tw"` never keeps the override off 美股.
 
 Write `<project>/.claude/stock-quotes.json` in the shape of
 [`stock-quotes.example.json`](stock-quotes.example.json) and the band uses it
 instead of faking prices (the footer tag changes from 示範資料 to 報價檔). Older
-than 120 seconds, malformed, or missing and it falls back to demo prices — so a
-failed fetch should simply leave the file alone rather than write a stale price
-that looks live.
+than 120 seconds while the market trades, malformed, or missing and it falls
+back to demo prices — so a failed fetch should simply leave the file alone
+rather than write a stale price that looks live. Once the market closes, a file
+that names its `market` and was fresh at the close holds until the next
+session (one naming none only ever lasts its 120 seconds). A `prevClose` of 0
+or less counts as unknown: the row reads flat instead of showing the whole
+price as the day's change.
 
 A file may also name itself: `"source": "永豐 即時"` replaces the `報價檔` tag
 in the footer, and `"indices": [{ name, value, change, pct }]` hands the footer

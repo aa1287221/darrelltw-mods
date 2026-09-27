@@ -37,6 +37,12 @@ export const QUOTE_STALE_MS = 120_000
 // on the same machine; this is slack for a clock stepped back since): a file
 // stamped further out would never go stale, so it is refused
 export const QUOTE_FUTURE_SLACK_MS = 60_000
+// How long after a close the feed keeps asking for the closing price when the
+// answers still predate it: Yahoo's Taiwan quotes run about 20 minutes behind,
+// so the first read after 13:30 is often a 13:10 price. Past this, whatever
+// the last read said is taken as final (a halted symbol, an exchange holiday
+// the weekday-only calendar does not know).
+export const CLOSE_GRACE_MS = 30 * 60 * 1000
 export const SNOOZE_MS = 30 * 60 * 1000
 // The table is header + rule + quote rows + footer and the 損益 view title +
 // header + holding rows + totals, each sized off the band's `maxRows` (#13,

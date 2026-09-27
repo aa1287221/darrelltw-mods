@@ -1,6 +1,6 @@
 /* @jsx h */
 import type { Register } from 'claude-code'
-import { BARS_MAX_AGE_MS, BARS_STALE_MS, CHART_BARS, COINGECKO_MARKETS_URL, CONFIG_PATH, CRYPTO_COOLDOWN_MS, CRYPTO_LOW_TOKENS, CRYPTO_SUPPLY_COOLDOWN_MS, CRYPTO_SUPPLY_TTL_MS, FEED_BACKOFF_MAX_MS, HOLDINGS_PATH, IN_FLIGHT_STUCK_MS, PIONEX_TICKERS_URL, PNL_CHROME_ROWS, QUOTES_PATH, QUOTE_STALE_MS, REQUESTS_PER_HOUR, SNOOZE_MS, SPARK_BATCH, TABLE_CHROME_ROWS, TW_YAHOO_INDEX, USER_CONFIG_REL, US_INDEX_SYMBOL, US_INDICES, runtimeDir } from './constants.ts'
+import { BARS_MAX_AGE_MS, BARS_STALE_MS, CHART_BARS, COINGECKO_MARKETS_URL, CLOSE_GRACE_MS, CONFIG_PATH, CRYPTO_COOLDOWN_MS, CRYPTO_LOW_TOKENS, CRYPTO_SUPPLY_COOLDOWN_MS, CRYPTO_SUPPLY_TTL_MS, FEED_BACKOFF_MAX_MS, HOLDINGS_PATH, IN_FLIGHT_STUCK_MS, PIONEX_TICKERS_URL, PNL_CHROME_ROWS, QUOTES_PATH, QUOTE_STALE_MS, REQUESTS_PER_HOUR, SNOOZE_MS, SPARK_BATCH, TABLE_CHROME_ROWS, TW_YAHOO_INDEX, USER_CONFIG_REL, US_INDEX_SYMBOL, US_INDICES, runtimeDir } from './constants.ts'
 import { CRYPTO_COINGECKO_ID, MARKETS, currentSession, hasFutures, hhmm, lastCloseAt, localParts, phaseOf, pickMarket, sessionNote, taipeiNote } from './markets.ts'
 import type { MarketId, MarketMode, MarketSwitcher, Phase, SortKey, Ticker, TwSourceName, View } from './markets.ts'
 import { PNL_SORT_KEYS, PNL_SORT_LABELS, TIMEFRAMES, demoBars, demoPrice, quoteRow, roundPrice, sortHoldings } from './quotes.ts'
@@ -92,6 +92,7 @@ function feedExtras(now?: number): FeedExtras {
     tw: holdingExtras('tw', config.lists.tw, config).length,
     us: holdingExtras('us', config.lists.us, config).length,
     down: [...down],
+    bars: view === 'chart',
   }
 }
 
@@ -248,7 +249,9 @@ function buildProps(
     const fromFile = quotesFile?.quotes[sym.code]
     if (fromFile) {
       usedFile = true
-      const prevClose = fromFile.prevClose ?? sym.prevClose
+      // a file entry with no close of its own reads flat, never against the
+      // watchlist's prevClose: that one is only the demo walk's anchor
+      const prevClose = fromFile.prevClose ?? fromFile.price
       const name = market === 'tf' ? futuresName(sym, fromFile) : (fromFile.name ?? sym.name)
       return {
         ...quoteRow(
@@ -461,7 +464,7 @@ function buildProps(
         ? quotesFile.index.pct
         : conf.indexDrift + conf.indexAmp * Math.sin((2 * Math.PI * (now / 1000)) / 89)
   const idxValue = tfIdx ? tfIdx.price : quotesFile?.index ? quotesFile.index.value : conf.indexClose * (1 + idxPct / 100)
-  const idxChange = tfIdx ? tfIdx.price - tfPrev : quotesFile?.index ? quotesFile.index.change : idxValue - conf.indexClose
+  const idxChange = tfIdx ? (tfPrev > 0 ? tfIdx.price - tfPrev : 0) : quotesFile?.index ? quotesFile.index.change : idxValue - conf.indexClose
 
   // The pnl view's own list and scroll position - see the `pnlScroll` module
   // state comment for why it is not the watchlist's `page`.
@@ -870,13 +873,16 @@ function setPage(next: number, now: number) {
  * Whether a snapshot still describes the market. While it trades, two minutes
  * without a new price means the feed died and the band has to say so rather
  * than keep drawing a price nobody is quoting. Once the market closes the
- * price cannot change, so a snapshot taken after the close stays true until
- * the next session - expiring it on the same two-minute rule would throw away
- * a real closing price and draw the demo walk over it.
+ * price cannot change, so a snapshot that was still fresh at the close stays
+ * true until the next session - expiring it on the same two-minute rule would
+ * throw away a real closing price and draw the demo walk (or 無報價) over it.
+ * "Fresh at the close", not "taken after it": the heartbeat stops naming tf
+ * at the close (marketNeedsFeed), so the last futures file the 永豐 fetcher
+ * writes is stamped a few seconds before 13:45 or 05:00.
  */
 function snapshotHolds(asOf: number, now: number, market: MarketId): boolean {
   if (phaseOf(now, market) === 'open') return now - asOf <= QUOTE_STALE_MS
-  return asOf >= lastCloseAt(now, market)
+  return asOf >= lastCloseAt(now, market) - QUOTE_STALE_MS
 }
 
 /**
@@ -889,13 +895,44 @@ function snapshotHolds(asOf: number, now: number, market: MarketId): boolean {
 function marketNeedsFeed(now: number, market: MarketId): boolean {
   if (phaseOf(now, market) === 'open') return true
   // tf only ever arrives through the file (never publish, so liveBy.tf is
-  // never set): the closing-snapshot rule below would read as "always",
-  // and the heartbeat would keep the fetcher alive all weekend
+  // never set), and the heartbeat stops naming it at the close: the file
+  // fresh at the close (snapshotHolds) is as close as it gets. Waiting for
+  // one stamped after the close would keep respawning a dead fetcher - a
+  // broker login a minute - until CLOSE_GRACE_MS ran out.
   if (market === 'tf') return false
+  // A broker fetcher's file (or a hand-written override naming this market)
+  // prices it without ever setting liveBy, so its own snapshot decides: the
+  // fetcher is kept on (the heartbeat names the market) only until the file
+  // carries the closing price, and never past CLOSE_GRACE_MS - otherwise it
+  // polls the broker every 10 s all night and all weekend.
+  const file = quotesFiles[market]
+  if (file?.market === market) return !hasClosingPrice(file, now, market) && now < lastCloseAt(now, market) + CLOSE_GRACE_MS
   const snap = liveBy[market]
-  // never fetched, or the snapshot predates the close and so is not the
-  // closing price yet
-  return !snap || snap.file.asOf < lastCloseAt(now, market)
+  // never fetched, or the snapshot is not the closing price yet
+  return !snap || !hasClosingPrice(snap.file, now, market)
+}
+
+/**
+ * Whether a snapshot of a closed market carries its closing price. The test
+ * is when the prices TRADED (dataAt), not when they were read: Yahoo's
+ * Taiwan quotes run about 20 minutes behind, so a read at 13:30:20 answers a
+ * 13:10 price, and gating on the read time froze that as 收盤 all night.
+ * Past CLOSE_GRACE_MS after the close, a read counts whatever it says - a
+ * halted symbol or an exchange holiday never trades up to the close.
+ */
+function hasClosingPrice(file: QuotesFile, now: number, market: MarketId): boolean {
+  const close = lastCloseAt(now, market)
+  return (file.dataAt ?? file.asOf) >= close || file.asOf >= close + CLOSE_GRACE_MS
+}
+
+/**
+ * Whether a K-bar set read at `at` is the closed session's last word: read
+ * after the close plus CLOSE_GRACE_MS (Yahoo runs up to 20 minutes behind),
+ * so it holds until the next session instead of expiring on BARS_STALE_MS,
+ * and feedBars stops asking for it again.
+ */
+function barsFinal(at: number, now: number, market: MarketId): boolean {
+  return phaseOf(now, market) !== 'open' && at >= lastCloseAt(now, market) + CLOSE_GRACE_MS
 }
 
 /** the badge a Yahoo-sourced bar set gets when the quotes file itself names none */
@@ -921,7 +958,7 @@ function withLiveBars(
       continue
     }
     const bars = liveBars[`${market}:${code}`]
-    if (bars && now - bars.at <= BARS_STALE_MS) {
+    if (bars && (now - bars.at <= BARS_STALE_MS || barsFinal(bars.at, now, market))) {
       out[code] = { ...quote, bars: bars.bars }
       barsFromYahoo = true
     } else {
@@ -934,11 +971,24 @@ function withLiveBars(
 /**
  * Which of `allowed` a parsed file drives: the market it names (a stock file
  * saying `tf`, or a futures file saying `tw`, drives nothing), or every one
- * of them when it names none - the pre-tf override semantics for tw/us.
+ * of them when it names none - the pre-tf override semantics for tw/us. Each
+ * slot takes the first of `files` that still holds for that market
+ * (snapshotHolds): a broker file fresh at 13:30 keeps 台股 on its closing
+ * prices all night instead of dropping to 無報價 two minutes later, while
+ * the same file expires as usual for a market still trading.
  */
-function fillQuoteSlots(file: QuotesFile | undefined, allowed: MarketId[]): void {
-  if (!file) return
-  for (const market of allowed) if (!file.market || file.market === market) quotesFiles[market] = file
+function fillQuoteSlots(files: (QuotesFile | undefined)[], allowed: MarketId[], now: number): void {
+  for (const market of allowed) {
+    const file = files.find(f => {
+      if (!f || (f.market && f.market !== market)) return false
+      // only a file that names this market carries its close: one naming
+      // none (a legacy override) was written for whichever market was
+      // trading, and holding it all night for the other would pass a
+      // Taiwan snapshot off as the US close
+      return f.market === market ? snapshotHolds(f.asOf, now, market) : now - f.asOf <= QUOTE_STALE_MS
+    })
+    if (file) quotesFiles[market] = file
+  }
 }
 
 /** the holdings twin of fillQuoteSlots: a file naming no market fills every allowed slot */
@@ -952,7 +1002,14 @@ function fillHoldingsSlots(file: HoldingsFile | undefined, allowed: MarketId[]):
 // 示範資料 tag is for.
 function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
   const file = quotesFiles[market]
-  if (file) {
+  // A held file that never saw the close (a fetcher that died at 13:28 with
+  // a 13:25 price) must not paint over a close the built-in feed did fetch:
+  // past the close, whichever of the two carries the closing price wins.
+  const live = liveBy[market]
+  const bridgeCloses =
+    file !== undefined && live !== undefined && phaseOf(now, market) !== 'open' &&
+    !hasClosingPrice(file, now, market) && hasClosingPrice(live.file, now, market)
+  if (file && !bridgeCloses) {
     // The override file wins, but it does not have to be COMPLETE to win: a
     // fetcher whose own watchlist is narrower than the band's (or briefly
     // out of date) can leave a code the table draws with no quote at all.
@@ -1153,14 +1210,16 @@ export const register: Register = on => {
         $.ui.log(`tw-stock-mod: futures 有 ${config.droppedFutures.length} 筆沒有 code，已略過：${config.droppedFutures.join(', ')}`)
       }
       const runtimeQuotes = parseQuotes(runtimeQuotesText, now, 'runtime')
-      runtimeQuotesFresh = runtimeQuotes !== undefined
+      // the fetchers' health signal stays the plain two-minute rule: a
+      // closing snapshot still holds on the board, but nothing is writing it
+      runtimeQuotesFresh = runtimeQuotes !== undefined && now - runtimeQuotes.asOf <= QUOTE_STALE_MS
       quotesFiles = {}
       // the stock file drives crypto too (a file naming no market drove every
       // market before the tf split), so a hand-written override reaches it
-      fillQuoteSlots(runtimeQuotes ?? parseQuotes(projectQuotesText, now, 'project'), ['tw', 'us', 'crypto'])
+      fillQuoteSlots([runtimeQuotes, parseQuotes(projectQuotesText, now, 'project')], ['tw', 'us', 'crypto'], now)
       const futuresQuotes = parseQuotes(futuresQuotesText, now, 'futures')
-      futuresQuotesFresh = futuresQuotes !== undefined
-      fillQuoteSlots(futuresQuotes, ['tf'])
+      futuresQuotesFresh = futuresQuotes !== undefined && now - futuresQuotes.asOf <= QUOTE_STALE_MS
+      fillQuoteSlots([futuresQuotes], ['tf'], now)
       noteFileSnapshots()
       // The project-path holdings file only: a 0.9-era Shioaji fetcher wrote
       // its output straight here (before runtimeDir existed) and always
@@ -2026,12 +2085,11 @@ export const register: Register = on => {
     /** `force`: a tab switch asking for prices now (requestFeed) - it still counts against the budget */
     const feed = async (force = false) => {
       const now = await $.clock.now()
-      // Snoozed means the table is not on screen at all, so the 30 minutes it
-      // covers need no prices; feedInFlightSince keeps a slow answer from
-      // stacking a second request on top of it, until IN_FLIGHT_STUCK_MS
-      // says it is never coming. Back-off (feedBackoff) is per host, inside
-      // each feed: it holds that host's requests only, never the heartbeat.
-      if (config.feed === 'off' || now < snoozedUntil) return
+      // feedInFlightSince keeps a slow answer from stacking a second request
+      // on top of it, until IN_FLIGHT_STUCK_MS says it is never coming.
+      // Back-off (feedBackoff) is per host, inside each feed: it holds that
+      // host's requests only, never the heartbeat.
+      if (config.feed === 'off') return
       const onScreen = pickMarket(now, modeOverride ?? config.market, hasFutures(config)).market
       const markets = feedMarkets(config, onScreen).filter(market => marketNeedsFeed(now, market))
       // The heartbeat goes out ahead of the in-flight latch: a hung request
@@ -2040,6 +2098,11 @@ export const register: Register = on => {
       const brokerTw = config.twSources.includes('shioaji') || config.twSources.includes('capital')
       const wanted = markets.filter(m => m === 'tf' || (m === 'tw' && brokerTw))
       if (wanted.length > 0) await writeHeartbeat(now, wanted)
+      // Snoozed means the table is not on screen at all, so the 30 minutes it
+      // covers need no HTTP requests. The heartbeat above still goes out: a
+      // broker fetcher left without one quits after 90 s, and 展開 would then
+      // wait out a respawn and a fresh login before the first real price.
+      if (now < snoozedUntil) return
       backOffHung(now)
       if (feedInFlightSince && now - feedInFlightSince < IN_FLIGHT_STUCK_MS) return
       if (feedInFlightSince) $.ui.log('tw-stock-mod: the last feed tick never settled; starting a new one')
@@ -2105,6 +2168,10 @@ export const register: Register = on => {
       const key = `${market}:${code}`
       const have = liveBars[key]
       if (have && now - have.at < BARS_MAX_AGE_MS) return
+      // a closed session's bars stop changing once Yahoo's delay has caught
+      // up with the close; re-reading them every two minutes all night was
+      // about 30 requests an hour for nothing
+      if (have && barsFinal(have.at, now, market)) return
       const sym = config.lists[market].find(t => t.code === code)
       if (!sym) return
       const mine = now
@@ -2185,6 +2252,9 @@ export const register: Register = on => {
       const mins = Math.max(1, Math.ceil((snoozedUntil - now) / 60_000))
       const onWake = () => {
         snoozedUntil = 0
+        // the HTTP feed skipped every tick while snoozed: ask now rather than
+        // draw the last snapshot's expiry (示範資料) until the next tick
+        requestFeed?.()
         $.ui.invalidate('ui.render')
       }
       // No hotkey (see the comment above the button row below for why) - this

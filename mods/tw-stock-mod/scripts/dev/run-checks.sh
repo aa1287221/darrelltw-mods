@@ -3,8 +3,8 @@
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
 # file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view /
-# fit-rows / pytest / feed-errors / feed-budget / spawn-safety / crypto-feed / crypto-sort / market-select
-# against them (feed-errors, spawn-safety, crypto-feed, crypto-sort and market-select build their own stub config
+# fit-rows / pytest / feed-errors / feed-budget / spawn-safety / close-snapshot / crypto-feed / crypto-sort / market-select
+# against them (feed-errors, spawn-safety, close-snapshot, crypto-feed, crypto-sort and market-select build their own stub config
 # in-process instead, so they need no fixture directory) plus
 # tsc (typecheck), check-engine-rules.sh, `claude plugin validate` (when the CLI is on PATH)
 # and check-personal.sh, and prints a PASS/FAIL line
@@ -44,6 +44,11 @@ fi
 if ! (cd "$MOD_DIR" && "${ESBUILD[@]}" hooks/board.tsx --bundle --format=esm --jsx-factory=h \
   --jsx-fragment=Fragment --external:claude-code --outfile="$OUT/board.js"); then
   echo "esbuild board.tsx FAILED" >&2
+  exit 1
+fi
+# close-snapshot reads the US offset and lastCloseAt straight off markets.ts
+if ! (cd "$MOD_DIR" && "${ESBUILD[@]}" hooks/markets.ts --bundle --format=esm --outfile="$OUT/markets.js"); then
+  echo "esbuild markets.ts FAILED" >&2
   exit 1
 fi
 
@@ -314,6 +319,7 @@ run_check "pytest"         run_pytest
 run_check "feed-errors"    node "$SCRIPT_DIR/feed-errors.mjs" "$OUT/register.js"
 run_check "feed-budget"    node "$SCRIPT_DIR/feed-budget.mjs" "$OUT/register.js"
 run_check "spawn-safety"   node "$SCRIPT_DIR/spawn-safety.mjs" "$OUT/register.js"
+run_check "close-snapshot" node "$SCRIPT_DIR/close-snapshot.mjs" "$OUT/register.js" "$OUT/markets.js"
 run_check "crypto-feed"    node "$SCRIPT_DIR/crypto-feed.mjs" "$OUT/register.js"
 run_check "crypto-sort"    node "$SCRIPT_DIR/crypto-sort.mjs" "$OUT/register.js"
 run_check "market-select"  node "$SCRIPT_DIR/market-select.mjs" "$OUT/register.js"
