@@ -1,11 +1,33 @@
 // Proves twSources' merge/alias/default/fallthrough semantics against the
 // REAL register.tsx (bundled), with a stub host that fakes the user-level
-// and project config files, $.env.get("HOME"), $.session.cwd and
-// $.process.run (so no real shioaji script or ~/.claude file is touched),
-// but hits the real Yahoo/MIS endpoints the same way harness.mjs does.
+// and project config files, $.env.get("HOME"), $.session.cwd,
+// $.process.run (so no real shioaji script or ~/.claude file is touched)
+// and $.http.fetch: Yahoo and MIS answer canned quotes for whatever they are
+// asked, so which endpoint a tick reached is what the log records - no
+// network. The clock is pinned to a weekday session so the answer never
+// depends on when this runs.
 //
 // Usage: node sources-order.mjs <register.js>
 import { pathToFileURL } from 'node:url'
+
+// Tue 2026-09-22 10:00 Taipei: 台股 open
+const CLOCK = Date.UTC(2026, 8, 22, 2, 0)
+
+/** a canned answer for either quote endpoint, pricing every symbol it names */
+function cannedAnswer(url) {
+  const u = new URL(url)
+  if (u.hostname === 'mis.twse.com.tw') {
+    const channels = (u.searchParams.get('ex_ch') ?? '').split('|').filter(Boolean)
+    const msgArray = channels.map(ch => ({ c: ch.split('_')[1].replace(/\.tw$/, ''), n: 'X', z: '100', y: '99', tlong: String(CLOCK) }))
+    return JSON.stringify({ rtcode: '0000', msgArray })
+  }
+  const symbols = (u.searchParams.get('symbols') ?? '').split(',').filter(Boolean)
+  const result = symbols.map(symbol => ({
+    symbol,
+    response: [{ meta: { regularMarketPrice: 100, previousClose: 99, regularMarketTime: CLOCK / 1000 } }],
+  }))
+  return JSON.stringify({ spark: { result } })
+}
 
 const [, , modPath] = process.argv
 globalThis.h = (type, props, ...kids) => ({ type, props: props ?? {}, kids: kids.flat() })
@@ -36,7 +58,7 @@ async function runCase(label, { userText, projectText, quotesText, homeVar = 'HO
   const logs = []
   const processRuns = []
   const $ = {
-    clock: { now: async () => Date.now(), every: () => {} },
+    clock: { now: async () => CLOCK, every: () => {} },
     fs: {
       read: async path => {
         if (path in files) return files[path]
@@ -61,11 +83,9 @@ async function runCase(label, { userText, projectText, quotesText, homeVar = 'HO
       resolve: async () => ({ Box: 'Box', Button: 'Button', Client: 'Client', Text: 'Text' }),
     },
     http: {
-      fetch: async (url, init) => {
-        const res = await fetch(url, { headers: init?.headers })
-        const text = await res.text()
-        logs.push(`FETCH ${res.status} ${url}`)
-        return { ok: res.ok, status: res.status, text }
+      fetch: async url => {
+        logs.push(`FETCH 200 ${url}`)
+        return { ok: true, status: 200, headers: {}, text: cannedAnswer(url) }
       },
     },
   }
@@ -80,12 +100,12 @@ async function runCase(label, { userText, projectText, quotesText, homeVar = 'HO
 
   const handlers = new Map()
   register((event, a, b) => handlers.set(event, typeof a === 'function' ? a : b))
-  const next = async e => ({ type: 'next', props: {}, kids: [] })
+  const next = async () => ({ type: 'next', props: {}, kids: [] })
   await handlers.get('session.start')($, {}, next)
   // session.start already awaits its own first feed() to completion before
   // returning, so no extra wait should be needed - this is a small buffer
   // against anything unawaited rather than a load-bearing delay.
-  await new Promise(r => setTimeout(r, 200))
+  await new Promise(r => setTimeout(r, 0))
 
   const tree = await handlers.get('ui.render')($, { props: {}, surface: 'terminal', viewport: { columns: 100 } }, next)
   const client = findClient(tree)
@@ -128,11 +148,14 @@ console.log(`(c) PASS=${cOk}\n`)
 // (d) ["shioaji", "yahoo"] with no quotes file (shioaji has nothing fresh) -
 // the tick must fall through to yahoo THIS SAME TICK and the footer must
 // read Yahoo 延遲, not demo prices.
+// The broker paths (python, env, dll) are user-level only (mergeConfigRoots),
+// so (d)-(f) state them in the user file, the way a real setup does.
 const d = await runCase('(d) shioaji stale falls through to yahoo this tick', {
+  userText: JSON.stringify({ shioaji: { python: 'python3', env: '/nonexistent-env-file' } }),
   projectText: JSON.stringify({
     market: 'tw',
     twSources: ['shioaji', 'yahoo'],
-    shioaji: { python: 'python3', env: '/nonexistent-env-file', interval: 10 },
+    shioaji: { interval: 10 },
   }),
 })
 const dOk = d.processRuns.length === 1 && d.logs.some(l => l.includes('query1.finance.yahoo.com')) && d.p?.sourceLabel === 'Yahoo 延遲'
@@ -145,10 +168,11 @@ console.log(`(d) PASS=${dOk}\n`)
 // so its presence is the thing worth pinning: without it $.process.run would
 // hang on the fetcher's pipes for the whole 15 s timeout.
 const e = await runCase('(e) capital stale falls through to yahoo this tick', {
+  userText: JSON.stringify({ capital: { python: 'python', env: '/nonexistent-env-file', dll: 'C:/nope/SKCOM.dll' } }),
   projectText: JSON.stringify({
     market: 'tw',
     twSources: ['capital', 'yahoo'],
-    capital: { python: 'python', env: '/nonexistent-env-file', dll: 'C:/nope/SKCOM.dll', interval: 10 },
+    capital: { interval: 10 },
   }),
 })
 const eArgv = e.processRuns[0]?.argv ?? []
@@ -170,10 +194,11 @@ console.log(`(e) PASS=${eOk}\n`)
 const f = await runCase('(f) windows: USERPROFILE home + drive-letter cwd', {
   homeVar: 'USERPROFILE',
   cwd: 'D:\\fake-project',
+  userText: JSON.stringify({ capital: { python: 'python', env: '/nonexistent-env-file', dll: 'C:/nope/SKCOM.dll' } }),
   projectText: JSON.stringify({
     market: 'tw',
     twSources: ['capital', 'yahoo'],
-    capital: { python: 'python', env: '/nonexistent-env-file', dll: 'C:/nope/SKCOM.dll', interval: 10 },
+    capital: { interval: 10 },
   }),
 })
 const fArgv = f.processRuns[0]?.argv ?? []

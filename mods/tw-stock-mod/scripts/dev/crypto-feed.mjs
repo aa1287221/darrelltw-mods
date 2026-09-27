@@ -17,7 +17,6 @@ globalThis.Fragment = 'Fragment'
 // request apart from a CoinGecko market-cap-supply request in the shared
 // $.http.fetch stub below (fetchCryptoSupply now rides the same tick as
 // feedCrypto - see register.tsx's feedOnce).
-const PIONEX_TICKERS_URL = 'https://api.pionex.com/api/v1/market/tickers'
 const COINGECKO_MARKETS_URL = 'https://api.coingecko.com/api/v3/coins/markets'
 
 // A default happy CoinGecko answer for the ten default CRYPTO_LIST codes -

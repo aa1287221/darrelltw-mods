@@ -3,7 +3,7 @@
 This page answers one question: where do the band's prices come from, and how
 do you point it at a different source. The measurement log behind every claim
 here — exact requests, exact bytes back, exact failures — lives in
-[`docs/stock-api-notes.md`](../../../docs/stock-api-notes.md). Read this page
+[`docs/stock-api-notes.md`](../docs/stock-api-notes.md). Read this page
 to choose a source; read that one to see the evidence.
 
 Every route below writes into one of the same places the band already reads:
@@ -269,8 +269,8 @@ prints `更新 18:55` for a 10:55 snapshot.
 **How to tell it took.** The footer reads `永豐 即時` (the script sets
 `"source": "永豐 即時"` in the file it writes).
 
-**Holdings.** The script also calls `api.list_positions()` every tick and
-writes `<project>/.claude/stock-holdings.json` — see §6. Its quotes fetch
+**Holdings.** The script also calls `api.list_positions()` every minute and
+writes `stock-holdings.json` into the same runtime dir — see §6. Its quotes fetch
 covers the watchlist UNION every held code, so a holding that never made the
 watchlist still gets a live price there too, which the 損益 view prefers over
 the holdings file's own `price`/`prevClose`.
@@ -462,7 +462,7 @@ after `list_positions` (§3), and `scripts/fetch-quotes-capital.py` after
 (`~/.claude/stock-band/<project-slug>/`), which wins whenever it parses;
 `<project>/.claude/stock-holdings.json` is the manual override, and anything
 else can write either one by hand or from its own fetcher, in the shape of
-[`../../stock-holdings.example.json`](../../stock-holdings.example.json):
+[`stock-holdings.example.json`](../stock-holdings.example.json):
 
 ```jsonc
 { "asOf": 1757900000000, "market": "tw", "source": "手動庫存",

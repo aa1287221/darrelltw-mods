@@ -7,8 +7,11 @@ terminal surface that a screenshot only samples once, so "it looks wrong" is
 never enough to act on.
 
 `check-personal.sh` is separate from the harnesses above - it `rg`s the whole
-repo for personal paths (`your-venv`, `/Users/you`,
-the bare username) and exits 1 on any hit; run it before every release.
+repo, dot-directories included, for personal paths (`your-venv`, `/Users/you`,
+the bare username) and identifier shapes, exits 1 on any hit and 2 when the
+search itself failed (never "clean"); run it before every release.
+`check-personal.sh --self-test` proves each pattern family still fires, one
+synthetic fixture per family, and that a failed search is an error.
 
 `assert.mjs` is a two-function helper (`ok(cond, msg)`, `done()`) that turns a
 harness's printed output into a real pass/fail: `ok` prints `ok `/`FAIL ` and
@@ -74,6 +77,7 @@ copy theirs if you add a new harness.
 | `tabs.mjs` | the market tab row (#9): three tabs without futures/US holdings, five with a futures list + tf positions, six with US holdings too (keys `stock-band:tab:<market>[:pnl]`, plain, the selected one `[label]` and the rest dim); does each tab land on its own market + view in one press, does the mark move with it, does the tab row stay in chart view and a tab leave the chart; a 130→60 column sweep showing sessionNote → taipeiNote → badge give way before any tab **(asserts)** | `node tabs.mjs $OUT/register.js <holdings-proj> <plain-proj>` |
 | `feed-errors.mjs` | does a failing host stay contained: a thrown Yahoo request backs Yahoo off (no retry inside it, doubling after), a thrown `twSources` route falls through to the next one in the same tick, a Yahoo back-off leaves 證交所 feeding, and a request that never settles stops holding the feed after `IN_FLIGHT_STUCK_MS`, and its late answer never replaces a newer snapshot **(asserts, no fixture directory, no network)** | `node feed-errors.mjs $OUT/register.js` |
 | `spawn-safety.mjs` | what a project may not do to the 永豐 spawn: its `.claude/stock-band.json` cannot pick `shioaji.python` / `shioaji.env` (user-level only, dropped and logged once; the rest of the block still merges per key), and a project directory named with `$(...)` cannot run code - the captured spawn argv is actually executed through `/bin/sh` **(asserts, makes its own temp dirs, no network)** | `node spawn-safety.mjs $OUT/register.js` |
+| `sources-order.mjs` | `twSources` semantics: a user file and a project file merge with the project's `market` winning and the user's `twSources` applying; the legacy `twSource` alias; the `["yahoo"]` default; a stale 永豐 or 群益 route falling through to Yahoo in the same tick (群益's spawn being the plain `--detach` argv, never the `/bin/sh` wrapper); and a Windows home and drive-letter project still landing the runtime dir under the home directory. Broker paths come from the user file, as they must **(asserts, stubbed Yahoo/MIS, clock pinned to a weekday session, no network)** | `node sources-order.mjs $OUT/register.js` |
 | `close-snapshot.mjs` | what the band does around and after a close: a delayed Yahoo answer (13:10 prices read at 13:30:20) keeps the feed asking until one has traded at 13:30, and never past 30 minutes after the close; a 永豐 file carrying the close keeps 台股 priced all weekend with no `tw` in the heartbeat; a futures file from 13:44:55 still prices 台指期 at 14:30; a close of 0 reads flat; 收起 keeps the broker heartbeat and 展開 asks at once; K bars stop being re-read (and stay drawn) once a closed session's are final, and the chart's requests come out of the budget; US DST flips at 02:00 New York time; `lastCloseAt` is the close's own minute **(asserts, stubbed network and clock, no fixture directory)** | `node close-snapshot.mjs $OUT/register.js $OUT/markets.js` |
 | `feed-budget.mjs` | does the feed stay inside `REQUESTS_PER_HOUR` once holdings widen what it fetches (the watchlist UNION the holdings not on it): holdings known at boot size the timer, holdings added mid-session make timer ticks skip until the current interval has passed, and the countdown names a tick that actually sends **(asserts, no fixture directory, no network)** | `node feed-budget.mjs $OUT/register.js` |
 | `crypto-feed.mjs` | does Pionex's ticker endpoint get parsed right: `result:false` treated as failure (never a price), a 429 holding off for the cooldown with no retry inside it, and a ten-coin watchlist costing one request a tick **(asserts, no fixture directory needed - builds its own stub config in-process)** | `node crypto-feed.mjs $OUT/register.js` |
@@ -142,8 +146,8 @@ your real project or `~/.claude`); runs `feed-idle.mjs` → `chart-nav.mjs` →
 `rank-cross.mjs` → `file-bars.mjs` → `tf-market.mjs` → `tf-quotes.mjs` →
 `tf-feed.mjs` → `tf-pnl.mjs` → `tabs.mjs` → `chart-view.mjs` → `fit-rows.mjs`
 → `pytest` (`scripts/tests`, via `~/.claude/stock-band-venv/bin/python` when
-present, else `python3`) → `feed-errors.mjs` → `feed-budget.mjs` → `spawn-safety.mjs` → `close-snapshot.mjs` → `crypto-feed.mjs` → `crypto-sort.mjs` →
-`market-select.mjs` → `typecheck` → `check-engine-rules.sh` → `plugin-validate` → `check-personal.sh` in that
+present, else `python3`) → `feed-errors.mjs` → `feed-budget.mjs` → `spawn-safety.mjs` → `sources-order.mjs` → `close-snapshot.mjs` → `crypto-feed.mjs` → `crypto-sort.mjs` →
+`market-select.mjs` → `typecheck` → `lint` (oxlint over `hooks/` and `scripts/dev/`, warnings included) → `check-engine-rules.sh` → `plugin-validate` → `check-personal.sh --self-test` → `check-personal.sh` in that
 order, and prints a `PASS`/`FAIL` line per check. Exits non-zero if any of
 them did.
 
@@ -151,7 +155,7 @@ Every check here is expected to `PASS` - PR-a above was the one standing
 exception and is now fixed. `feed-idle` and `file-bars` hit the real Yahoo
 endpoint (see "The clock is yours to drive" above), so a `FAIL` on either one
 there is worth checking against the network before assuming it's a real
-regression. `feed-errors`, `feed-budget`, `spawn-safety`, `close-snapshot`, `crypto-feed`, `crypto-sort` and `market-select`
+regression. `feed-errors`, `feed-budget`, `spawn-safety`, `sources-order`, `close-snapshot`, `crypto-feed`, `crypto-sort` and `market-select`
 hit no network at all (their own `$.http.fetch` stub answers canned responses), so a `FAIL`
 in any one of them is never a network fluke.
 

@@ -1,13 +1,19 @@
 name: tw-stock-mod checks
 
+# The root marketplace manifest and .gitignore change what ships too, so
+# they trigger this as well - they were never checked before.
 on:
   push:
     paths:
       - "mods/tw-stock-mod/**"
+      - ".claude-plugin/**"
+      - ".gitignore"
       - ".github/workflows/tw-stock-mod.yml"
   pull_request:
     paths:
       - "mods/tw-stock-mod/**"
+      - ".claude-plugin/**"
+      - ".gitignore"
       - ".github/workflows/tw-stock-mod.yml"
 
 jobs:
@@ -30,7 +36,7 @@ jobs:
           # shioaji: test_order.py builds real sj order objects - the order
           # path is never allowed to skip here (REQUIRE_SHIOAJI below).
           # Pinned for the same reason as the CLI.
-          python -m pip install --quiet pytest shioaji==1.7.6
+          python -m pip install --quiet pytest==9.1.1 shioaji==1.7.6
           # `claude plugin validate` runs the engine's own load-time scan; no login needed
           # pinned: a new CLI can change what validate checks without a change here
           npm install -g --silent @anthropic-ai/claude-code@2.1.281
@@ -44,6 +50,10 @@ jobs:
         env:
           SKIP_NETWORK: "1"
           REQUIRE_SHIOAJI: "1"
+      # the repo-root marketplace manifest that points at this plugin
+      - name: claude plugin validate (marketplace)
+        working-directory: .
+        run: claude plugin validate .
 
   # The 群益 fetcher is Windows-only, and its pidfile guard asks the Windows
   # kernel (_common._windows_pid_alive) - a stub can only check the logic, so
@@ -60,6 +70,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install pytest
-        run: python -m pip install --quiet pytest
+        run: python -m pip install --quiet pytest==9.1.1
       - name: pytest (scripts/tests)
         run: python -m pytest scripts/tests -q -rs

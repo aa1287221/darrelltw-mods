@@ -4,6 +4,7 @@
 # your-venv (the old shioaji venv/env path), an absolute
 # /Users/you path, the bare username, or the identifier shapes below. Run
 # before every release; session-recap and the v0.10.0 doc pass both use this.
+# Exit 2 means the search itself failed - never read that as clean.
 set -euo pipefail
 
 # Repo root from this script's own location, not a hardcoded reviewer path -
@@ -24,8 +25,8 @@ TW_ID='\b[A-Z][12][0-9]{8}\b'
 QTY_67='qty["'"'"']?[[:space:]]*[:=][[:space:]]*-?67\b'
 PATTERN="${PERSONAL}|${ACCOUNT}|${TW_ID}|${QTY_67}"
 
-# --self-test scans a throwaway fixture instead of the repo, to prove the
-# three patterns above actually fire rather than just "no hits found".
+# --self-test scans throwaway fixtures instead of the repo, to prove every
+# pattern family actually fires rather than just "no hits found".
 SEARCH_ROOT="$REPO_ROOT"
 SELF_TEST=0
 if [[ "${1:-}" == "--self-test" ]]; then
@@ -36,44 +37,64 @@ fi
 
 # A machine without rg used to fall through to "clean" on `command not found`
 # (exit 127 inside `if`), so the gate passed without searching anything.
+#
+# Status: 0 = hits (printed), 1 = clean, 2 or more = the search itself failed.
+# `if search` alone read an rg error (a bad pattern, an unreadable path) as
+# "no hits" and passed. `--hidden`: rg skips dot-directories by default,
+# which left .github/ and .claude-plugin/ unscanned; .git itself stays
+# excluded, and gitignored files never ship, so they are not scanned.
 search() {
-  local root="$1"
+  local root="$1" status hits
   if command -v rg >/dev/null 2>&1; then
-    rg -n "$PATTERN" "$root" \
+    rg -n --hidden "$PATTERN" "$root" \
       --glob '!node_modules' \
       --glob '!.git' \
       --glob '!**/check-personal.sh' \
-      --glob '!**/scripts/dev/README.md'
-  else
-    grep -rnIE "$PATTERN" "$root" --exclude-dir=node_modules --exclude-dir=.git \
-      | grep -vE '/check-personal\.sh:|/scripts/dev/README\.md:'
+      --glob '!**/scripts/dev/README.md' && status=0 || status=$?
+    return "$status"
   fi
+  hits="$(grep -rnIE "$PATTERN" "$root" --exclude-dir=node_modules --exclude-dir=.git)" && status=0 || status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+  hits="$(printf '%s\n' "$hits" | grep -vE '/check-personal\.sh:|/scripts/dev/README\.md:' || true)"
+  [[ -n "$hits" ]] || return 1
+  printf '%s\n' "$hits"
 }
 
 if [[ "$SELF_TEST" -eq 1 ]]; then
-  # One file per family: a regression in any single pattern shows up on its
-  # own instead of being masked by the other two still matching.
-  cat > "$SEARCH_ROOT/acct.json" <<'EOF'
-{ "branch": "9A95", "account": "9A95-1234567" }
-EOF
-  cat > "$SEARCH_ROOT/id.json" <<'EOF'
-{ "holder_id": "A123456789" }
-EOF
-  cat > "$SEARCH_ROOT/qty.py" <<'EOF'
-row = dict(code="SRFJ6", qty=-67, price=110.35)
-EOF
-  echo "check-personal --self-test: scanning a synthetic fixture, expect a hit per family"
-  if search "$SEARCH_ROOT"; then
-    echo "check-personal --self-test: caught all 3 synthetic families (exit 1, as real detection would)" >&2
-    exit 1
+  # One fixture per family, each searched on its own: a regression in any
+  # single pattern fails the self-test instead of being masked by the others
+  # still matching. The personal-path fixture sits in a dot-directory, so
+  # --hidden is under test too.
+  mkdir -p "$SEARCH_ROOT/acct" "$SEARCH_ROOT/id" "$SEARCH_ROOT/qty" "$SEARCH_ROOT/path/.github"
+  printf '%s\n' '{ "branch": "9A95", "account": "9A95-1234567" }' > "$SEARCH_ROOT/acct/acct.json"
+  printf '%s\n' '{ "holder_id": "A123456789" }' > "$SEARCH_ROOT/id/id.json"
+  printf '%s\n' 'row = dict(code="SRFJ6", qty=-67, price=110.35)' > "$SEARCH_ROOT/qty/qty.py"
+  printf 'venv: /Users/%s/venv\n' "darrellwang" > "$SEARCH_ROOT/path/.github/ci.yml"
+  echo "check-personal --self-test: scanning synthetic fixtures, expect a hit in each family"
+  missed=()
+  for family in acct id qty path; do
+    search "$SEARCH_ROOT/$family" >/dev/null && status=0 || status=$?
+    [[ "$status" -eq 0 ]] || missed+=("$family (status $status)")
+  done
+  # and a search that cannot run is an error, never "clean"
+  search "$SEARCH_ROOT/does-not-exist" >/dev/null 2>&1 && status=0 || status=$?
+  [[ "$status" -ge 2 ]] || missed+=("a missing root read as status $status, not an error")
+  if [[ "${#missed[@]}" -gt 0 ]]; then
+    echo "check-personal --self-test: FAILED - ${missed[*]}" >&2
+    exit 2
   fi
-  echo "check-personal --self-test: FAILED - missed a synthetic identifier, a pattern regressed" >&2
-  exit 2
+  echo "check-personal --self-test: every family caught, and a failed search is an error"
+  exit 0
 fi
 
-if search "$SEARCH_ROOT"; then
+search "$SEARCH_ROOT" && status=0 || status=$?
+if [[ "$status" -eq 0 ]]; then
   echo "check-personal: found personal paths above" >&2
   exit 1
+fi
+if [[ "$status" -ne 1 ]]; then
+  echo "check-personal: the search itself failed (status $status) - not clean" >&2
+  exit 2
 fi
 
 echo "check-personal: clean"

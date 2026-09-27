@@ -9,7 +9,7 @@ nothing here calls `$.model.*` or touches your prompt.
 
 | mod | what it does |
 | --- | --- |
-| [`tw-stock-mod`](mods/tw-stock-mod/README.md) | 台股／美股看板。台股時段顯示台股清單（紅漲綠跌），美股時段顯示美股清單（綠漲紅跌），券商風格表格＋Solari 翻牌指數列＋損益模式。台美各 20 檔，報價預設走 Yahoo（免金鑰），永豐 Shioaji 可選，照個人偏好順序（`~/.claude/stock-band.json`） |
+| [`tw-stock-mod`](mods/tw-stock-mod/README.md) | 台股／美股看板。台股時段顯示台股清單（紅漲綠跌），美股時段顯示美股清單（綠漲紅跌），券商風格表格＋Solari 翻牌指數列＋損益模式。內建台美各 20 檔（自訂清單每市場最多 40 檔），報價預設走 Yahoo（免金鑰），永豐 Shioaji 可選，照個人偏好順序（`~/.claude/stock-band.json`） |
 
 More will land here. The marketplace is named after me rather than after what
 is in it, so adding an unrelated mod later does not make the name a lie.
