@@ -446,7 +446,6 @@ async function boot({
   // No assertion here on WHICH element the fallback draws: the check above
   // already pins it to whatever omitting the field draws, and naming a style
   // is exactly what broke this case when the default moved.
-  const { buttons } = badDraw
 }
 
 // --- (8): marketSwitcher:"tabs" but the terminal is too narrow for the five

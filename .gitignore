@@ -7,6 +7,7 @@ node_modules/
 bun.lock
 .DS_Store
 __pycache__/
+.pytest_cache/
 
 # fetch-quotes-shioaji.py chdir's into the runtime dir before shioaji writes
 # this, so it should never land here - this line is just a safety net

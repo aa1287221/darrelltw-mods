@@ -97,7 +97,7 @@ const press = (btns, label) => btns.find(b => b.label === label || b.label.start
 const band = await boot(projDir, 'fit')
 
 // --- no maxRows (a stub host): today's fixed 8-row, two-column board ----------
-let { props: p, client, treeRows, btns } = await band.draw({})
+let { props: p, client } = await band.draw({})
 let lines = render(p)
 console.log(`stub host: view=${p.view} rows=${lines.length} columns=${p.columns} page ${p.page + 1}/${p.pageCount}`)
 show(lines)

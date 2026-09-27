@@ -13,7 +13,6 @@ const [, , modPath] = process.argv
 globalThis.h = (type, props, ...kids) => ({ type, props: props ?? {}, kids: kids.flat() })
 globalThis.Fragment = 'Fragment'
 
-const PIONEX_TICKERS_URL = 'https://api.pionex.com/api/v1/market/tickers'
 const COINGECKO_MARKETS_URL = 'https://api.coingecko.com/api/v3/coins/markets'
 
 // The same ten-code fixture crypto-feed.mjs/market-select.mjs use (read off

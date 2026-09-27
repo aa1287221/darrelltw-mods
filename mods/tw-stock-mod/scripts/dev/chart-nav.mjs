@@ -31,7 +31,7 @@ await new Promise(r => setTimeout(r, 2500))
 
 const draw = async () => {
   const tree = await handlers.get('ui.render')($, { props: {}, surface: 'terminal', viewport: { columns: 120 } }, async () => ({ kids: [] }))
-  const btns = [], texts = []; let props, side = 'left'
+  const btns = [], texts = []; let props
   const walk = (n, depth = 0) => { if (!n || typeof n !== 'object') return
     if (n.type === 'Client') props = n.props.props
     if (n.type === 'Button') btns.push({ label: n.props.label, press: n.props.onPress, key: n.props.key })
@@ -173,7 +173,7 @@ for (let i = 0; i < 4; i++) {
   const { btns } = await show(`分頁跟隨：下一檔 x${i}`)
   btns.find(x => x.label.startsWith('下一檔')).press()
 }
-let { props: p13, btns: b13 } = await show('分頁跟隨：下一檔到名次第五')
+let { props: p13 } = await show('分頁跟隨：下一檔到名次第五')
 const rank5Code = p13.quotes[p13.focus]?.code
 ok(rank5Code === '8888', '連按 4 次下一檔，焦點停在名次第五 8888（仍在第 1 頁）')
 ok(p13.page === 0, '名次第五還在第 1 頁')

@@ -3,11 +3,12 @@
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
 # file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view /
-# fit-rows / pytest / feed-errors / feed-budget / spawn-safety / close-snapshot / crypto-feed / crypto-sort / market-select
-# against them (feed-errors, spawn-safety, close-snapshot, crypto-feed, crypto-sort and market-select build their own stub config
+# fit-rows / pytest / feed-errors / feed-budget / spawn-safety / sources-order / close-snapshot / crypto-feed / crypto-sort /
+# market-select against them (feed-errors, spawn-safety, sources-order, close-snapshot, crypto-feed, crypto-sort and
+# market-select build their own stub config
 # in-process instead, so they need no fixture directory) plus
-# tsc (typecheck), check-engine-rules.sh, `claude plugin validate` (when the CLI is on PATH)
-# and check-personal.sh, and prints a PASS/FAIL line
+# tsc (typecheck), oxlint (lint), check-engine-rules.sh, `claude plugin validate` (when the CLI is on PATH)
+# and check-personal.sh (its --self-test first), and prints a PASS/FAIL line
 # per check. Exits non-zero if any of them did.
 #
 # rank-cross and chart-nav's "名次交叉" section once pinned the PR-a bug
@@ -33,7 +34,12 @@ cleanup() { rm -rf "$FIXTURES"; }
 trap cleanup EXIT
 
 # bun is not on every machine; `npx -y esbuild` takes the same flags
-if command -v bunx >/dev/null 2>&1; then ESBUILD=(bunx esbuild); else ESBUILD=(npx -y esbuild); fi
+# Pinned, like the CLI in CI: a new esbuild or tsc can change what builds or
+# typechecks with no change here. Bump these on purpose.
+ESBUILD_PKG=esbuild@0.28.2
+TYPESCRIPT_PKG=typescript@5.9.3
+OXLINT_PKG=oxlint@1.85.0
+if command -v bunx >/dev/null 2>&1; then ESBUILD=(bunx "$ESBUILD_PKG"); else ESBUILD=(npx -y "$ESBUILD_PKG"); fi
 
 echo "== build =="
 if ! (cd "$MOD_DIR" && "${ESBUILD[@]}" hooks/register.tsx --bundle --format=esm --jsx-factory=h \
@@ -319,6 +325,7 @@ run_check "pytest"         run_pytest
 run_check "feed-errors"    node "$SCRIPT_DIR/feed-errors.mjs" "$OUT/register.js"
 run_check "feed-budget"    node "$SCRIPT_DIR/feed-budget.mjs" "$OUT/register.js"
 run_check "spawn-safety"   node "$SCRIPT_DIR/spawn-safety.mjs" "$OUT/register.js"
+run_check "sources-order"  node "$SCRIPT_DIR/sources-order.mjs" "$OUT/register.js"
 run_check "close-snapshot" node "$SCRIPT_DIR/close-snapshot.mjs" "$OUT/register.js" "$OUT/markets.js"
 run_check "crypto-feed"    node "$SCRIPT_DIR/crypto-feed.mjs" "$OUT/register.js"
 run_check "crypto-sort"    node "$SCRIPT_DIR/crypto-sort.mjs" "$OUT/register.js"
@@ -331,9 +338,13 @@ run_typecheck() {
   local cfg="$SCRIPT_DIR/tsconfig.stub.json"
   if [[ -d "$MOD_DIR/.claude/types" || -d "$MOD_DIR/../../.claude/types" ]]; then cfg="$MOD_DIR/tsconfig.json"; fi
   echo "tsc -p ${cfg#"$MOD_DIR"/}"
-  if command -v bunx >/dev/null 2>&1; then bunx -p typescript@5 tsc -p "$cfg"; else npx -y -p typescript@5 tsc -p "$cfg"; fi
+  if command -v bunx >/dev/null 2>&1; then bunx -p "$TYPESCRIPT_PKG" tsc -p "$cfg"; else npx -y -p "$TYPESCRIPT_PKG" tsc -p "$cfg"; fi
 }
 run_check "typecheck"      run_typecheck
+# oxlint over the hooks and the dev harnesses, warnings included: an unused
+# variable in a harness is usually an assertion someone meant to write
+run_lint() { (cd "$MOD_DIR" && npx -y "$OXLINT_PKG" --deny-warnings hooks scripts/dev); }
+run_check "lint"           run_lint
 run_check "engine-rules"   bash "$SCRIPT_DIR/check-engine-rules.sh"
 # The engine's own load-time scan of the hooks module (what it hooks, which $
 # calls, and the rules esbuild and tsc accept but the host refuses - e.g. $
@@ -344,6 +355,7 @@ if command -v claude >/dev/null 2>&1; then
 else
   echo; echo "== plugin-validate =="; echo "skipped (no claude CLI on PATH)"; results+=("SKIP  plugin-validate")
 fi
+run_check "check-personal-selftest" bash "$SCRIPT_DIR/check-personal.sh" --self-test
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
 echo

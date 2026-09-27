@@ -54,7 +54,7 @@ register((event, a, b) => {
   handlers.set(event, handler)
 })
 
-const next = async e => ({ type: 'next', props: {}, kids: [] })
+const next = async () => ({ type: 'next', props: {}, kids: [] })
 await handlers.get('session.start')($, {}, next)
 
 function findClient(node) {
