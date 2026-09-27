@@ -3,7 +3,7 @@ What fetch-quotes-shioaji.py, fetch-quotes-capital.py and order-shioaji.py
 share: the runtime-dir rule (which must match runtimeDir() in
 hooks/constants.ts), env-file parsing, the watchlist read, the pidfile
 protocol, the heartbeat age, the atomic file write, the give-up threshold,
-the log line and the held-codes tracker. Each script imports it from
+the log line and its size cap, and the held-codes tracker. Each script imports it from
 its own folder - running `python scripts/<script>.py` puts that folder first
 on sys.path.
 
@@ -31,6 +31,13 @@ HEARTBEAT_MAX_AGE_MS = 90_000
 # exits for a fresh login - well inside the band's own 120 s staleness window,
 # so the band's respawn finds the pidfile free. See failed_ticks_limit().
 GIVE_UP_AFTER_S = 60
+
+# A fetcher's log (the band appends its stderr to stock-shioaji.log, and the
+# SDK keeps its own shioaji.log) grows by several MB a day with nothing to cut
+# it back. Past LOG_MAX_BYTES it is cut to its last LOG_KEEP_BYTES - see
+# cap_log().
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_KEEP_BYTES = 1024 * 1024
 
 
 # --- runtime dir -------------------------------------------------------------
@@ -156,6 +163,14 @@ def field(obj, name, default=None):
 # soon) - the slack only covers the two clocks' granularity.
 PID_REUSE_SLACK_S = 2.0
 
+# What every fetcher's command line carries: `python .../fetch-quotes-*.py`.
+# A pid whose command line lacks it is not a fetcher, whatever the pidfile says.
+FETCHER_MARK = b"fetch-quotes-"
+
+# A claim holds its lock for a few milliseconds. One older than this was left
+# by a claimant that died mid-claim, and is taken over.
+PIDFILE_LOCK_STALE_S = 10.0
+
 
 def _windows_kernel32():
     import ctypes
@@ -215,18 +230,35 @@ def _windows_pid_alive(pid: int, since: float | None = None, kernel32=None) -> b
         kernel32.CloseHandle(handle)
 
 
-def pid_alive(pid: int, since: float | None = None) -> bool:
+def _proc_is_fetcher(pid: int, proc: str = "/proc") -> bool | None:
+    """Whether /proc says `pid` runs a fetcher script: None when there is no
+    /proc to ask (macOS). `proc` is injectable for tests."""
+    try:
+        return FETCHER_MARK in Path(f"{proc}/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+
+
+def pid_alive(pid: int, since: float | None = None, proc: str = "/proc") -> bool:
     """
     Whether the pid a pidfile names is a fetcher still feeding; `since` is the
     pidfile's mtime, used on Windows to spot a reused pid (see
     _windows_pid_alive). Elsewhere kill -0 answers, and any error - no such
     process, or EPERM for a pid a reboot handed to another user's process -
-    means it is not ours and not feeding. A stopped (T/t) or zombie owner is
-    not feeding either: kill -0 still says alive, so the band would skip
-    respawning for as long as it stays that way (a Ctrl-Z'd claude session
-    drags the fetcher down with it). Kill a stopped one so it cannot wake
-    later and double-write the runtime dir. No /proc (macOS) reads as alive,
-    as kill -0 said.
+    means it is not ours and not feeding.
+
+    A pidfile outlives a fetcher that was SIGKILLed or lost to a reboot, and
+    Linux hands its pid to the next process: a same-user process whose
+    command line is not a fetcher's (FETCHER_MARK) is not ours. It is never
+    signalled - it may be the user's own Ctrl-Z'd vim - and it does not hold
+    the pidfile, or the band could never respawn.
+
+    A stopped (T/t) or zombie fetcher is not feeding either: kill -0 still
+    says alive, so the band would skip respawning for as long as it stays
+    that way (a Ctrl-Z'd claude session drags the fetcher down with it).
+    Kill a stopped one - only once it is known to be a fetcher - so it cannot
+    wake later and double-write the runtime dir. No /proc (macOS) reads as
+    alive, as kill -0 said, and nothing is killed.
     """
     if os.name == "nt":
         try:
@@ -238,10 +270,14 @@ def pid_alive(pid: int, since: float | None = None) -> bool:
     except OSError:
         return False
     try:
-        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        state = Path(f"{proc}/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
     except (OSError, IndexError):
         return True
-    if state in ("T", "t", "Z"):
+    if state == "Z":
+        return False  # already dead; its parent just has not reaped it
+    if not _proc_is_fetcher(pid, proc):
+        return False
+    if state in ("T", "t"):
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:
@@ -250,24 +286,66 @@ def pid_alive(pid: int, since: float | None = None) -> bool:
     return True
 
 
+def _take_lock(lock: Path) -> bool:
+    """Create `lock` exclusively (O_EXCL): True when this process now holds it.
+    A lock older than PIDFILE_LOCK_STALE_S is a dead claimant's and is
+    cleared once; a fresh one means another claim is in progress."""
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age = time.time() - lock.stat().st_mtime
+            except OSError:
+                continue  # released between the two calls: try again
+            if age < PIDFILE_LOCK_STALE_S:
+                return False
+            try:
+                lock.unlink()
+            except OSError:
+                pass
+            continue
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    return False
+
+
 def claim_pidfile(pidfile: Path) -> bool:
     """
     True: this process owns the pidfile and should run. False: another live
-    process already owns it for this project, so the caller exits quietly
-    (0) rather than double-fetching - see each fetcher's module docstring,
-    `--pidfile`.
+    process already owns it for this project, or is claiming it right now,
+    so the caller exits quietly (0) rather than double-fetching - see each
+    fetcher's module docstring, `--pidfile`.
+
+    The check and the write happen under a lock file taken with O_EXCL: two
+    sessions spawning at the same moment used to both see "no live owner",
+    both write the pidfile and both log in. The pid is written through a
+    temp file and a replace, so a reader never sees the half-written (empty)
+    file that used to read as "no owner".
     """
-    if pidfile.exists():
-        try:
-            existing = int(pidfile.read_text(encoding="utf-8").strip())
-            written = pidfile.stat().st_mtime
-        except (ValueError, OSError):
-            existing = None
-        if existing and existing != os.getpid() and pid_alive(existing, written):
-            return False
     pidfile.parent.mkdir(parents=True, exist_ok=True)
-    pidfile.write_text(str(os.getpid()), encoding="utf-8")
-    return True
+    lock = pidfile.with_name(pidfile.name + ".lock")
+    if not _take_lock(lock):
+        return False
+    try:
+        if pidfile.exists():
+            try:
+                existing = int(pidfile.read_text(encoding="utf-8").strip())
+                written = pidfile.stat().st_mtime
+            except (ValueError, OSError):
+                existing = None
+            if existing and existing != os.getpid() and pid_alive(existing, written):
+                return False
+        tmp = pidfile.with_name(f"{pidfile.name}.{os.getpid()}.tmp")
+        tmp.write_text(str(os.getpid()), encoding="utf-8")
+        tmp.replace(pidfile)
+        return True
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
 
 
 def release_pidfile(pidfile: Path) -> None:
@@ -283,17 +361,40 @@ def release_pidfile(pidfile: Path) -> None:
 # --- output ------------------------------------------------------------------
 
 
-def write_atomic(path: Path, payload: dict) -> None:
+# How many times a replace refused with PermissionError is retried: on
+# Windows an antivirus scan or a reader holding the target open refuses it
+# for a moment (a sharing violation).
+WRITE_RETRIES = 3
+WRITE_RETRY_WAIT_S = 0.05
+
+
+def write_atomic(path: Path, payload: dict, sleep=time.sleep) -> bool:
     """
     Write through a temp file and replace: the band polls this file every few
     seconds and a half-written JSON would read as malformed and drop it back
     to demo prices. Compact, because futures-quotes.json carries every K bar
     and is rewritten up to once a second; `python -m json.tool FILE` reads it
     back for a human.
+
+    A write that still fails (a sharing violation that outlasts the retries,
+    a full disk) is logged and answers False, leaving the last file in
+    place - the same as a failed snapshot. It used to raise out of the
+    fetcher's loop and kill it, and a respawn means a fresh broker login.
     """
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    tmp.replace(path)
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        for attempt in range(WRITE_RETRIES):
+            try:
+                tmp.replace(path)
+                return True
+            except PermissionError:
+                if attempt == WRITE_RETRIES - 1:
+                    raise
+                sleep(WRITE_RETRY_WAIT_S)
+    except OSError as err:
+        log(f"寫入 {path.name} 失敗（保留上一份檔案）: {type(err).__name__}: {err}")
+    return False
 
 
 def failed_ticks_limit(interval: float) -> int:
@@ -317,6 +418,30 @@ def log(message: str) -> None:
     capture it.
     """
     print(f"{time.strftime('%m-%d %H:%M:%S')} {message}", file=sys.stderr, flush=True)
+
+
+def cap_log(path: Path, max_bytes: int = LOG_MAX_BYTES, keep_bytes: int = LOG_KEEP_BYTES) -> bool:
+    """
+    Cut a log past `max_bytes` down to its last `keep_bytes`, starting at a
+    whole line: True when it was cut. The file is rewritten in place, never
+    renamed - the band's shell and the SDK both hold it open for append
+    (O_APPEND), so their next line lands at the new end rather than in a
+    renamed file nobody reads. A missing or unreadable log is left alone.
+    """
+    try:
+        if path.stat().st_size <= max_bytes:
+            return False
+        with open(path, "r+b") as f:
+            f.seek(-keep_bytes, os.SEEK_END)
+            tail = f.read()
+            newline = tail.find(b"\n")
+            tail = tail[newline + 1:] if newline >= 0 else tail
+            f.seek(0)
+            f.write(tail)
+            f.truncate()
+        return True
+    except OSError:
+        return False
 
 
 # --- held codes --------------------------------------------------------------
