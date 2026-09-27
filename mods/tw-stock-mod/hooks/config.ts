@@ -527,7 +527,14 @@ const TW_SOURCE_NAMES: TwSourceName[] = ['shioaji', 'capital', 'yahoo', 'mis']
  */
 function parseTwSources(root: Record<string, unknown>, fallback: TwSourceName[]): TwSourceName[] {
   const isSourceName = (v: unknown): v is TwSourceName => TW_SOURCE_NAMES.includes(v as TwSourceName)
-  if (Array.isArray(root.twSources)) return root.twSources.filter(isSourceName)
+  // An empty list (or one naming no known route) is "nothing stated", not
+  // "no routes": it falls back to the default, so a project that states
+  // `twSources: []` over a user's broker list clears it back to Yahoo
+  // rather than leaving Taiwan with no route at all (demo prices).
+  if (Array.isArray(root.twSources)) {
+    const named = root.twSources.filter(isSourceName)
+    return named.length > 0 ? named : defaultConfig().twSources
+  }
   if (isSourceName(root.twSource)) return [root.twSource]
   return fallback
 }

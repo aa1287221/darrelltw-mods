@@ -48,7 +48,7 @@ let moduleTick = 0
 // `homeVar` picks which environment variable carries the home directory, and
 // `cwd` what $.session.cwd() answers - both so a case can stand in for
 // Windows, where $HOME is unset and a project path looks like `D:\app`.
-async function runCase(label, { userText, projectText, quotesText, homeVar = 'HOME', cwd = '/fake-project' } = {}) {
+async function runCase(label, { userText, projectText, quotesText, homeVar = 'HOME', cwd = '/fake-project', runRejects = false } = {}) {
   const home = '/fake-home'
   const files = {}
   if (userText !== undefined) files[`${home}/.claude/stock-band.json`] = userText
@@ -73,6 +73,7 @@ async function runCase(label, { userText, projectText, quotesText, homeVar = 'HO
     process: {
       run: async (argv, init) => {
         processRuns.push({ argv, init })
+        if (runRejects) throw new Error('spawn EACCES')
         return { exitCode: 0, stdout: '', stderr: '' }
       },
     },
@@ -207,6 +208,32 @@ const fOk = f.processRuns.length === 1 && fOutDir === '/fake-home/.claude/stock-
 console.log(`(f) out-dir=${fOutDir}`)
 console.log(`(f) PASS=${fOk}\n`)
 
-const allOk = aOk && bOk && cOk && dOk && eOk && fOk
+// (g) a project `twSources: []` over a user's broker list clears it back to
+// the default: no fetcher is spawned and the tick lands on Yahoo, rather than
+// inheriting the user's routes or leaving Taiwan with none (demo prices)
+const g = await runCase('(g) project twSources [] clears the user list to the default', {
+  userText: JSON.stringify({ twSources: ['shioaji', 'yahoo'], shioaji: { python: 'python3', env: '/nonexistent-env-file' } }),
+  projectText: JSON.stringify({ market: 'tw', twSources: [] }),
+})
+const gOk = g.processRuns.length === 0 && g.logs.some(l => l.includes('query1.finance.yahoo.com')) && g.p?.sourceLabel === 'Yahoo 延遲'
+console.log(`(g) PASS=${gOk}\n`)
+
+// (h) a broker route whose spawn itself rejects (no /bin/sh, a python not on
+// PATH) is logged and falls through to the next route in the same tick. Every
+// route guards its own awaits, so this is the failure a stub can actually
+// raise; feedTw's own catch around each route is a backstop behind it.
+const h = await runCase('(h) a rejected spawn falls through to yahoo this tick', {
+  userText: JSON.stringify({ shioaji: { python: 'python3', env: '/nonexistent-env-file' } }),
+  projectText: JSON.stringify({ market: 'tw', twSources: ['shioaji', 'yahoo'] }),
+  runRejects: true,
+})
+const hOk =
+  h.processRuns.length === 1 &&
+  h.logs.some(l => /shioaji spawn failed/.test(l)) &&
+  h.logs.some(l => l.includes('query1.finance.yahoo.com')) &&
+  h.p?.sourceLabel === 'Yahoo 延遲'
+console.log(`(h) PASS=${hOk}\n`)
+
+const allOk = aOk && bOk && cOk && dOk && eOk && fOk && gOk && hOk
 console.log(allOk ? 'ALL PASS' : 'SOME FAILED')
 process.exit(allOk ? 0 : 1)
