@@ -423,3 +423,30 @@ def test_drain_ticks_advances_every_timeframe_of_the_tick_code():
     assert by[5]["bars"][-1][:4] == [100.0, 108.0, 100.0, 108.0]
     assert by[15]["bars"][-1][:4] == [100.0, 108.0, 100.0, 108.0]
     assert by[60]["bars"][-1][:4] == [100.0, 108.0, 100.0, 108.0]
+
+
+# ---------------------------------------------------------------------------
+# a write that failed (see _common.write_atomic) leaves the overlay dirty
+# ---------------------------------------------------------------------------
+
+class FakeOverlay:
+    def __init__(self, path):
+        self.path = path
+        self.dirty = True
+        self.last_write_ms = 0
+
+    def payload(self, now_ms):
+        return {"asOf": now_ms, "quotes": {}}
+
+
+def test_a_failed_overlay_write_stays_dirty_and_is_not_counted(tmp_path, monkeypatch):
+    answers = [False, True]
+    monkeypatch.setattr(fetcher, "write_atomic", lambda path, payload: answers.pop(0))
+    overlay = FakeOverlay(tmp_path / "stock-quotes.json")
+    stats = fetcher.new_tick_stats()
+    fetcher.flush_overlays({"tw": overlay}, 5000, stats)
+    assert overlay.dirty is True and overlay.last_write_ms == 0
+    assert stats["writes"] == {}
+    fetcher.flush_overlays({"tw": overlay}, 5200, stats)  # the next flush tries again
+    assert overlay.dirty is False and overlay.last_write_ms == 5200
+    assert stats["writes"] == {"tw": 1}

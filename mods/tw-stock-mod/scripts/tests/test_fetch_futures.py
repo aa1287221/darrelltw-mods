@@ -544,6 +544,21 @@ def test_check_futures_pnl_still_flags_999_off_at_that_magnitude():
     assert fetcher.check_futures_pnl(pos, TXF_CONTRACT) is not None
 
 
+def test_check_futures_pnl_reads_a_short_the_right_way_round():
+    # short 1 TXF at 17000, now 17050: the short LOSES 50 * 200 = 10000. The
+    # SDK's quantity is unsigned, and reading the short as long flagged
+    # "SDK=-10000，算出=10000" on every tick
+    pos = make_position("TXFJ6", SELL, 1, 17000.0, 17050.0, -10000.0)
+    assert fetcher.check_futures_pnl(pos, TXF_CONTRACT) is None
+
+
+def test_check_futures_pnl_still_flags_a_short_with_the_long_sign():
+    pos = make_position("TXFJ6", SELL, 1, 17000.0, 17050.0, 10000.0)
+    mismatch = fetcher.check_futures_pnl(pos, TXF_CONTRACT)
+    assert mismatch is not None
+    assert "-10000" in mismatch
+
+
 def test_check_futures_pnl_flags_mismatch():
     # (17050 - 17000) * 2 * 200 = 20000, not 999 - wrong on purpose
     pos = make_position("TXFJ6", BUY, 2, 17000.0, 17050.0, 999.0)

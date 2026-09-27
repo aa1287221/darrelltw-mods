@@ -213,7 +213,12 @@ The band and the script then talk over two files instead of a socket:
   forever.
 - **The pidfile** (`stock-shioaji.pid`, same runtime dir) — a second Claude
   Code session on the same project sees a live pid there and exits at once
-  instead of logging in twice for the same watchlist.
+  instead of logging in twice for the same watchlist. The claim is taken
+  under a `stock-shioaji.pid.lock` file (created exclusively), so two
+  sessions spawning at the same moment still get one login. A pid whose
+  command line is not a `fetch-quotes-*.py` script (a pidfile left by a
+  killed fetcher, its pid since reused) does not count as an owner and is
+  never signalled.
 
 Respawn is rate-limited on the band's side too: once at session start, then
 only when the quotes file has gone stale (>120s) AND the last spawn attempt
@@ -226,7 +231,8 @@ the same way, since all three look identical from here (the quotes file just
 never gets fresher). With only `["shioaji"]` configured, a stale tick falls
 all the way back to demo prices instead, the same as any other feed running
 dry. Script output goes to `stock-shioaji.log`, same runtime dir, not to the
-band's own debug log.
+band's own debug log. The script cuts that log, and the SDK's `shioaji.log`,
+back to the last 1 MB once they pass 5 MB (checked at start and hourly).
 
 **Turn it on by hand**, the same script, started yourself:
 

@@ -659,7 +659,8 @@ The script is spawned once with both the `tw` codes and the `futures` codes;
 a changed `futures` list takes effect on its next spawn, not on a running one.
 A `stock-shioaji.pid` file, same directory, keeps two Claude Code
 sessions on the same project from logging in twice. Nothing to run by hand;
-script output lands in `stock-shioaji.log`, same directory. While the quotes
+script output lands in `stock-shioaji.log`, same directory. Past 5 MB that
+log (and the SDK's own `shioaji.log`) is cut back to its last 1 MB. While the quotes
 file is
 stale (the script has not logged in yet, or died), the band does not wait it
 out: it falls through to the next entry in `twSources` for that tick (e.g.

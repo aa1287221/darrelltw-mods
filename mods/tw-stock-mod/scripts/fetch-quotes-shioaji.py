@@ -87,6 +87,7 @@ from typing import NamedTuple
 from _common import (
     HEARTBEAT_MAX_AGE_MS,
     HeldCodes,
+    cap_log,
     claim_pidfile,
     failed_ticks_limit,
     field,
@@ -564,10 +565,32 @@ def drain_ticks(tick_queue: queue.Queue, overlays: dict, code_maps: dict, kbars_
 def flush_overlays(overlays: dict, now_ms: int, stats: dict) -> None:
     for market, overlay in overlays.items():
         if should_write(overlay.last_write_ms, now_ms, overlay.dirty):
-            write_atomic(overlay.path, overlay.payload(now_ms))
+            if not write_atomic(overlay.path, overlay.payload(now_ms)):
+                continue  # still dirty: the next flush tries again
             overlay.last_write_ms = now_ms
             overlay.dirty = False
             stats["writes"][market] = stats["writes"].get(market, 0) + 1
+
+
+def write_stock_holdings(path: Path, payload: dict | None, write_empty: bool) -> bool:
+    """
+    One tick's stock-holdings.json write: the payload when there is one, else
+    the empty (sold-everything) file when `write_empty` says one is owed.
+    Answers whether an empty file is still owed: it stays owed until its
+    write lands, so a write that failed (see write_atomic) is retried on the
+    next tick instead of leaving the sold positions on the board.
+    """
+    if payload:
+        if write_atomic(path, payload):
+            log(f"{len(payload['holdings'])} 檔庫存 -> {path}")
+        return False
+    if not write_empty:
+        return False
+    empty = {"asOf": int(time.time() * 1000), "market": "tw", "source": "永豐 庫存", "holdings": []}
+    if not write_atomic(path, empty):
+        return True
+    log(f"0 檔庫存（全部出清）-> {path}")
+    return False
 
 
 def format_tick_stats(stats: dict) -> str:
@@ -746,12 +769,17 @@ def check_futures_pnl(position, contract) -> str | None:
     """The SDK's own `pnl` vs (last_price - price) * quantity * multiplier,
     cross-checked rather than trusted. The SDK rounds its pnl to the dollar
     (seen live: 195950.0 vs 195951.00000000017), so the tolerance is a
-    couple of dollars plus a hair of relative slack, not a real mismatch."""
+    couple of dollars plus a hair of relative slack, not a real mismatch.
+    A short (Sell) gains as the price falls, so its expected pnl is the
+    negation - the SDK's quantity is unsigned (see futures_holding_row),
+    and reading every short as long flagged a false mismatch every tick."""
     quantity = float(field(position, "quantity", 0) or 0)
     price = float(field(position, "price", 0) or 0)
     last_price = float(field(position, "last_price", 0) or 0)
     multiplier = float(field(contract, "multiplier", 1) or 1)
     expected = (last_price - price) * quantity * multiplier
+    if "Sell" in str(field(position, "direction", "Buy")):
+        expected = -expected
     sdk_pnl = float(field(position, "pnl", 0) or 0)
     if math.isclose(expected, sdk_pnl, rel_tol=1e-6, abs_tol=2.0):
         return None
@@ -835,6 +863,7 @@ def read_heartbeat(path: Path) -> tuple[bool, frozenset[str]]:
 # re-queried once per this, and the tick in between reuses the last one (the
 # holdings file still gets this tick's prices - those come from the snapshot).
 POSITIONS_REFRESH_S = 60.0
+LOG_CAP_EVERY_S = 3600.0  # how often a running fetcher checks its logs' size (cap_log)
 
 
 class PositionsClock:
@@ -1031,6 +1060,16 @@ def main() -> None:
     futures_holdings_path = out_dir / "futures-holdings.json"
     futures_codes = split_futures_codes(args.futures)
 
+    # The band appends this process's stderr to stock-shioaji.log and the SDK
+    # keeps shioaji.log, both in out_dir, both for good: cut them back now and
+    # every LOG_CAP_EVERY_S while running (see cap_log)
+    log_paths = [out_dir / "stock-shioaji.log", out_dir / "shioaji.log"]
+
+    def cap_logs() -> None:
+        for path in log_paths:
+            if cap_log(path):
+                log(f"{path.name} 超過上限，只留最後一段")
+
     pidfile = Path(args.pidfile).expanduser().resolve() if args.pidfile else None
     if pidfile and not claim_pidfile(pidfile):
         log(f"另一個 fetcher 已經在跑這個專案（{pidfile} 裡的 pid 還活著），這次略過")
@@ -1221,11 +1260,15 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
 
     first_tick = True
+    log_cap_clock = PositionsClock(LOG_CAP_EVERY_S)
     failed_ticks = 0  # consecutive ticks where no snapshot attempted produced a usable payload
     give_up_at = failed_ticks_limit(args.interval)
     last_futures_positions: list = []  # kept across ticks the same way `positions` is - see below
     try:
         while running:
+            if log_cap_clock.due():
+                cap_logs()
+                log_cap_clock.fetched()
             # Heartbeat check first, before doing any work this tick: a stale
             # heartbeat means nobody wants either market anymore (band closed),
             # and the very first tick is exempt because the caller
@@ -1294,10 +1337,10 @@ def main() -> None:
                 # raised or answered nothing priced: a dead session can do either
                 failed += 1 if contracts and not payload else 0
                 if payload:
-                    write_atomic(out_path, tw_overlay.absorb(payload, int(time.time() * 1000)))
-                    rows = len(payload["quotes"])
-                    stamp = time.strftime("%H:%M:%S", time.localtime(payload["dataAt"] / 1000))
-                    log(f"{rows} 檔 -> {out_path}（資料 {stamp}）")
+                    if write_atomic(out_path, tw_overlay.absorb(payload, int(time.time() * 1000))):
+                        rows = len(payload["quotes"])
+                        stamp = time.strftime("%H:%M:%S", time.localtime(payload["dataAt"] / 1000))
+                        log(f"{rows} 檔 -> {out_path}（資料 {stamp}）")
                 # a failed snapshot leaves the file alone: the band drops a file
                 # older than 120 s by itself and says so, which beats a stale price
                 # that still looks live
@@ -1309,13 +1352,7 @@ def main() -> None:
                 except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
                     log(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
                     holdings_payload = None
-                if holdings_payload:
-                    write_atomic(holdings_path, holdings_payload)
-                    log(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}")
-                elif write_empty_holdings:
-                    write_atomic(holdings_path, {"asOf": int(time.time() * 1000), "market": "tw", "source": "永豐 庫存", "holdings": []})
-                    log(f"0 檔庫存（全部出清）-> {holdings_path}")
-                write_empty_holdings = False
+                write_empty_holdings = write_stock_holdings(holdings_path, holdings_payload, write_empty_holdings)
 
             if work_tf:
                 # same guard as the stock side: a code that resolves to no
@@ -1333,8 +1370,8 @@ def main() -> None:
                 futures_payload = build_futures_payload(futures_rows)
                 failed += 1 if tf_priceable and not futures_payload else 0
                 if futures_payload:
-                    write_atomic(futures_out_path, tf_overlay.absorb(futures_payload, int(time.time() * 1000)))
-                    log(f"{len(futures_payload['quotes'])} 檔期貨 -> {futures_out_path}")
+                    if write_atomic(futures_out_path, tf_overlay.absorb(futures_payload, int(time.time() * 1000))):
+                        log(f"{len(futures_payload['quotes'])} 檔期貨 -> {futures_out_path}")
 
                 try:
                     holding_rows = []
@@ -1358,8 +1395,8 @@ def main() -> None:
                     log(f"期貨庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
                     futures_holdings_payload = None
                 if futures_holdings_payload:
-                    write_atomic(futures_holdings_path, futures_holdings_payload)
-                    log(f"{len(futures_holdings_payload['holdings'])} 檔期貨庫存 -> {futures_holdings_path}")
+                    if write_atomic(futures_holdings_path, futures_holdings_payload):
+                        log(f"{len(futures_holdings_payload['holdings'])} 檔期貨庫存 -> {futures_holdings_path}")
 
             # A session that died (token expired, connection dropped for good)
             # fails every snapshot - raising, or answering nothing priced -
