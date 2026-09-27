@@ -572,6 +572,27 @@ def flush_overlays(overlays: dict, now_ms: int, stats: dict) -> None:
             stats["writes"][market] = stats["writes"].get(market, 0) + 1
 
 
+def write_stock_holdings(path: Path, payload: dict | None, write_empty: bool) -> bool:
+    """
+    One tick's stock-holdings.json write: the payload when there is one, else
+    the empty (sold-everything) file when `write_empty` says one is owed.
+    Answers whether an empty file is still owed: it stays owed until its
+    write lands, so a write that failed (see write_atomic) is retried on the
+    next tick instead of leaving the sold positions on the board.
+    """
+    if payload:
+        if write_atomic(path, payload):
+            log(f"{len(payload['holdings'])} 檔庫存 -> {path}")
+        return False
+    if not write_empty:
+        return False
+    empty = {"asOf": int(time.time() * 1000), "market": "tw", "source": "永豐 庫存", "holdings": []}
+    if not write_atomic(path, empty):
+        return True
+    log(f"0 檔庫存（全部出清）-> {path}")
+    return False
+
+
 def format_tick_stats(stats: dict) -> str:
     applied = " ".join(f"{code}={n}" for code, n in sorted(stats["applied"].items())) or "（沒有）"
     writes = " ".join(f"{m}={n}" for m, n in sorted(stats["writes"].items())) or "（沒有）"
@@ -1331,15 +1352,7 @@ def main() -> None:
                 except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
                     log(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}")
                     holdings_payload = None
-                if holdings_payload:
-                    write_empty_holdings = False
-                    if write_atomic(holdings_path, holdings_payload):
-                        log(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}")
-                elif write_empty_holdings:
-                    # kept set until the write lands: a failed one is retried next tick
-                    if write_atomic(holdings_path, {"asOf": int(time.time() * 1000), "market": "tw", "source": "永豐 庫存", "holdings": []}):
-                        log(f"0 檔庫存（全部出清）-> {holdings_path}")
-                        write_empty_holdings = False
+                write_empty_holdings = write_stock_holdings(holdings_path, holdings_payload, write_empty_holdings)
 
             if work_tf:
                 # same guard as the stock side: a code that resolves to no

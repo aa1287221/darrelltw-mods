@@ -149,6 +149,18 @@ def test_a_stopped_fetcher_is_killed_and_not_alive():
             owner.wait()
 
 
+@needs_proc
+@pytest.mark.skipif(os.name == "nt", reason="POSIX zombies")
+def test_a_zombie_fetcher_is_not_alive():
+    # exited but not yet reaped: kill -0 still answers, /proc says Z
+    owner = subprocess.Popen([sys.executable, "-c", "pass", "fetch-quotes-stand-in"])
+    try:
+        wait_for_state(owner.pid, "Z")
+        assert _common.pid_alive(owner.pid) is False
+    finally:
+        owner.wait()
+
+
 def wait_for_state(pid, state, timeout=5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

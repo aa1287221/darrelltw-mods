@@ -295,13 +295,17 @@ def _take_lock(lock: Path) -> bool:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             try:
-                age = time.time() - lock.stat().st_mtime
+                seen = lock.stat()
             except OSError:
                 continue  # released between the two calls: try again
-            if age < PIDFILE_LOCK_STALE_S:
+            if time.time() - seen.st_mtime < PIDFILE_LOCK_STALE_S:
                 return False
+            # Unlink only the stale lock that was looked at: two claimants can
+            # both find it stale, and the slower one must not remove the lock
+            # the faster one has just created in its place.
             try:
-                lock.unlink()
+                if lock.stat().st_ino == seen.st_ino:
+                    lock.unlink()
             except OSError:
                 pass
             continue

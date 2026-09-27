@@ -156,3 +156,41 @@ def test_a_new_holding_is_priced_at_once(tmp_path, monkeypatch):
         [pos("0050")],
     ])
     assert priced(events) == [["2330"], ["0050", "2330"]]
+
+
+# --- write_stock_holdings: an owed empty file stays owed until it lands ------
+
+
+def refuse_writes(monkeypatch, answers):
+    """write_atomic answering each of `answers` in turn (False = the write failed)."""
+    seen = []
+
+    def write(path, payload):
+        seen.append(payload)
+        return answers.pop(0)
+
+    monkeypatch.setattr(fetcher, "write_atomic", write)
+    return seen
+
+
+def test_a_failed_sold_out_write_stays_owed_and_lands_next_tick(tmp_path, monkeypatch):
+    seen = refuse_writes(monkeypatch, [False, True])
+    path = tmp_path / "stock-holdings.json"
+    owed = fetcher.write_stock_holdings(path, None, True)
+    assert owed is True  # the write failed: try again next tick
+    owed = fetcher.write_stock_holdings(path, None, owed)
+    assert owed is False
+    assert [p["holdings"] for p in seen] == [[], []]
+
+
+def test_nothing_owed_writes_nothing(tmp_path, monkeypatch):
+    seen = refuse_writes(monkeypatch, [])
+    assert fetcher.write_stock_holdings(tmp_path / "stock-holdings.json", None, False) is False
+    assert seen == []
+
+
+def test_a_new_position_cancels_an_owed_empty_file(tmp_path, monkeypatch):
+    seen = refuse_writes(monkeypatch, [True])
+    payload = {"asOf": 1, "market": "tw", "holdings": [{"code": "2330"}]}
+    assert fetcher.write_stock_holdings(tmp_path / "stock-holdings.json", payload, True) is False
+    assert seen == [payload]
