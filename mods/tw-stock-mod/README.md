@@ -934,7 +934,14 @@ reads as danger under either colour convention; 風險 turns orange below
 wins/losses count is the year's), 費稅 today's fee plus tax. While 台指期
 trades, a margin figure older than three minutes gets a dim `（資料 HH:MM）`.
 A narrow terminal drops 費稅, 今年, 本月, 可用 and 權益 (right to left); 風險,
-距追繳 and 今日 always stay. The two lines come out of the table's holding
+距追繳 and 今日 always stay. Between the fetcher's 60-second margin queries,
+while 台指期 trades, line 1 follows the live quotes: equity moves by each
+position's qty × multiplier × the price change since the margin was read
+(`margin.ref`), and 風險, 權益, 可用 and 距追繳 then carry a `≈`
+(`風險 ≈121% │ 權益 ≈605,000 │ …`); the red fill and orange follow that
+estimate, 追繳 stays the broker's. A quote no newer than the margin, a
+position with no live price, a closed market or no move at all shows the
+broker's own figures without `≈`. The two lines come out of the table's holding
 rows, so the band is never taller for them, and a band too short to keep a
 holding row under them skips them. A position with two or more fills adds a
 `4筆 23,410–23,520` column (fill count, entry-price range) when the terminal

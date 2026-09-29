@@ -285,7 +285,8 @@ See the README's [Taiwan futures (tf)](../README.md#taiwan-futures-tf).
 
 **Futures account.** While `tf` work runs and the futures account is signed,
 the script also writes `futures-account.json` (`source: "永豐"`), read-only
-broker queries only: `api.margin()`, `api.list_position_detail()` per held
+broker queries only: `api.margin()` followed by `api.list_positions()` on the
+futures account, `api.list_position_detail()` per held
 position and `api.list_profit_loss()` (never `list_profit_loss_summary`, which
 disagrees with it on a same-day closing). Every section is `null` until its
 first successful query; a query that fails keeps the section's last value and
@@ -299,7 +300,8 @@ give-up tally. An unsigned or missing account writes no file.
               "initialMargin": 500000, "maintenanceMargin": 385000, "marginCall": 0,
               "todayBalance": 590000, "yesterdayBalance": 541000, "depositWithdrawal": 0,
               "openPnl": 10000, "todayOpenPnl": 4000, "settledPnl": 50000, "fee": 800, "tax": 100,
-              "plusMargin": 0, "plusMarginIndicator": 0 },
+              "plusMargin": 0, "plusMarginIndicator": 0,
+              "ref": { "TMFJ6": { "qty": -3, "price": 23450 } } },
   "fills": { "TMFJ6": [ { "date": "2026-09-29", "dseq": "tA0x1", "qty": -3, "price": 23400, "pnl": -900 } ] },
   "realized": {
     "today": { "asOf": 1790000000000, "pnl": 50000, "fee": 800, "tax": 100, "trades": 4, "wins": 3, "losses": 1 },
@@ -317,6 +319,21 @@ over Taipei dates: today, the 1st of the month to today, 1 Jan to today, both
 ends inclusive; `wins`/`losses` count rows with pnl above/below 0. `margin`,
 `fills` and `realized.today` refresh at most every 60 s, `realized.month` and
 `realized.year` at most every 600 s (and once at start).
+
+`margin.ref` is what the margin was read against: right after each successful
+`margin()` (and only then, so one extra call per 60 s) the script queries
+`list_positions` once and stores, per code with a non-zero position, the signed
+`qty` (Sell negative, rows of one code summed) and its `last_price`. `ref` is
+`null` when that query fails (the margin itself is still stored) or a held row
+has no last price. Between margin queries the band estimates, while `tf`
+trades, `equity + Σ ref.qty × multiplier × (live price − ref.price)` from the
+`futures-quotes.json` prices and each `futures-holdings.json` row's
+`multiplier`; 可用 becomes that minus `initialMargin` and 風險 `⌊equity ÷
+initialMargin × 100⌋`. The estimate is all or nothing: a quotes file whose
+`dataAt` (else `asOf`) is not newer than `margin.asOf`, a ref code with no live
+price or no multiplier, a closed market, a `null` or malformed `ref`, or a move
+of exactly 0 leaves the broker figures on screen. A file without `ref` reads
+exactly as before.
 
 ## 4. 群益 Capital API, through `scripts/fetch-quotes-capital.py`
 

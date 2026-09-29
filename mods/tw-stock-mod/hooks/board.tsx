@@ -53,7 +53,14 @@ export type AccountMargin = {
   availableMargin: number
   maintenanceMargin: number
   marginCall: number
+  /** optional: only the live estimate reads it */
+  initialMargin?: number
+  /** the signed position and last price list_positions gave right after margin(); null = that query failed */
+  ref?: Record<string, AccountRef> | null
 }
+export type AccountRef = { qty: number; price: number }
+/** the margin re-estimated off live quotes (register.tsx: accountEstimate); present only when it moved */
+export type AccountLive = { equity: number; availableMargin: number; riskIndicator: number | null }
 /** one realized window: gross pnl, fee/tax apart */
 export type RealizedWindow = { pnl: number; fee: number; tax: number; wins: number; losses: number }
 /** a fill's entry price; null = the broker sent 0 (unknown) */
@@ -64,6 +71,7 @@ export type AccountSummary = {
   realized: { today: RealizedWindow | null; month: RealizedWindow | null; year: RealizedWindow | null }
   fills: Record<string, AccountFill[]>
   lines: number
+  live?: AccountLive
 }
 
 export type Holding = {
@@ -816,8 +824,8 @@ function maxColumns(width: number): number {
 /** margin older than this while tf trades gets a （資料 HH:MM） suffix */
 const ACCOUNT_STALE_MS = 3 * 60_000
 type SummaryPiece = { text: string; fg: string; bg?: string; bold?: boolean }
-/** one `│`-separated field; `keep` fields survive any width, `glued` ones take no separator */
-type SummaryField = { pieces: SummaryPiece[]; keep?: boolean; glued?: boolean }
+/** one `│`-separated field; `keep` fields survive any width, `glued` ones take no separator, `compact` stands in once nothing is left to drop */
+type SummaryField = { pieces: SummaryPiece[]; keep?: boolean; glued?: boolean; compact?: SummaryPiece[] }
 
 const fieldsWidth = (fields: SummaryField[]) =>
   fields.reduce((w, f, i) => w + (i > 0 && !f.glued ? separator(fields[i - 1]).length : 0) + f.pieces.reduce((n, p) => n + dispWidth(p.text), 0), 0)
@@ -831,7 +839,12 @@ function putFields(row: Row, fields: SummaryField[], width: number): void {
   const shown = [...fields]
   while (1 + fieldsWidth(shown) > width - 1) {
     const drop = shown.map(f => !f.keep).lastIndexOf(true)
-    if (drop < 0) break
+    if (drop < 0) {
+      const short = shown.findIndex(f => f.compact)
+      if (short < 0) break
+      shown[short] = { ...shown[short], pieces: shown[short].compact!, compact: undefined }
+      continue
+    }
     shown.splice(drop, 1)
   }
   let col = 1
@@ -857,23 +870,32 @@ function drawAccount(line1: Row, line2: Row, account: AccountSummary, props: Boa
     fields1.push({ pieces: [{ text: '風險 ', fg: DIM }, { text: '—', fg: DIM }], keep: true })
   } else {
     const mm = m.maintenanceMargin
+    // between margin queries register.tsx may re-estimate off live quotes; ≈ marks every figure that moved with it
+    const live = account.live
+    const approx = live ? '≈' : ''
+    const equity = live?.equity ?? m.equity
+    const riskLive = live && live.riskIndicator !== null ? live.riskIndicator : undefined
+    const riskValue = riskLive ?? m.riskIndicator
     // an all-zero (simulation) margin holds no position to colour
-    const risk = `${thousands(Math.floor(m.riskIndicator), 0)}%`
+    const risk = `${riskLive !== undefined ? '≈' : ''}${thousands(Math.floor(riskValue), 0)}%`
     const riskPiece: SummaryPiece =
-      m.marginCall > 0 || (mm > 0 && m.equity <= mm * 1.05)
+      m.marginCall > 0 || (mm > 0 && equity <= mm * 1.05)
         ? { text: risk, ...danger }
-        : { text: risk, fg: mm > 0 && m.riskIndicator < 100 ? ORANGE : WHITE }
+        : { text: risk, fg: mm > 0 && riskValue < 100 ? ORANGE : WHITE }
     fields1.push({ pieces: [{ text: '風險 ', fg: DIM }, riskPiece], keep: true })
-    fields1.push({ pieces: [{ text: '權益 ', fg: DIM }, { text: thousands(m.equity, 0), fg: WHITE }] })
-    fields1.push({ pieces: [{ text: '可用 ', fg: DIM }, { text: thousands(m.availableMargin, 0), fg: WHITE }] })
+    fields1.push({ pieces: [{ text: '權益 ', fg: DIM }, { text: approx + thousands(equity, 0), fg: WHITE }] })
+    fields1.push({ pieces: [{ text: '可用 ', fg: DIM }, { text: approx + thousands(live?.availableMargin ?? m.availableMargin, 0), fg: WHITE }] })
     if (m.marginCall > 0) {
       fields1.push({ pieces: [{ text: `追繳 ${thousands(m.marginCall, 0)}`, ...danger }], keep: true })
     } else {
       // index points the market can move against the net position before equity reaches maintenance
       const exposure = props.holdings.reduce((sum, h) => sum + h.qty * h.multiplier, 0)
-      const points = mm > 0 && exposure !== 0 && m.equity > mm ? Math.trunc(-(m.equity - mm) / exposure) : 0
-      const text = mm <= 0 || exposure === 0 ? '—' : points === 0 ? '0' : `${signed(points, 0)} 點`
-      fields1.push({ pieces: [{ text: '距追繳 ', fg: DIM }, { text, fg: WHITE }], keep: true })
+      const points = mm > 0 && exposure !== 0 && equity > mm ? Math.trunc(-(equity - mm) / exposure) : 0
+      const text = mm <= 0 || exposure === 0 ? '—' : points === 0 ? `${approx}0` : `${approx}${signed(points, 0)} 點`
+      const label: SummaryPiece = { text: '距追繳 ', fg: DIM }
+      // the ≈ costs two cells; at the narrowest widths the unit goes rather than the line wrapping
+      const compact = live && text.endsWith(' 點') ? [label, { text: text.slice(0, -2), fg: WHITE }] : undefined
+      fields1.push({ pieces: [label, { text, fg: WHITE }], keep: true, ...(compact ? { compact } : {}) })
     }
     if (props.phase === 'open' && props.now - m.asOf > ACCOUNT_STALE_MS) {
       fields1.push({ pieces: [{ text: `（資料 ${hhmmLocal(m.asOf)}）`, fg: DIM }], glued: true })

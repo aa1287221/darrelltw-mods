@@ -16,6 +16,17 @@
 //  15  widths 40-120: no line wider than the band, fields dropped right to left
 //  16  fills column only for >= 2 fills and enough width
 //  17  the band's height is the same with and without the file
+//  18  a file without margin.ref (or a null / malformed one) next to moved quotes
+//      renders exactly as b206dfe did (noRef* in BASELINE)
+//  19  live estimate from margin.ref x multiplier x (live - ref price): long,
+//      short, mixed; 風險/權益/可用/距追繳 carry ≈
+//  20  a quote not newer than margin.asOf (dataAt, else asOf) -> broker figures
+//  21  a ref code without a live price or a holdings multiplier -> no estimate at all
+//  22  closed market -> broker figures, even with the closing quotes held
+//  23  danger/warning colours follow the live equity
+//  24  delta 0 -> no ≈, broker figures
+//  25  narrow widths with the estimate: no wrap, 風險 + 距追繳 kept
+//  26  a quotes rewrite between account writes re-renders the estimate
 //
 // Usage: node account-summary.mjs $OUT/register.js $OUT/board.js [--capture]
 process.env.TZ = 'Asia/Taipei' // row 0 prints 更新 HH:MM; the baseline must not depend on the runner's zone
@@ -85,9 +96,23 @@ const account = (patch = {}) => ({
   ...Object.fromEntries(Object.entries(patch).filter(([k]) => k !== 'margin')),
 })
 
+// futures-quotes.json the fetcher would write: both held contracts, traded after the margin's asOf
+const liveQuotes = (tmf = 23500, mxf = 23500, { asOf = OPEN - 5_000, dataAt = OPEN - 6_000, drop = [] } = {}) => ({
+  asOf,
+  ...(dataAt !== null ? { dataAt } : {}), // null: a file that leaves dataAt out
+  market: 'tf',
+  source: '永豐',
+  quotes: Object.fromEntries(
+    [
+      ['TMFJ6', { price: tmf, prevClose: 23380, name: '微型臺指期貨 202610', multiplier: 10, decimals: 0 }],
+      ['MXFJ6', { price: mxf, prevClose: 23380, name: '小型臺指期貨 202610', multiplier: 50, decimals: 0 }],
+    ].filter(([code]) => !drop.includes(code)),
+  ),
+})
+
 // --- stub host ---------------------------------------------------------------
 let instance = 0
-async function boot({ accountText, holdingsFile = holdings(), clock = OPEN } = {}) {
+async function boot({ accountText, holdingsFile = holdings(), clock = OPEN, quotes } = {}) {
   instance += 1
   const url = pathToFileURL(regPath)
   url.search = `?case=${instance}`
@@ -96,9 +121,11 @@ async function boot({ accountText, holdingsFile = holdings(), clock = OPEN } = {
     '.claude/stock-band.json': JSON.stringify(CONFIG),
     [`${RUNTIME}futures-holdings.json`]: JSON.stringify(holdingsFile),
     ...(accountText !== undefined ? { [`${RUNTIME}futures-account.json`]: accountText } : {}),
+    ...(quotes !== undefined ? { [`${RUNTIME}futures-quotes.json`]: JSON.stringify(quotes) } : {}),
   }
+  const timers = []
   const $ = {
-    clock: { now: async () => clock, every: () => {} },
+    clock: { now: async () => clock, every: (_ms, fn) => timers.push(fn) },
     fs: {
       read: async path => {
         if (path in files) return files[path]
@@ -136,7 +163,13 @@ async function boot({ accountText, holdingsFile = holdings(), clock = OPEN } = {
     const { btns } = await draw()
     btns.find(b => b.key?.startsWith('stock-band:tab:') && b.label.replace(/^\[|\]$/g, '') === label)?.press()
   }
-  return { draw, landOn }
+  /** rewrites runtime files (name -> object) and runs the poll timer, the way a refresh tick would */
+  const repoll = async (changed = {}) => {
+    for (const [name, data] of Object.entries(changed)) files[`${RUNTIME}${name}`] = JSON.stringify(data)
+    for (const fn of timers) fn()
+    for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r))
+  }
+  return { draw, landOn, repoll }
 }
 
 // --- the board, as colored spans ----------------------------------------------
@@ -198,6 +231,8 @@ if (mode === '--capture') {
   out.tw = sha(render((await tw.draw(120)).props, 120).out)
   await tw.landOn('台股庫存')
   out.twPnl = sha(render((await tw.draw(120)).props, 120).out)
+  // an account file without margin.ref, next to quotes that moved since the margin was read
+  for (const cols of [120, 60]) out[`noRef${cols}`] = (await frame({ accountText: JSON.stringify(account()), quotes: liveQuotes() }, cols)).id
   console.log(JSON.stringify(out, null, 1))
   process.exit(0)
 }
@@ -211,6 +246,9 @@ const BASELINE = {
   '100x20': 'a57ae70b8ce8c6bd',
   tw: 'fc37c2a3d220223c',
   twPnl: 'b1a3d05125f82c60',
+  // captured with --capture against b206dfe's bundle: an account file without margin.ref next to moved quotes
+  noRef120: '4d2e8d3099a28860',
+  noRef60: 'a8cbb23c3d9c2b44',
 }
 
 // --- row 9: no file, malformed, wrong shape -> main's frame -------------------
@@ -376,6 +414,136 @@ for (const maxRows of [0, 5, 6, 7, 8, 10, 20]) {
   const x = dispWidth(head.slice(0, head.indexOf('今日%'))) + 1
   ok(sample.click(x, 3)?.sortPnl === 'today', `17: a click on the header (row 3) sorts: ${JSON.stringify(sample.click(x, 3))}`)
   ok(sample.click(x, 1) === undefined, '17: a click on the summary line does not')
+}
+
+// --- live estimate (rows 18-26) ------------------------------------------------------
+const REF_LONG = { TMFJ6: { qty: 5, price: 23450 }, MXFJ6: { qty: 1, price: 23450 } }
+const withRef = (ref, margin = {}) => JSON.stringify(account({ margin: { ...margin, ref } }))
+const priceCell = (f, code) => textOf(f.rows.find(r => textOf(r).includes(code)) ?? [])
+// the quotes are applied to the table in every row below that says "positive control"
+const quoted = (f, price) => priceCell(f, 'TMFJ6').includes(price)
+
+// --- row 18: no ref -> b206dfe's frame ---------------------------------------------------
+{
+  const f120 = await frame({ accountText: SAMPLE, quotes: liveQuotes() }, 120)
+  ok(f120.id === BASELINE.noRef120, `18: no ref, moved quotes, 120 cols: frame is b206dfe's (${f120.id})`)
+  ok(quoted(f120, '23,500'), '18: positive control: the table prices TMFJ6 at the moved quote 23,500')
+  const f60 = await frame({ accountText: SAMPLE, quotes: liveQuotes() }, 60)
+  ok(f60.id === BASELINE.noRef60, `18: no ref, moved quotes, 60 cols: frame is b206dfe's (${f60.id})`)
+  const MALFORMED = {
+    'ref null': null,
+    'ref is a number': 5,
+    'ref is an array': [REF_LONG.TMFJ6],
+    'ref qty is a string': { TMFJ6: { qty: '5', price: 23450 } },
+    'ref without price': { TMFJ6: { qty: 5 } },
+    'ref price NaN-ish null': { TMFJ6: { qty: 5, price: null } },
+  }
+  for (const [why, ref] of Object.entries(MALFORMED)) {
+    const f = await frame({ accountText: withRef(ref), quotes: liveQuotes() })
+    ok(f.id === BASELINE.noRef120 && lineOf(f.rows[1]) === LINE1, `18: ${why}: file still read, no estimate, b206dfe's frame (${f.id})`)
+  }
+}
+
+// --- row 19: the math ------------------------------------------------------------------
+const LIVE_LONG = '風險 ≈121% │ 權益 ≈605,000 │ 可用 ≈105,000 │ 距追繳 ≈-2,200 點'
+{
+  // +50 points: 5 x 10 x 50 + 1 x 50 x 50 = +5,000
+  const f = await frame({ accountText: withRef(REF_LONG), quotes: liveQuotes() })
+  show('live estimate, long, 120 cols', f)
+  ok(lineOf(f.rows[1]) === LIVE_LONG, `19: long +5,000: "${lineOf(f.rows[1])}"`)
+  ok(lineOf(f.rows[2]) === LINE2, '19: line 2 is not estimated')
+  // short -5 / -1 at the same move: -5,000; 距追繳 is +2,100 點 on exposure -100
+  const s = await frame({ accountText: withRef({ TMFJ6: { qty: -5, price: 23450 }, MXFJ6: { qty: -1, price: 23450 } }), holdingsFile: holdings(-5, -1), quotes: liveQuotes() })
+  const SHORT = '風險 ≈119% │ 權益 ≈595,000 │ 可用 ≈95,000 │ 距追繳 ≈+2,100 點'
+  ok(lineOf(s.rows[1]) === SHORT, `19: short -5,000: "${lineOf(s.rows[1])}"`)
+  // mixed: +5 TMF at +50 (+2,500), -1 MXF at +30 (-1,500) = +1,000; exposure 0 -> 距追繳 — (no ≈ on a dash)
+  const m = await frame({ accountText: withRef({ TMFJ6: { qty: 5, price: 23450 }, MXFJ6: { qty: -1, price: 23450 } }), holdingsFile: holdings(5, -1), quotes: liveQuotes(23500, 23480) })
+  const MIXED = '風險 ≈120% │ 權益 ≈601,000 │ 可用 ≈101,000 │ 距追繳 —'
+  ok(lineOf(m.rows[1]) === MIXED, `19: mixed +1,000: "${lineOf(m.rows[1])}"`)
+  ok(styleOf(f.rows[1], '≈121%')?.color === WHITE, '19: the estimated risk keeps the default colour above 100')
+}
+
+// --- row 20: stale quote ---------------------------------------------------------------
+{
+  const older = await frame({ accountText: withRef(REF_LONG), quotes: liveQuotes(23500, 23500, { dataAt: MARGIN.asOf - 1_000 }) })
+  ok(lineOf(older.rows[1]) === LINE1, `20: quotes traded before the margin read: broker figures: "${lineOf(older.rows[1])}"`)
+  ok(quoted(older, '23,500'), '20: positive control: those quotes still price the table')
+  const same = await frame({ accountText: withRef(REF_LONG), quotes: liveQuotes(23500, 23500, { dataAt: MARGIN.asOf }) })
+  ok(lineOf(same.rows[1]) === LINE1, `20: dataAt == margin.asOf is not newer: "${lineOf(same.rows[1])}"`)
+  const noDataOld = await frame({ accountText: withRef(REF_LONG), quotes: liveQuotes(23500, 23500, { asOf: MARGIN.asOf - 5_000, dataAt: null }) })
+  ok(lineOf(noDataOld.rows[1]) === LINE1, `20: no dataAt, asOf older than the margin: "${lineOf(noDataOld.rows[1])}"`)
+  const noDataNew = await frame({ accountText: withRef(REF_LONG), quotes: liveQuotes(23500, 23500, { dataAt: null }) })
+  ok(lineOf(noDataNew.rows[1]) === LIVE_LONG, `20: no dataAt, asOf newer: estimated: "${lineOf(noDataNew.rows[1])}"`)
+}
+
+// --- row 21: missing price / multiplier ------------------------------------------------------
+{
+  const noPrice = await frame({ accountText: withRef(REF_LONG), quotes: liveQuotes(23500, 23500, { drop: ['MXFJ6'] }) })
+  ok(lineOf(noPrice.rows[1]) === LINE1, `21: MXFJ6 has no live quote: no estimate at all (not TMFJ6 alone): "${lineOf(noPrice.rows[1])}"`)
+  ok(quoted(noPrice, '23,500'), '21: positive control: TMFJ6 itself is quoted')
+  const h = holdings()
+  delete h.holdings[1].multiplier
+  const noMult = await frame({ accountText: withRef(REF_LONG), holdingsFile: h, quotes: liveQuotes() })
+  ok(lineOf(noMult.rows[1]).startsWith('風險 120% │ 權益 600,000') && !lineOf(noMult.rows[1]).includes('≈'), `21: MXFJ6 holdings row has no multiplier: broker figures: "${lineOf(noMult.rows[1])}"`)
+  const notHeld = await frame({ accountText: withRef({ ...REF_LONG, TXFJ6: { qty: 1, price: 17000 } }), quotes: liveQuotes() })
+  ok(lineOf(notHeld.rows[1]) === LINE1, `21: a ref code with no holdings row and no quote: broker figures: "${lineOf(notHeld.rows[1])}"`)
+}
+
+// --- row 22: closed --------------------------------------------------------------------
+{
+  const CLOSE_AT = taipei(19, 5, 0) // 夜盤 closes Saturday 05:00
+  const closed = await frame({
+    accountText: withRef(REF_LONG, { asOf: CLOSE_AT - 60_000 }),
+    quotes: liveQuotes(23500, 23500, { asOf: CLOSE_AT - 10_000, dataAt: CLOSE_AT - 20_000 }),
+    clock: CLOSED,
+  })
+  ok(closed.props.phase !== 'open', `22: the market is closed (${closed.props.phase})`)
+  ok(quoted(closed, '23,500'), '22: positive control: the closing quotes still price the table')
+  ok(lineOf(closed.rows[1]) === LINE1, `22: closed: broker figures, no ≈: "${lineOf(closed.rows[1])}"`)
+}
+
+// --- row 23: colours on the live equity -----------------------------------------------------
+{
+  const ONE = { TMFJ6: { qty: 1, price: 23450 } }
+  // broker 404,300 is above 404,250 (maintenance x 1.05); -10 points x 10 = -100 -> 404,200
+  const broker = await frame({ accountText: JSON.stringify(account({ margin: { equity: 404300, riskIndicator: 100 } })), quotes: liveQuotes(23440) })
+  ok(plain(styleOf(broker.rows[1], '100%'), WHITE), '23: without ref the broker equity 404,300 is not in danger')
+  const live = await frame({ accountText: withRef(ONE, { equity: 404300, riskIndicator: 100 }), quotes: liveQuotes(23440) })
+  ok(lineOf(live.rows[1]).startsWith('風險 ≈80% │ 權益 ≈404,200'), `23: estimate 404,200: "${lineOf(live.rows[1])}"`)
+  ok(isDanger(styleOf(live.rows[1], '≈80%')), `23: live equity <= maintenance x 1.05: danger fill: ${JSON.stringify(styleOf(live.rows[1], '≈80%'))}`)
+  // broker 500,100 / riskIndicator 100 is white; -20 x 10 -> 499,900 -> risk 99 -> orange
+  const warn = await frame({ accountText: withRef(ONE, { equity: 500100, riskIndicator: 100 }), quotes: liveQuotes(23430) })
+  ok(plain(styleOf(warn.rows[1], '≈99%'), ORANGE), `23: live risk 99 -> orange: "${lineOf(warn.rows[1])}"`)
+}
+
+// --- row 24: delta 0 ------------------------------------------------------------------
+{
+  const f = await frame({ accountText: withRef(REF_LONG), quotes: liveQuotes(23450, 23450) })
+  ok(lineOf(f.rows[1]) === LINE1, `24: quotes at the ref prices: no ≈: "${lineOf(f.rows[1])}"`)
+  ok(quoted(f, '23,450'), '24: positive control: quoted at 23,450')
+}
+
+// --- row 25: narrow widths -------------------------------------------------------------
+for (const cols of [120, 100, 80, 60, 50, 40, 30]) {
+  const f = await frame({ accountText: withRef(REF_LONG), quotes: liveQuotes() }, cols)
+  const l1 = lineOf(f.rows[1])
+  const widest = Math.max(dispWidth(textOf(f.rows[1])), dispWidth(textOf(f.rows[2])))
+  ok(widest <= cols - 1, `25: ${cols} cols with the estimate: no wrap (widest ${widest}): "${l1}"`)
+  ok(l1.startsWith('風險 ≈121%') && /距追繳 ≈-2,200( 點)?$/.test(l1), `25: ${cols} cols keeps 風險 and 距追繳: "${l1}"`)
+  const optional = l1.split(' │ ').slice(1, -1).map(x => x.split(' ')[0])
+  ok(['權益', '可用'].slice(0, optional.length).join() === optional.join(), `25: ${cols} cols drops right to left: ${optional.join(',') || '(none)'}`)
+}
+
+// --- row 26: re-render between account writes -----------------------------------------------
+{
+  const band = await boot({ accountText: withRef(REF_LONG), quotes: liveQuotes() })
+  await band.landOn('期貨庫存')
+  const first = lineOf(render((await band.draw(120)).props, 120).rows[1])
+  await band.repoll({ 'futures-quotes.json': liveQuotes(23520, 23500, { asOf: OPEN - 2_000, dataAt: OPEN - 3_000 }) })
+  const second = lineOf(render((await band.draw(120)).props, 120).rows[1])
+  ok(first.includes('權益 ≈605,000'), `26: first quotes: 權益 ≈605,000: "${first}"`)
+  // TMFJ6 +70 (3,500) + MXFJ6 +50 (2,500) = +6,000, same account file
+  ok(second.includes('權益 ≈606,000'), `26: rewritten quotes, same account file: 權益 ≈606,000: "${second}"`)
 }
 
 done()
