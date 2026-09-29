@@ -815,7 +815,7 @@ function maxColumns(width: number): number {
 // --- 期貨庫存 account summary (#27) --------------------------------------------
 /** margin older than this while tf trades gets a （資料 HH:MM） suffix */
 const ACCOUNT_STALE_MS = 3 * 60_000
-type SummaryPiece = { text: string; fg: string; bold?: boolean }
+type SummaryPiece = { text: string; fg: string; bg?: string; bold?: boolean }
 /** one `│`-separated field; `keep` fields survive any width, `glued` ones take no separator */
 type SummaryField = { pieces: SummaryPiece[]; keep?: boolean; glued?: boolean }
 
@@ -842,14 +842,15 @@ function putFields(row: Row, fields: SummaryField[], width: number): void {
       col += sep.length
     }
     for (const p of f.pieces) {
-      row.put(col, p.text, p.fg, undefined, p.bold)
+      row.put(col, p.text, p.fg, p.bg, p.bold)
       col += dispWidth(p.text)
     }
   }
 }
 
 function drawAccount(line1: Row, line2: Row, account: AccountSummary, props: BoardProps, width: number): void {
-  const loss = tone(props.market, -1)
+  // danger is a filled red cell, not a tone: on tf the loss tone is green and red text means profit
+  const danger = { fg: WHITE, bg: DOWN_RED, bold: true }
   const m = account.margin
   const fields1: SummaryField[] = []
   if (!m) {
@@ -857,13 +858,16 @@ function drawAccount(line1: Row, line2: Row, account: AccountSummary, props: Boa
   } else {
     const mm = m.maintenanceMargin
     // an all-zero (simulation) margin holds no position to colour
-    const riskFg =
-      m.marginCall > 0 || (mm > 0 && m.equity <= mm * 1.05) ? loss : mm > 0 && m.riskIndicator < 100 ? ORANGE : WHITE
-    fields1.push({ pieces: [{ text: '風險 ', fg: DIM }, { text: `${thousands(Math.floor(m.riskIndicator), 0)}%`, fg: riskFg }], keep: true })
+    const risk = `${thousands(Math.floor(m.riskIndicator), 0)}%`
+    const riskPiece: SummaryPiece =
+      m.marginCall > 0 || (mm > 0 && m.equity <= mm * 1.05)
+        ? { text: risk, ...danger }
+        : { text: risk, fg: mm > 0 && m.riskIndicator < 100 ? ORANGE : WHITE }
+    fields1.push({ pieces: [{ text: '風險 ', fg: DIM }, riskPiece], keep: true })
     fields1.push({ pieces: [{ text: '權益 ', fg: DIM }, { text: thousands(m.equity, 0), fg: WHITE }] })
     fields1.push({ pieces: [{ text: '可用 ', fg: DIM }, { text: thousands(m.availableMargin, 0), fg: WHITE }] })
     if (m.marginCall > 0) {
-      fields1.push({ pieces: [{ text: `追繳 ${thousands(m.marginCall, 0)}`, fg: loss, bold: true }], keep: true })
+      fields1.push({ pieces: [{ text: `追繳 ${thousands(m.marginCall, 0)}`, ...danger }], keep: true })
     } else {
       // index points the market can move against the net position before equity reaches maintenance
       const exposure = props.holdings.reduce((sum, h) => sum + h.qty * h.multiplier, 0)

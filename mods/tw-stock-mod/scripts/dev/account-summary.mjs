@@ -9,8 +9,8 @@
 //      whose hooks/ equal origin/main); other markets never change
 //  10  the issue's sample renders line 1 and line 2 exactly
 //  11  距追繳: long, short, mixed-to-zero exposure, equity <= maintenance
-//  12  marginCall -> 追繳 (loss colour, bold); riskIndicator < 100 -> warning;
-//      equity <= maintenance x 1.05 -> loss colour
+//  12  marginCall -> 追繳, and equity <= maintenance x 1.05 -> 風險: bold white on a
+//      red fill; riskIndicator < 100 -> orange text
 //  13  a null realized window -> —; wins/losses text
 //  14  stale margin while open -> （資料 HH:MM）; closed -> no suffix
 //  15  widths 40-120: no line wider than the band, fields dropped right to left
@@ -37,6 +37,8 @@ const GREEN = '#3fb950' // board.tsx UP_GREEN: losses on the Taiwan boards
 const ORANGE = '#d97757' // board.tsx ORANGE: the band's one attention colour
 const WHITE = '#f0f3f6'
 const DIM = '#6e7681'
+/** the danger state: bold white on a red fill, readable the same under either colour convention */
+const isDanger = s => s?.color === WHITE && s?.bg === RED && s?.bold === true
 
 const CONFIG = {
   market: 'us',
@@ -155,7 +157,7 @@ function render(props, cols) {
     if (node == null || node === false) return acc
     if (typeof node === 'string' || typeof node === 'number') { acc.push({ text: String(node), ...style }); return acc }
     if (Array.isArray(node)) { for (const n of node) spans(n, style, acc); return acc }
-    const own = { color: node.props?.color ?? style.color, bold: node.props?.bold ?? style.bold }
+    const own = { color: node.props?.color ?? style.color, bg: node.props?.backgroundColor ?? style.bg, bold: node.props?.bold ?? style.bold }
     for (const k of [...(node.kids ?? []), ...(node.props?.children != null ? [node.props.children] : [])]) spans(k, own, acc)
     return acc
   }
@@ -273,16 +275,18 @@ ok((await line1({ accountText: JSON.stringify(account({ margin: { equity: 385100
   const f = await frame({ accountText: JSON.stringify(account({ margin: { marginCall: 8000 } })), holdingsFile: holdings(5, -1) })
   const l = f.rows[1]
   ok(lineOf(l).endsWith('追繳 8,000') && !lineOf(l).includes('距追繳'), `12: marginCall 8,000 replaces 距追繳 (even at exposure 0): "${lineOf(l)}"`)
-  const call = styleOf(l, '8,000')
-  ok(call?.color === GREEN && call?.bold === true, `12: 追繳 8,000 in the loss colour, bold: ${call?.color} bold=${call?.bold}`)
-  ok(styleOf(l, '120%')?.color === GREEN, `12: 風險 in the loss colour under a margin call: ${styleOf(l, '120%')?.color}`)
+  const call = styleOf(l, '追繳 8,000')
+  ok(isDanger(call), `12: 追繳 8,000 is bold white on a red background: ${JSON.stringify(call)}`)
+  ok(isDanger(styleOf(l, '120%')), `12: 風險 is bold white on red under a margin call: ${JSON.stringify(styleOf(l, '120%'))}`)
+  ok(!styleOf(l, '權益')?.bg && !styleOf(l, '600,000')?.bg, '12: only the danger cells are filled')
 }
-const riskColour = async (margin, needle) => styleOf((await frame({ accountText: JSON.stringify(account({ margin })) })).rows[1], needle)?.color
-ok((await riskColour({ riskIndicator: 99 }, '99%')) === ORANGE, '12: riskIndicator 99 -> warning colour')
-ok((await riskColour({ riskIndicator: 100 }, '100%')) === WHITE, '12: riskIndicator 100 -> default (the threshold is < 100)')
-ok((await riskColour({ riskIndicator: 100, equity: 404250 }, '100%')) === GREEN, '12: equity == maintenance x 1.05 (404,250) -> loss colour')
-ok((await riskColour({ riskIndicator: 100, equity: 404251 }, '100%')) === WHITE, '12: equity 1 TWD above maintenance x 1.05 -> default')
-ok((await riskColour({ riskIndicator: 99, equity: 404250 }, '99%')) === GREEN, '12: the loss rule wins over the warning')
+const riskStyle = async (margin, needle) => styleOf((await frame({ accountText: JSON.stringify(account({ margin })) })).rows[1], needle)
+const plain = (s, colour) => s?.color === colour && !s?.bg && !s?.bold
+ok(plain(await riskStyle({ riskIndicator: 99 }, '99%'), ORANGE), '12: riskIndicator 99 -> orange text, no fill')
+ok(plain(await riskStyle({ riskIndicator: 100 }, '100%'), WHITE), '12: riskIndicator 100 -> default (the threshold is < 100)')
+ok(isDanger(await riskStyle({ riskIndicator: 100, equity: 404250 }, '100%')), '12: equity == maintenance x 1.05 (404,250) -> danger fill')
+ok(plain(await riskStyle({ riskIndicator: 100, equity: 404251 }, '100%'), WHITE), '12: equity 1 TWD above maintenance x 1.05 -> default')
+ok(isDanger(await riskStyle({ riskIndicator: 99, equity: 404250 }, '99%')), '12: danger wins over the warning')
 
 // --- row 13: null window, wins/losses ------------------------------------------------
 {

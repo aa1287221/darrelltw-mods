@@ -927,9 +927,10 @@ two lines between its title and the table (amounts below are made up):
 position before equity reaches the maintenance margin: `(權益 − 維持保證金)
 ÷ Σ(口數 × multiplier)`, negative for a net long, positive for a net short,
 `—` with no net exposure, `0` once equity is at or under maintenance. A
-margin call replaces it with `追繳 8,000` in bold. 風險 turns the loss colour
-under a margin call or within 5 % of maintenance, and the warning colour
-below 100 %. 已實現 is gross P&L for today, this month and this year (the
+margin call replaces it with `追繳 8,000`. A margin call, or equity within
+5 % of maintenance, draws 風險 (and 追繳) as bold white on a red fill, which
+reads as danger under either colour convention; 風險 turns orange below
+100 %. 已實現 is gross P&L for today, this month and this year (the
 wins/losses count is the year's), 費稅 today's fee plus tax. While 台指期
 trades, a margin figure older than three minutes gets a dim `（資料 HH:MM）`.
 A narrow terminal drops 費稅, 今年, 本月, 可用 and 權益 (right to left); 風險,
