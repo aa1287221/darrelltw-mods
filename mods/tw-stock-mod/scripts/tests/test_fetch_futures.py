@@ -29,11 +29,15 @@ def utc_ns(year, month, day, hour, minute, second=0):
     return utc_ms(year, month, day, hour, minute, second) * 1_000_000
 
 
-def make_contract(code, multiplier, decimal_locator, reference, name, target_code=None):
-    return types.SimpleNamespace(
+def make_contract(code, multiplier, decimal_locator, reference, name, target_code=None, underlying_code=None):
+    ns = types.SimpleNamespace(
         code=code, multiplier=multiplier, decimal_locator=decimal_locator,
         reference=reference, name=name, target_code=target_code,
     )
+    # absent unless given: the missing-attribute path is the one under test
+    if underlying_code is not None:
+        ns.underlying_code = underlying_code
+    return ns
 
 
 def make_snapshot(code, close, ts_ns):
@@ -516,6 +520,28 @@ def test_futures_holding_row_sell_is_negative_qty():
     assert row["price"] == 108.0
     assert row["prevClose"] == 108.3
     assert row["multiplier"] == 1000
+
+
+def test_futures_holding_row_carries_underlying_code():
+    # TMF/MXF/TXF all group under IX0001 (shioaji 1.7.5 underlying_code); SRF under 0050
+    tmf = make_contract("TMFJ6", 10, 0, 23400.0, "微型臺指期貨 202610", underlying_code="IX0001")
+    srf = make_contract("SRFJ6", 1000, 2, 106.0, "小型元大台灣50ETF期貨 202610", underlying_code="0050")
+
+    assert fetcher.futures_holding_row(make_position("TMFJ6", BUY, 1, 23400.0, 23450.0, 500.0), tmf)["underlying"] == "IX0001"
+    assert fetcher.futures_holding_row(make_position("SRFJ6", SELL, 2, 106.5, 106.0, 1000.0), srf)["underlying"] == "0050"
+
+
+def test_futures_holding_row_underlying_is_null_without_the_attribute():
+    row = fetcher.futures_holding_row(make_position("TXFJ6", BUY, 2, 17000.0, 17050.0, 20000.0), TXF_CONTRACT)
+
+    assert "underlying" in row
+    assert row["underlying"] is None
+
+
+def test_futures_holding_row_underlying_empty_string_is_null():
+    blank = make_contract("TXFJ6", 200, 0, 17000.0, "臺股期貨 202610", underlying_code="")
+
+    assert fetcher.futures_holding_row(make_position("TXFJ6", BUY, 1, 17000.0, 17050.0, 10000.0), blank)["underlying"] is None
 
 
 def test_futures_holding_row_drops_zero_quantity():

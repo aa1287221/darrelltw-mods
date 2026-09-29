@@ -762,6 +762,8 @@ def futures_holding_row(position, contract) -> dict | None:
         "prevClose": round(float(field(contract, "reference", 0) or 0), 4),
         "multiplier": field(contract, "multiplier", 1),
         "direction": direction,
+        # groups contracts on one index (TXF/MXF/TMF -> IX0001) for the band's 追繳價; "" reads as unknown
+        "underlying": field(contract, "underlying_code", None) or None,
     }
 
 
