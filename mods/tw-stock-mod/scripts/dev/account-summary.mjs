@@ -194,6 +194,8 @@ if (mode === '--capture') {
   const tw = await boot({})
   await tw.landOn('台股')
   out.tw = sha(render((await tw.draw(120)).props, 120).out)
+  await tw.landOn('台股庫存')
+  out.twPnl = sha(render((await tw.draw(120)).props, 120).out)
   console.log(JSON.stringify(out, null, 1))
   process.exit(0)
 }
@@ -206,6 +208,7 @@ const BASELINE = {
   '80x7': 'e0e72eff9d53880d',
   '100x20': 'a57ae70b8ce8c6bd',
   tw: 'fc37c2a3d220223c',
+  twPnl: 'b1a3d05125f82c60',
 }
 
 // --- row 9: no file, malformed, wrong shape -> main's frame -------------------
@@ -219,6 +222,8 @@ const BAD = {
   'a realized window is an array': JSON.stringify({ ...account(), realized: { today: [], month: null, year: null } }),
   'fills row without qty': JSON.stringify({ ...account(), fills: { TMFJ6: [{ price: 23400 }] } }),
   'root is an array': JSON.stringify([account()]),
+  'realized without year': JSON.stringify({ ...account(), realized: { today: win(1, 1, 0), month: null } }),
+  'no margin key': JSON.stringify({ ...account(), margin: undefined }),
 }
 for (const [cols, maxRows] of SIZES) {
   const f = await frame({}, cols, maxRows)
@@ -236,6 +241,9 @@ ok(nulls.id === BASELINE['120x0'], `9: every section null: nothing to show, fram
   await tw.landOn('台股')
   const id = sha(render((await tw.draw(120)).props, 120).out)
   ok(id === BASELINE.tw, `9: another market (台股) with the file present is unchanged (${id})`)
+  await tw.landOn('台股庫存')
+  const pnl = sha(render((await tw.draw(120)).props, 120).out)
+  ok(pnl === BASELINE.twPnl, `9: 台股庫存 (another market's pnl view) with the file present is unchanged (${pnl})`)
 }
 
 // --- row 10: the issue's sample ---------------------------------------------

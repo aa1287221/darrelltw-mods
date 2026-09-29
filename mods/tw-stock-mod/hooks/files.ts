@@ -369,7 +369,7 @@ export function parseAccountFile(text: string | undefined): AccountFile | undefi
   } catch {
     return undefined
   }
-  if (!root || !('margin' in root)) return undefined
+  if (!root) return undefined
   const margin = parseMargin(root.margin)
   const realizedRaw = asRecord(root.realized)
   const fills = parseFills(root.fills)
