@@ -146,6 +146,8 @@ export type Holding = {
   prevClose?: number
   /** points-to-money factor from the contract (futures-holdings.json); absent for stocks, read as 1 */
   multiplier?: number
+  /** the contract's underlying (shioaji underlying_code, e.g. IX0001 for TXF/MXF/TMF); futures only */
+  underlying?: string
 }
 // A holding once register.tsx has resolved a price for it - board.tsx (the
 // 損益 view) only formats these, it never falls back to anything itself.
@@ -160,6 +162,8 @@ export type PricedHolding = {
   multiplier: number
   /** price/cost digits from the matching tf quote; omitted (board default 2) when there is none */
   decimals?: number
+  /** futures only: groups rows that move together for 追繳價/強平價; omitted when unknown */
+  underlying?: string
   /**
    * what this holding said before the last update - same idea as
    * QuoteRow.was, deliberately just as thin: only `price` carries real old

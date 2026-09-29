@@ -107,6 +107,13 @@ export type Config = {
   marketSwitcher: MarketSwitcher
 }
 
+/** TAIFEX's forced-liquidation line; 永豐's own threshold is unverified */
+export const DEFAULT_LIQUIDATION_PCT = 25
+
+function liquidationPct(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : DEFAULT_LIQUIDATION_PCT
+}
+
 type ShioajiConfig = {
   /** interpreter to run the script with, e.g. the project's own venv python */
   python: string
@@ -114,6 +121,8 @@ type ShioajiConfig = {
   env: string
   /** seconds between snapshots the script writes */
   interval: number
+  /** risk indicator (%) at which the broker force-closes; TAIFEX's 25% unless the user file says otherwise */
+  liquidationRiskPct: number
 }
 
 type CapitalConfig = {
@@ -238,7 +247,7 @@ export function defaultConfig(): Config {
     lists: { tw: TW_LIST, us: US_LIST, tf: [], crypto: CRYPTO_LIST },
     droppedFutures: [],
     cryptoConfigured: false,
-    shioaji: { python: 'python3', env: '~/.sinobon.env', interval: 10 },
+    shioaji: { python: 'python3', env: '~/.sinobon.env', interval: 10, liquidationRiskPct: DEFAULT_LIQUIDATION_PCT },
     capital: {
       python: 'python',
       env: '~/.capital.env',
@@ -438,13 +447,14 @@ export function feedInterval(cfg: Config, extras: FeedExtras = {}): number {
 /**
  * The broker keys a project's stock-band.json may NOT set: each names a
  * program the band executes (`python`) or a file that program trusts with
- * credentials or loads code from (`env`, `dll`). A project file travels with
+ * credentials or loads code from (`env`, `dll`), or the account's own risk
+ * line (`liquidationRiskPct`, where 強平價 is drawn). A project file travels with
  * a cloned repo, so taking these from it would let any repo make the band run
  * its own program the moment a session opens there. Only the user-level file
  * (~/.claude/stock-band.json) sets them.
  */
 export const USER_ONLY_KEYS: Record<'shioaji' | 'capital', string[]> = {
-  shioaji: ['python', 'env'],
+  shioaji: ['python', 'env', 'liquidationRiskPct'],
   capital: ['python', 'env', 'dll'],
 }
 
@@ -573,6 +583,7 @@ export function parseConfigRoot(root: Record<string, unknown> | undefined): Conf
       python: str(shioaji.python, cfg.shioaji.python),
       env: str(shioaji.env, cfg.shioaji.env),
       interval: Math.max(0, num(shioaji.interval, cfg.shioaji.interval)),
+      liquidationRiskPct: liquidationPct(shioaji.liquidationRiskPct),
     }
   }
   const capital = asRecord(root.capital)
@@ -647,6 +658,7 @@ export function parseHoldingsList(value: unknown): Holding[] {
       prevClose: positive(entry.prevClose),
       // `direction` is not kept: the fetcher already signs qty with it
       multiplier: typeof entry.multiplier === 'number' && entry.multiplier > 0 ? entry.multiplier : undefined,
+      ...(typeof entry.underlying === 'string' && entry.underlying ? { underlying: entry.underlying } : {}),
     })
   }
   return out

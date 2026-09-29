@@ -304,13 +304,14 @@ export function pricedHoldings(
       multiplier: h.multiplier ?? 1,
       // omitted, not undefined: see quoteRow on what a Client's props may hold
       ...(live?.decimals !== undefined ? { decimals: live.decimals } : {}),
+      ...(h.underlying ? { underlying: h.underlying } : {}),
       ...(wasPrice !== undefined && wasPrice !== price ? { was: { price: wasPrice } } : {}),
     }
   })
 }
 
 // --- futures account file (futures-account.json, runtime dir only) ----------
-export type AccountFile = Omit<AccountSummary, 'lines' | 'live'>
+export type AccountFile = Omit<AccountSummary, 'lines' | 'live' | 'liquidationPct'>
 
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 

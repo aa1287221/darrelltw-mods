@@ -72,6 +72,8 @@ export type AccountSummary = {
   fills: Record<string, AccountFill[]>
   lines: number
   live?: AccountLive
+  /** risk indicator (%) the broker force-closes at, for 強平價 (config shioaji.liquidationRiskPct, default 25) */
+  liquidationPct: number
 }
 
 export type Holding = {
@@ -86,6 +88,8 @@ export type Holding = {
   multiplier: number
   /** 成本/現價 digits when the contract says so; absent = 2, as stocks always were */
   decimals?: number
+  /** futures: the contract's underlying (IX0001 for TXF/MXF/TMF); absent = unknown */
+  underlying?: string
   /**
    * what this holding said before the last update - same idea as
    * QuoteRow.was and deliberately as thin: only `price` is real old data;
@@ -826,6 +830,8 @@ const ACCOUNT_STALE_MS = 3 * 60_000
 type SummaryPiece = { text: string; fg: string; bg?: string; bold?: boolean }
 /** one `│`-separated field; `keep` fields survive any width, `glued` ones take no separator, `compact` stands in once nothing is left to drop */
 type SummaryField = { pieces: SummaryPiece[]; keep?: boolean; glued?: boolean; compact?: SummaryPiece[] }
+// danger is a filled red cell, not a tone: on tf the loss tone is green and red text means profit
+const DANGER = { fg: WHITE, bg: DOWN_RED, bold: true }
 
 const fieldsWidth = (fields: SummaryField[]) =>
   fields.reduce((w, f, i) => w + (i > 0 && !f.glued ? separator(fields[i - 1]).length : 0) + f.pieces.reduce((n, p) => n + dispWidth(p.text), 0), 0)
@@ -862,8 +868,7 @@ function putFields(row: Row, fields: SummaryField[], width: number): void {
 }
 
 function drawAccount(line1: Row, line2: Row, account: AccountSummary, props: BoardProps, width: number): void {
-  // danger is a filled red cell, not a tone: on tf the loss tone is green and red text means profit
-  const danger = { fg: WHITE, bg: DOWN_RED, bold: true }
+  const danger = DANGER
   const m = account.margin
   const fields1: SummaryField[] = []
   if (!m) {
@@ -888,13 +893,21 @@ function drawAccount(line1: Row, line2: Row, account: AccountSummary, props: Boa
     if (m.marginCall > 0) {
       fields1.push({ pieces: [{ text: `追繳 ${thousands(m.marginCall, 0)}`, ...danger }], keep: true })
     } else {
-      // index points the market can move against the net position before equity reaches maintenance
-      const exposure = props.holdings.reduce((sum, h) => sum + h.qty * h.multiplier, 0)
-      const points = mm > 0 && exposure !== 0 && equity > mm ? Math.trunc(-(equity - mm) / exposure) : 0
-      const text = mm <= 0 || exposure === 0 ? '—' : points === 0 ? `${approx}0` : `${approx}${signed(points, 0)} 點`
+      // points only mean something when every contract tracks one underlying; otherwise the cushion in TWD
+      const underlyings = new Set(props.holdings.map(h => h.underlying))
+      const oneUnderlying = underlyings.size <= 1 && !underlyings.has(undefined)
+      let text: string
+      if (!oneUnderlying) {
+        text = mm <= 0 ? '—' : `${approx}${thousands(Math.max(0, Math.floor(equity - mm)), 0)} 元`
+      } else {
+        // index points the market can move against the net position before equity reaches maintenance
+        const exposure = props.holdings.reduce((sum, h) => sum + h.qty * h.multiplier, 0)
+        const points = mm > 0 && exposure !== 0 && equity > mm ? Math.trunc(-(equity - mm) / exposure) : 0
+        text = mm <= 0 || exposure === 0 ? '—' : points === 0 ? `${approx}0` : `${approx}${signed(points, 0)} 點`
+      }
       const label: SummaryPiece = { text: '距追繳 ', fg: DIM }
       // the ≈ costs two cells; at the narrowest widths the unit goes rather than the line wrapping
-      const compact = live && text.endsWith(' 點') ? [label, { text: text.slice(0, -2), fg: WHITE }] : undefined
+      const compact = live && / [點元]$/.test(text) ? [label, { text: text.slice(0, -2), fg: WHITE }] : undefined
       fields1.push({ pieces: [label, { text, fg: WHITE }], keep: true, ...(compact ? { compact } : {}) })
     }
     if (props.phase === 'open' && props.now - m.asOf > ACCOUNT_STALE_MS) {
@@ -925,19 +938,49 @@ function drawAccount(line1: Row, line2: Row, account: AccountSummary, props: Boa
   )
 }
 
+/** 0/1/2: the decimals a price needs, rounded to 2 first so float noise (106.2500000001) is not read as extra */
+function priceDigits(price: number): number {
+  const p = Math.round(price * 100) / 100
+  return Number.isInteger(p) ? 0 : Number.isInteger(p * 10) ? 1 : 2
+}
+
 /** `4筆 23,410–23,520`: fill count and entry-price range, for 2 or more fills; '' otherwise */
 function fillsLabel(fills: AccountFill[] | undefined): string {
   if (!fills || fills.length < 2) return ''
-  // round first so float noise (106.2500000001) is not read as extra decimals
   const prices = fills.map(f => f.price).filter((p): p is number => p !== null).map(p => Math.round(p * 100) / 100)
   if (prices.length === 0) return `${fills.length}筆`
-  const digits = prices.every(p => Number.isInteger(p)) ? 0 : prices.every(p => Number.isInteger(p * 10)) ? 1 : 2
+  const digits = Math.max(...prices.map(priceDigits))
   const lo = Math.min(...prices)
   const hi = Math.max(...prices)
   return `${fills.length}筆 ${lo === hi ? thousands(lo, digits) : `${thousands(lo, digits)}–${thousands(hi, digits)}`}`
 }
 
 const FILLS_HEADER = '建倉明細'
+
+/**
+ * 追繳價/強平價 for each `page` row: the price at which `cushion` (TWD) is used
+ * up, assuming every contract on the row's underlying moves the same number of
+ * points and other underlyings stay put. Rounded toward the current price, so
+ * the alarm never reads later than the arithmetic.
+ */
+function thresholdCells(all: Holding[], page: Holding[], cushion: number, approx: string, alarm: string): SummaryPiece[] {
+  const exposure = new Map<string, number>()
+  for (const h of all) if (h.underlying) exposure.set(h.underlying, (exposure.get(h.underlying) ?? 0) + h.qty * h.multiplier)
+  return page.map(h => {
+    if (cushion <= 0) return { text: alarm, ...DANGER }
+    const group = h.underlying ? (exposure.get(h.underlying) ?? 0) : 0
+    if (group === 0) return { text: '—', fg: DIM }
+    const move = -cushion / group
+    const digits = priceDigits(h.price)
+    const scale = 10 ** digits
+    // pre-round off float creep (106.15 x 100 = 10615.000000000002) before ceil/floor
+    const scaled = Math.round((h.price + move) * scale * 1e6) / 1e6
+    const price = (move < 0 ? Math.ceil(scaled) : Math.floor(scaled)) / scale
+    if (price <= 0) return { text: '—', fg: DIM }
+    const near = Math.abs(h.price - price) / h.price < 0.02
+    return { text: approx + thousands(price, digits), fg: near ? ORANGE : WHITE }
+  })
+}
 
 // --- pnl (損益) layout -------------------------------------------------------
 // One column of right-anchored numeric fields: 張數/成本/現價/今日%/今日損益/
@@ -1673,11 +1716,38 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     putRightSortable(lay.todayPnlRight, 'todayPnl', '今日損益')
     putRightSortable(lay.totalPnlRight, 'totalPnl', '總損益')
     putRightSortable(lay.totalPnlPctRight, 'totalPnlPct', '損益%')
-    // 建倉明細: shown with the column, never without it; not sortable, so no sortHits entry
-    const fillsCol = lay.totalPnlPctRight + 2
+    // 追繳價, 強平價, 建倉明細 left to right; a narrow band drops them right to left.
+    // Each header shows with its column, never without it; none is sortable, so no sortHits entry
+    const bandCols = surface.columns || 80
+    const margin = account?.margin
+    const extras: { header: string; cells: SummaryPiece[]; col: number; width: number }[] = []
+    let nextCol = lay.totalPnlPctRight + 2
+    let room = true
+    if (account && margin && holdings.length > 0) {
+      const approx = account.live ? '≈' : ''
+      const equity = account.live?.equity ?? margin.equity
+      const im = margin.initialMargin ?? 0
+      const wanted = [
+        ...(margin.maintenanceMargin > 0
+          ? [{ header: '追繳價', cells: thresholdCells(holdings, page, equity - margin.maintenanceMargin, approx, '追繳中') }]
+          : []),
+        ...(im > 0 ? [{ header: '強平價', cells: thresholdCells(holdings, page, equity - (account.liquidationPct / 100) * im, approx, '強平') }] : []),
+      ]
+      for (const x of wanted) {
+        const width = Math.max(dispWidth(x.header), ...x.cells.map(c => dispWidth(c.text)))
+        if (nextCol + width > bandCols - 1) {
+          room = false
+          break
+        }
+        extras.push({ ...x, col: nextCol, width })
+        head.putRight(nextCol + width, x.header, HEAD)
+        nextCol += width + 2
+      }
+    }
+    const fillsCol = nextCol
     const fillLabels = page.map(h => (account ? fillsLabel(account.fills[h.code]) : ''))
     const fillsWidth = Math.max(dispWidth(FILLS_HEADER), ...fillLabels.map(dispWidth))
-    const showFills = fillLabels.some(Boolean) && fillsCol + fillsWidth <= (surface.columns || 80) - 1
+    const showFills = room && fillLabels.some(Boolean) && fillsCol + fillsWidth <= bandCols - 1
     if (showFills) head.put(fillsCol, FILLS_HEADER, HEAD)
     // header cells only - no row is a click target yet (item 8 of the
     // original spec still holds for the data rows themselves)
@@ -1765,6 +1835,10 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
         flapRight(r, lay.todayPnlRight, signed(wasTodayPnl, decimals), signed(todayPnl, decimals), tone(props.market, todayPnl), turn, left, stagger)
         flapRight(r, lay.totalPnlRight, signed(wasTotalPnl, decimals), signed(totalPnl, decimals), tone(props.market, totalPnl), turn, left, stagger)
         flapRight(r, lay.totalPnlPctRight, pct(wasTotalPnlPct), pct(totalPnlPct), tone(props.market, totalPnlPct), turn, left, stagger)
+        for (const x of extras) {
+          const c = x.cells[i]
+          r.put(x.col + x.width - dispWidth(c.text), c.text, c.fg, c.bg, c.bold)
+        }
         if (showFills && fillLabels[i]) r.put(fillsCol, fillLabels[i], DIM)
       }
     }
