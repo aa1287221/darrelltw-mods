@@ -1,18 +1,19 @@
 /* @jsx h */
 import type { Register } from 'claude-code'
-import { BARS_MAX_AGE_MS, BARS_STALE_MS, CHART_BARS, COINGECKO_MARKETS_URL, CLOSE_GRACE_MS, CONFIG_PATH, CRYPTO_COOLDOWN_MS, CRYPTO_LOW_TOKENS, CRYPTO_SUPPLY_COOLDOWN_MS, CRYPTO_SUPPLY_TTL_MS, FEED_BACKOFF_MAX_MS, HOLDINGS_PATH, IN_FLIGHT_STUCK_MS, PIONEX_TICKERS_URL, PNL_CHROME_ROWS, QUOTES_PATH, QUOTE_STALE_MS, REQUESTS_PER_HOUR, SNOOZE_MS, SPARK_BATCH, TABLE_CHROME_ROWS, TW_YAHOO_INDEX, USER_CONFIG_REL, US_INDEX_SYMBOL, US_INDICES, runtimeDir } from './constants.ts'
+import { ACCOUNT_LINES, BARS_MAX_AGE_MS, BARS_STALE_MS, CHART_BARS, COINGECKO_MARKETS_URL, CLOSE_GRACE_MS, CONFIG_PATH, CRYPTO_COOLDOWN_MS, CRYPTO_LOW_TOKENS, CRYPTO_SUPPLY_COOLDOWN_MS, CRYPTO_SUPPLY_TTL_MS, FEED_BACKOFF_MAX_MS, HOLDINGS_PATH, IN_FLIGHT_STUCK_MS, PIONEX_TICKERS_URL, PNL_CHROME_ROWS, QUOTES_PATH, QUOTE_STALE_MS, REQUESTS_PER_HOUR, SNOOZE_MS, SPARK_BATCH, TABLE_CHROME_ROWS, TW_YAHOO_INDEX, USER_CONFIG_REL, US_INDEX_SYMBOL, US_INDICES, runtimeDir } from './constants.ts'
 import { CRYPTO_COINGECKO_ID, MARKETS, currentSession, hasFutures, hhmm, lastCloseAt, localParts, phaseOf, pickMarket, sessionNote, taipeiNote } from './markets.ts'
 import type { MarketId, MarketMode, MarketSwitcher, Phase, SortKey, Ticker, TwSourceName, View } from './markets.ts'
 import { PNL_SORT_KEYS, PNL_SORT_LABELS, TIMEFRAMES, demoBars, demoPrice, quoteRow, roundPrice, sortHoldings } from './quotes.ts'
 import type { Bar, ChartMode, FileQuote, IndexRow, PnlSortKey, PricedHolding, QuoteRow, Timeframe } from './quotes.ts'
 import { asRecord, defaultConfig, effectiveColumns, feedInterval, feedMarkets, fitBand, mergeConfigRoots, num, parseConfigRoot, parseJsonRecord, requestsPerTick, str } from './config.ts'
 import type { BoardLayout, Config, FeedExtras, Fit } from './config.ts'
-import { holdingsFor, parseHoldingsFile, parseQuotes, pricedHoldings } from './files.ts'
+import { holdingsFor, parseAccountFile, parseHoldingsFile, parseQuotes, pricedHoldings } from './files.ts'
+import type { AccountFile } from './files.ts'
 import type { HoldingsFile, QuotesFile } from './files.ts'
 import { FEED_HEADERS, chartUrl, misChannel, misUrl, parseChartBars, parseMis, parseSpark, pionexSymbol, sparkUrl, yahooSymbol } from './feeds.ts'
 import { DIM, MARKET_SELECT_LABEL, MOON, MOON_BLUE, ORANGE, RIGHT_BUTTON_GROUP_COLS, SELECT_LABEL_CHROME_COLS, SUN, buildCycle, cycleButtonLabel, dispWidth, forkTabLabel, marketButtonLabel, marketSelectOptions, nextCycleStop, sameStop, stopOf, tabKey, tabLabel, tabRowWidth, tabsGroupWidth } from './switcher.ts'
 import type { CycleStop, MarketSelectValue, MarketStop } from './switcher.ts'
-import type { BoardProps as ClientBoardProps } from './board.tsx'
+import type { AccountSummary, BoardProps as ClientBoardProps } from './board.tsx'
 
 // tw-stock-mod: a watchlist band above the Claude Code prompt. Taiwan trading
 // hours show the Taiwan list, US trading hours show the US list, and the
@@ -176,6 +177,8 @@ type BoardProps = {
   pnlSortDir: 'asc' | 'desc'
   /** the first data row on screen, 0-based - a wheel tick moves it by `e.by`, 翻頁 by whole pages */
   holdingsScroll: number
+  /** tf pnl with a futures-account.json only (omitted, never undefined: see quoteRow) */
+  account?: AccountSummary
 }
 
 // Compile time only: the props buildProps hands the Client have to fit what
@@ -479,7 +482,9 @@ function buildProps(
   // back to the SAME time the watchlist footer already shows for this
   // market (quotesFile's dataAt), and only to `now` when neither exists.
   const holdingsAt = rawHoldingsAt || quotesFile?.dataAt || now
-  const pnlRows = fit.pnlRows
+  const account = view === 'pnl' && market === 'tf' ? accountFor(accountFile, fit.pnlRows) : undefined
+  // the summary lines come out of the holding rows, so the band keeps its height (#27)
+  const pnlRows = fit.pnlRows - (account?.lines ?? 0)
   const maxScroll = Math.max(0, priced.length - pnlRows)
   const holdingsScroll = Math.max(0, Math.min(maxScroll, pnlScroll))
 
@@ -550,7 +555,7 @@ function buildProps(
       view === 'chart'
         ? fit.chartRows
         : view === 'pnl'
-          ? pnlRows + PNL_CHROME_ROWS
+          ? pnlRows + PNL_CHROME_ROWS + (account?.lines ?? 0)
           : layout === 'full'
             ? quoteRows + TABLE_CHROME_ROWS
             : layout === 'compact'
@@ -577,7 +582,23 @@ function buildProps(
     pnlSortKey,
     pnlSortDir,
     holdingsScroll,
+    ...(account ? { account } : {}),
   }
+}
+
+/**
+ * The tf pnl view's account summary, or undefined when there is nothing to
+ * draw. Two lines when margin or any realized window is known and the rows
+ * leave at least one holding row under them; none otherwise, and a file with
+ * only fills still feeds the fills column.
+ */
+function accountFor(file: AccountFile | undefined, pnlRows: number): AccountSummary | undefined {
+  if (!file) return undefined
+  const { today, month, year } = file.realized
+  const known = file.margin !== null || today !== null || month !== null || year !== null
+  const lines = known && pnlRows - ACCOUNT_LINES >= 1 ? ACCOUNT_LINES : 0
+  if (lines === 0 && Object.keys(file.fills).length === 0) return undefined
+  return { ...file, lines }
 }
 
 // --- module state (memory only: a fresh session starts unsnoozed) ----------
@@ -595,6 +616,8 @@ let quotesFiles: Partial<Record<MarketId, QuotesFile>> = {}
 // stock file (runtime-dir, else the project override), tf only ever the
 // fetcher's futures-holdings.json. Neither expires - see parseHoldingsFile.
 let holdingsFiles: Partial<Record<MarketId, HoldingsFile>> = {}
+// the 永豐 futures account (futures-account.json); never expires, like holdings
+let accountFile: AccountFile | undefined
 // true once the 0.9-legacy-holdings-file warning has been logged this
 // session, so a file left behind at the project path is reported once
 // instead of on every poll tick (see the poll loop's use of it below)
@@ -1203,6 +1226,7 @@ export const register: Register = on => {
       const runtimeHoldingsText = await readOptional(`${runtime}stock-holdings.json`)
       const projectHoldingsText = await readOptional(HOLDINGS_PATH)
       const futuresHoldingsText = await readOptional(`${runtime}futures-holdings.json`)
+      const futuresAccountText = await readOptional(`${runtime}futures-account.json`)
 
       config = parseConfigRoot(mergedRoot)
       if (config.droppedFutures.length > 0 && !loggedDroppedFutures) {
@@ -1240,6 +1264,7 @@ export const register: Register = on => {
       holdingsFiles = {}
       fillHoldingsSlots(parseHoldingsFile(runtimeHoldingsText) ?? projectHoldings, ['tw', 'us', 'crypto'])
       fillHoldingsSlots(parseHoldingsFile(futuresHoldingsText), ['tf'])
+      accountFile = parseAccountFile(futuresAccountText)
       ready = true
       autoPage(now)
       // redraw while snoozed too, so the collapsed row's countdown ticks down
@@ -2460,7 +2485,7 @@ export const register: Register = on => {
     // Moves the scroll offset a whole page of holding rows at a time,
     // wrapping back to 0 past the last page - "paging sets the offset to
     // page*rows".
-    const pnlRows = Math.max(1, fit.pnlRows)
+    const pnlRows = Math.max(1, props.view === 'pnl' ? props.quoteRows : fit.pnlRows)
     const holdingsPageCount = Math.max(1, Math.ceil(props.holdings.length / pnlRows))
     const holdingsPageNum = Math.floor(props.holdingsScroll / pnlRows) + 1
     const onHoldingsPage = () => {

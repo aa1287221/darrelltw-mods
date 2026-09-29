@@ -51,6 +51,8 @@ export const SNOOZE_MS = 30 * 60 * 1000
 export const TABLE_QUOTE_ROWS = 5
 export const TABLE_CHROME_ROWS = 3 // header, rule, footer
 export const PNL_CHROME_ROWS = 3 // title, header, totals
+// tf pnl's account summary (#27), charged against the holding rows, not added to the band
+export const ACCOUNT_LINES = 2
 export const MAX_COLUMNS = 4
 // what one more symbol column costs in terminal columns - board.tsx's
 // MIN_HALF_WIDTH + TWO_COL_GUTTER (35 + 6), so 77 columns fit two, 118 three

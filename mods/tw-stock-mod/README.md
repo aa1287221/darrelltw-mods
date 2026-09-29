@@ -913,6 +913,33 @@ fixed 2 the way the stock markets use. `prevClose` is the contract's own
 `reference` (昨結), so 今日% is measured from settlement, not from a stale
 trade.
 
+**Account summary.** When the 永豐 fetcher also writes
+`futures-account.json` (see
+[references/quote-sources.md](references/quote-sources.md)), 期貨庫存 draws
+two lines between its title and the table (amounts below are made up):
+
+```
+風險 120% │ 權益 600,000 │ 可用 100,000 │ 距追繳 -2,150 點
+已實現 今日 +50,000 │ 本月 +62,500 │ 今年 -12,300（3勝4敗）│ 費稅 -900
+```
+
+距追繳 is how many index points the market can move against the net
+position before equity reaches the maintenance margin: `(權益 − 維持保證金)
+÷ Σ(口數 × multiplier)`, negative for a net long, positive for a net short,
+`—` with no net exposure, `0` once equity is at or under maintenance. A
+margin call replaces it with `追繳 8,000` in bold. 風險 turns the loss colour
+under a margin call or within 5 % of maintenance, and the warning colour
+below 100 %. 已實現 is gross P&L for today, this month and this year (the
+wins/losses count is the year's), 費稅 today's fee plus tax. While 台指期
+trades, a margin figure older than three minutes gets a dim `（資料 HH:MM）`.
+A narrow terminal drops 費稅, 今年, 本月, 可用 and 權益 (right to left); 風險,
+距追繳 and 今日 always stay. The two lines come out of the table's holding
+rows, so the band is never taller for them, and a band too short to keep a
+holding row under them skips them. A position with two or more fills adds a
+`4筆 23,410–23,520` column (fill count, entry-price range) when the terminal
+is wide enough. No file, or one that does not parse, leaves 期貨庫存 exactly
+as before.
+
 **Tick overlay.** On top of the 10-second snapshot loop the fetcher
 subscribes to 永豐's tick stream for every code it serves (stocks while the
 band wants `tw`, futures while it wants `tf`, following the heartbeat) and

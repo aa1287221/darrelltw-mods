@@ -45,6 +45,27 @@ export type QuoteRow = {
 }
 
 /** a holding, already priced by register.tsx - the 損益 view only formats these */
+/** futures-account.json's `margin`, the fields the summary reads (TWD; riskIndicator is the raw percentage) */
+export type AccountMargin = {
+  asOf: number
+  riskIndicator: number
+  equity: number
+  availableMargin: number
+  maintenanceMargin: number
+  marginCall: number
+}
+/** one realized window: gross pnl, fee/tax apart */
+export type RealizedWindow = { pnl: number; fee: number; tax: number; wins: number; losses: number }
+/** a fill's entry price; null = the broker sent 0 (unknown) */
+export type AccountFill = { qty: number; price: number | null }
+/** tf pnl only: the 永豐 account above the table. `lines` (0-2) is what register.tsx charged against the holding rows */
+export type AccountSummary = {
+  margin: AccountMargin | null
+  realized: { today: RealizedWindow | null; month: RealizedWindow | null; year: RealizedWindow | null }
+  fills: Record<string, AccountFill[]>
+  lines: number
+}
+
 export type Holding = {
   code: string
   name: string
@@ -163,6 +184,8 @@ export type BoardProps = {
   pnlSortDir: 'asc' | 'desc'
   /** the first data row on screen, 0-based - a wheel tick moves it, 翻頁 by whole pages; see register.tsx's pnlScroll */
   holdingsScroll: number
+  /** tf pnl with a futures-account.json only; absent otherwise, so every other frame is unchanged */
+  account?: AccountSummary
 }
 
 // `turn` is the change the rows last turned for, and `since` is when that turn
@@ -579,7 +602,7 @@ function clipTo(s: string, width: number): string {
   return out
 }
 
-type Cell = { ch: string; fg?: string; bg?: string }
+type Cell = { ch: string; fg?: string; bg?: string; bold?: boolean }
 
 // --- a row of the band: cells with independent fg/bg, column-addressed -----
 class Row {
@@ -597,9 +620,9 @@ class Row {
   padTo(col: number) {
     while (this.w < col) this.add({ ch: ' ' })
   }
-  put(col: number, text: string, fg?: string, bg?: string) {
+  put(col: number, text: string, fg?: string, bg?: string, bold?: boolean) {
     this.padTo(Math.max(0, col))
-    for (const ch of Array.from(text)) this.add({ ch, fg, bg })
+    for (const ch of Array.from(text)) this.add(bold ? { ch, fg, bg, bold } : { ch, fg, bg })
   }
   putRight(right: number, text: string, fg?: string, bg?: string) {
     this.put(right - dispWidth(text), text, fg, bg)
@@ -626,17 +649,18 @@ class Row {
 // parameter since Row is built before we are inside the component's JSX scope
 function rowChildren(row: Row, Text: TextTag): RenderNode[] {
   const out: RenderNode[] = []
-  let run: { text: string; fg?: string; bg?: string } | null = null
+  let run: { text: string; fg?: string; bg?: string; bold?: boolean } | null = null
   const flush = () => {
     if (!run) return
-    out.push(!run.fg && !run.bg ? run.text : <Text color={run.fg} backgroundColor={run.bg}>{run.text}</Text>)
+    if (run.bold) out.push(<Text color={run.fg} backgroundColor={run.bg} bold>{run.text}</Text>)
+    else out.push(!run.fg && !run.bg ? run.text : <Text color={run.fg} backgroundColor={run.bg}>{run.text}</Text>)
     run = null
   }
   for (const c of row.cells) {
-    if (run && run.fg === c.fg && run.bg === c.bg) run.text += c.ch
+    if (run && run.fg === c.fg && run.bg === c.bg && run.bold === c.bold) run.text += c.ch
     else {
       flush()
-      run = { text: c.ch, fg: c.fg, bg: c.bg }
+      run = { text: c.ch, fg: c.fg, bg: c.bg, bold: c.bold }
     }
   }
   flush()
@@ -786,6 +810,102 @@ function maxColumns(width: number): number {
   let n = 1
   while (n < MAX_COLUMNS && fitsColumns(width, n + 1)) n += 1
   return n
+}
+
+// --- 期貨庫存 account summary (#27) --------------------------------------------
+/** margin older than this while tf trades gets a （資料 HH:MM） suffix */
+const ACCOUNT_STALE_MS = 3 * 60_000
+type SummaryPiece = { text: string; fg: string; bold?: boolean }
+/** one `│`-separated field; `keep` fields survive any width, `glued` ones take no separator */
+type SummaryField = { pieces: SummaryPiece[]; keep?: boolean; glued?: boolean }
+
+const fieldsWidth = (fields: SummaryField[]) =>
+  fields.reduce((w, f, i) => w + (i > 0 && !f.glued ? separator(fields[i - 1]).length : 0) + f.pieces.reduce((n, p) => n + dispWidth(p.text), 0), 0)
+// a field that ends in a full-width ）already has its air
+function separator(prev: SummaryField): string {
+  return prev.pieces[prev.pieces.length - 1].text.endsWith('）') ? '│ ' : ' │ '
+}
+
+/** draws `fields` from column 1, dropping optional ones right to left until the line fits `width` */
+function putFields(row: Row, fields: SummaryField[], width: number): void {
+  const shown = [...fields]
+  while (1 + fieldsWidth(shown) > width - 1) {
+    const drop = shown.map(f => !f.keep).lastIndexOf(true)
+    if (drop < 0) break
+    shown.splice(drop, 1)
+  }
+  let col = 1
+  for (const [i, f] of shown.entries()) {
+    if (i > 0 && !f.glued) {
+      const sep = separator(shown[i - 1])
+      row.put(col, sep, DIM)
+      col += sep.length
+    }
+    for (const p of f.pieces) {
+      row.put(col, p.text, p.fg, undefined, p.bold)
+      col += dispWidth(p.text)
+    }
+  }
+}
+
+function drawAccount(line1: Row, line2: Row, account: AccountSummary, props: BoardProps, width: number): void {
+  const loss = tone(props.market, -1)
+  const m = account.margin
+  const fields1: SummaryField[] = []
+  if (!m) {
+    fields1.push({ pieces: [{ text: '風險 ', fg: DIM }, { text: '—', fg: DIM }], keep: true })
+  } else {
+    const mm = m.maintenanceMargin
+    // an all-zero (simulation) margin holds no position to colour
+    const riskFg =
+      m.marginCall > 0 || (mm > 0 && m.equity <= mm * 1.05) ? loss : mm > 0 && m.riskIndicator < 100 ? ORANGE : WHITE
+    fields1.push({ pieces: [{ text: '風險 ', fg: DIM }, { text: `${thousands(Math.floor(m.riskIndicator), 0)}%`, fg: riskFg }], keep: true })
+    fields1.push({ pieces: [{ text: '權益 ', fg: DIM }, { text: thousands(m.equity, 0), fg: WHITE }] })
+    fields1.push({ pieces: [{ text: '可用 ', fg: DIM }, { text: thousands(m.availableMargin, 0), fg: WHITE }] })
+    if (m.marginCall > 0) {
+      fields1.push({ pieces: [{ text: `追繳 ${thousands(m.marginCall, 0)}`, fg: loss, bold: true }], keep: true })
+    } else {
+      // index points the market can move against the net position before equity reaches maintenance
+      const exposure = props.holdings.reduce((sum, h) => sum + h.qty * h.multiplier, 0)
+      const points = mm > 0 && exposure !== 0 && m.equity > mm ? Math.trunc(-(m.equity - mm) / exposure) : 0
+      const text = mm <= 0 || exposure === 0 ? '—' : points === 0 ? '0' : `${signed(points, 0)} 點`
+      fields1.push({ pieces: [{ text: '距追繳 ', fg: DIM }, { text, fg: WHITE }], keep: true })
+    }
+    if (props.phase === 'open' && props.now - m.asOf > ACCOUNT_STALE_MS) {
+      fields1.push({ pieces: [{ text: `（資料 ${hhmmLocal(m.asOf)}）`, fg: DIM }], glued: true })
+    }
+  }
+  putFields(line1, fields1, width)
+
+  const { today, month, year } = account.realized
+  const amount = (w: RealizedWindow | null): SummaryPiece =>
+    w ? { text: signed(w.pnl, 0), fg: tone(props.market, w.pnl) } : { text: '—', fg: DIM }
+  const costs = today ? -(today.fee + today.tax) : 0
+  putFields(
+    line2,
+    [
+      { pieces: [{ text: '已實現 今日 ', fg: DIM }, amount(today)], keep: true },
+      { pieces: [{ text: '本月 ', fg: DIM }, amount(month)] },
+      {
+        pieces: [
+          { text: '今年 ', fg: DIM },
+          amount(year),
+          ...(year ? [{ text: `（${year.wins}勝${year.losses}敗）`, fg: DIM }] : []),
+        ],
+      },
+      { pieces: [{ text: '費稅 ', fg: DIM }, today ? { text: signed(costs, 0), fg: tone(props.market, costs) } : { text: '—', fg: DIM }] },
+    ],
+    width,
+  )
+}
+
+/** `4筆 23,410–23,520`: fill count and entry-price range, for 2 or more fills; '' otherwise */
+function fillsLabel(fills: AccountFill[] | undefined, decimals: number | undefined): string {
+  if (!fills || fills.length < 2) return ''
+  const prices = fills.map(f => f.price).filter((p): p is number => p !== null)
+  if (prices.length === 0) return `${fills.length}筆`
+  const digits = decimals ?? (prices.every(Number.isInteger) ? 0 : 2)
+  return `${fills.length}筆 ${thousands(Math.min(...prices), digits)}–${thousands(Math.max(...prices), digits)}`
 }
 
 // --- pnl (損益) layout -------------------------------------------------------
@@ -1476,6 +1596,10 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     const holdings = props.holdings
     const scroll = props.holdingsScroll
     const page = holdings.slice(scroll, scroll + props.quoteRows)
+    const account = props.account
+    // the account summary sits between the title and the header (#27)
+    const top = account?.lines ?? 0
+    if (account && top > 0) drawAccount(rows[1], rows[2], account, props, surface.columns || 80)
 
     // row 0: title - what this is, where the numbers came from, how many
     // positions, and when the snapshot was taken. A demo price anywhere on
@@ -1495,7 +1619,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // records each sortable cell's own column span so the picker below can
     // hit-test a click against it without duplicating this layout a second
     // time.
-    const head = rows[1]
+    const head = rows[1 + top]
     const sortHits: { key: PnlSortKey; x0: number; x1: number }[] = []
     const arrow = props.pnlSortDir === 'desc' ? '↓' : '↑'
     const sortable = (key: PnlSortKey, label: string) => (props.pnlSortKey === key ? `${arrow}${label}` : label)
@@ -1521,13 +1645,13 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // header cells only - no row is a click target yet (item 8 of the
     // original spec still holds for the data rows themselves)
     picker.hit = (x, y) => {
-      if (y !== 1) return undefined
+      if (y !== 1 + top) return undefined
       const hit = sortHits.find(h => x >= h.x0 && x < h.x1)
       return hit ? { sortPnl: hit.key } : undefined
     }
 
     if (holdings.length === 0) {
-      rows[2].put(
+      rows[2 + top].put(
         lay.symCol,
         futures
           ? '沒有期貨庫存：永豐 fetcher 沒有回報任何部位'
@@ -1546,7 +1670,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
       // alone, from quotesFile.prev - see pricedHoldings).
       for (let i = 0; i < page.length; i++) {
         const h = page[i]
-        const r = rows[2 + i]
+        const r = rows[2 + top + i]
         const turned = h.was?.code !== undefined
         const rowStart = turned ? rowTurn - i * PAGE_ROW_STAGGER : RESTING
 
@@ -1604,6 +1728,9 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
         flapRight(r, lay.todayPnlRight, signed(wasTodayPnl, decimals), signed(todayPnl, decimals), tone(props.market, todayPnl), turn, left, stagger)
         flapRight(r, lay.totalPnlRight, signed(wasTotalPnl, decimals), signed(totalPnl, decimals), tone(props.market, totalPnl), turn, left, stagger)
         flapRight(r, lay.totalPnlPctRight, pct(wasTotalPnlPct), pct(totalPnlPct), tone(props.market, totalPnlPct), turn, left, stagger)
+        const fills = account ? fillsLabel(account.fills[h.code], h.decimals) : ''
+        const fillsCol = lay.totalPnlPctRight + 2
+        if (fills && fillsCol + dispWidth(fills) <= (surface.columns || 80) - 1) r.put(fillsCol, fills, DIM)
       }
     }
 
