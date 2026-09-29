@@ -883,6 +883,177 @@ class PositionsClock:
         self.last = self.now()
 
 
+ACCOUNT_SLOW_REFRESH_S = 600.0  # realized month/year windows: a big range, and today's row already moves on the fast clock
+
+# margin() field -> futures-account.json key (see references/quote-sources.md)
+ACCOUNT_MARGIN_KEYS = (
+    ("risk_indicator", "riskIndicator"), ("equity", "equity"), ("available_margin", "availableMargin"),
+    ("initial_margin", "initialMargin"), ("maintenance_margin", "maintenanceMargin"), ("margin_call", "marginCall"),
+    ("today_balance", "todayBalance"), ("yesterday_balance", "yesterdayBalance"),
+    ("deposit_withdrawal", "depositWithdrawal"), ("future_open_position", "openPnl"),
+    ("today_future_open_position", "todayOpenPnl"), ("future_settle_profitloss", "settledPnl"),
+    ("fee", "fee"), ("tax", "tax"), ("plus_margin", "plusMargin"), ("plus_margin_indicator", "plusMarginIndicator"),
+)
+
+
+def taipei_date(epoch_s: float) -> date:
+    """The Taipei calendar day, whatever the machine's zone - the broker's P/L dates are Taipei days."""
+    return datetime.fromtimestamp(epoch_s, TAIPEI_TZ).date()
+
+
+def account_number(value) -> int | float:
+    """A broker amount as a JSON number: whole values stay ints (fee/tax arrive as ints, pnl as floats)."""
+    number = float(value or 0)
+    return int(number) if number.is_integer() else number
+
+
+def account_margin_section(margin, as_of_ms: int) -> dict:
+    """margin() -> the `margin` section, 1:1 - riskIndicator stays the raw percentage. An all-zero
+    simulation answer is a valid section; deciding what to show is the band's job."""
+    section = {key: account_number(field(margin, name, 0)) for name, key in ACCOUNT_MARGIN_KEYS}
+    section["asOf"] = as_of_ms
+    return section
+
+
+def account_fill_rows(details: list) -> list[dict]:
+    """list_position_detail rows -> fills; qty carries the direction sign like futures-holdings.json.
+    Every row is kept (a split fill repeats its dseq); a 0 price is unknown, so it becomes null."""
+    rows = []
+    for det in details:
+        qty = float(field(det, "quantity", 0) or 0)
+        if "Sell" in str(field(det, "direction", "Buy")):
+            qty = -qty
+        price = float(field(det, "price", 0) or 0)
+        day = str(field(det, "date", ""))
+        if len(day) == 8 and day.isdigit():
+            day = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+        rows.append(
+            {"date": day, "dseq": str(field(det, "dseq", "")), "qty": account_number(qty),
+             "price": account_number(price) if price > 0 else None, "pnl": account_number(field(det, "pnl", 0))}
+        )
+    return rows
+
+
+def parse_pl_date(value) -> date | None:
+    text = str(value or "").replace("-", "")[:8]
+    try:
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    except ValueError:
+        return None
+
+
+def realized_window(rows: list, start: date, end: date, as_of_ms: int) -> dict:
+    """Sum list_profit_loss rows dated in [start, end], both ends inclusive. pnl is gross (fee/tax
+    separate). No entry/cover price is kept: 0 there means unknown, and the sums do not need them."""
+    pnl = fee = tax = trades = wins = losses = 0
+    for row in rows:
+        day = parse_pl_date(field(row, "date", ""))
+        if day is not None and not start <= day <= end:
+            continue  # the query is ranged already; this only guards against a widened answer
+        row_pnl = float(field(row, "pnl", 0) or 0)
+        pnl += row_pnl
+        fee += float(field(row, "fee", 0) or 0)
+        tax += float(field(row, "tax", 0) or 0)
+        trades += 1
+        wins += 1 if row_pnl > 0 else 0
+        losses += 1 if row_pnl < 0 else 0
+    return {
+        "asOf": as_of_ms, "pnl": account_number(pnl), "fee": account_number(fee), "tax": account_number(tax),
+        "trades": trades, "wins": wins, "losses": losses,
+    }
+
+
+def realized_window_starts(today: date) -> dict[str, date]:
+    return {"today": today, "month": today.replace(day=1), "year": today.replace(month=1, day=1)}
+
+
+def build_account_payload(margin: dict | None, fills: dict | None, realized: dict, as_of_ms: int) -> dict:
+    """futures-account.json's shape; a section not yet queried successfully is null."""
+    return {"asOf": as_of_ms, "source": "永豐", "margin": margin, "fills": fills, "realized": realized}
+
+
+class AccountFetcher:
+    """Futures account summary state. poll() runs once per tf tick: the fast clock (60 s) gates
+    margin, fills and today's realized P/L, the slow clock (600 s) the month/year windows. A section
+    that fails keeps its last value and asOf, logs once per change of error, and never raises out -
+    account data is not quotes, so it can not count toward the give-up tally."""
+
+    def __init__(self, fast_clock=None, slow_clock=None, now_ms=None, today=None):
+        self.fast = fast_clock or PositionsClock(POSITIONS_REFRESH_S)
+        self.slow = slow_clock or PositionsClock(ACCOUNT_SLOW_REFRESH_S)
+        self.now_ms = now_ms or (lambda: int(time.time() * 1000))
+        self.today = today or (lambda: taipei_date(time.time()))
+        self.margin: dict | None = None
+        self.fills: dict | None = None
+        self.realized: dict = {"today": None, "month": None, "year": None}
+        self.last_error: dict = {}
+
+    def _attempt(self, section: str, call):
+        """call() -> value, or None after logging (once per change of message) a failure."""
+        try:
+            value = call()
+        except Exception as err:  # noqa: BLE001 - an SDK/network error keeps this section's last value
+            message = f"{type(err).__name__}: {err}"
+            if self.last_error.get(section) != message:
+                self.last_error[section] = message
+                log(f"期貨帳戶 {section} 查詢失敗（保留上一份）: {message}")
+            return None
+        self.last_error.pop(section, None)
+        return value
+
+    def poll(self, api, positions: list) -> dict | None:
+        """The payload to write, or None: no signed futures account (nothing is queried), or no
+        section was due this tick - the file keeps its last write, so the loop does not rewrite it."""
+        account = getattr(api, "futopt_account", None)
+        if account is None or not getattr(account, "signed", True):
+            return None
+        queried = False
+        if self.fast.due():
+            queried = True
+            now_ms = self.now_ms()
+            self.fast.fetched()  # attempt-based: a failing query waits its period, not every tick
+            margin = self._attempt("margin", lambda: api.margin(account))
+            if margin is not None:
+                self.margin = account_margin_section(margin, now_ms)
+            self._poll_fills(api, account, positions)
+            today = self.today()
+            self._poll_window(api, account, "today", today, today)
+        if self.slow.due():
+            queried = True
+            self.slow.fetched()
+            today = self.today()
+            starts = realized_window_starts(today)
+            for name in ("month", "year"):
+                self._poll_window(api, account, name, starts[name], today)
+        if not queried:
+            return None
+        return build_account_payload(self.margin, self.fills, self.realized, self.now_ms())
+
+    def _poll_fills(self, api, account, positions: list) -> None:
+        fills: dict = {}
+        failed = False
+        for pos in positions:
+            code = str(field(pos, "code", "")).strip()
+            if not code or float(field(pos, "quantity", 0) or 0) == 0:
+                continue
+            details = self._attempt(f"fills {code}", lambda: api.list_position_detail(account, detail_id=field(pos, "id", "")))
+            if details is not None:
+                fills.setdefault(code, []).extend(account_fill_rows(details or []))
+                continue
+            failed = True
+            if code not in fills and self.fills and code in self.fills:
+                fills[code] = self.fills[code]  # keep the last fills for a code whose query failed
+        if fills or not failed:
+            self.fills = fills
+
+    def _poll_window(self, api, account, name: str, start: date, end: date) -> None:
+        rows = self._attempt(
+            f"realized {name}", lambda: api.list_profit_loss(account, begin_date=start.isoformat(), end_date=end.isoformat())
+        )
+        if rows is not None:
+            self.realized[name] = realized_window(list(rows or []), start, end, self.now_ms())
+
+
 def held_position_codes(positions: list, watch: set) -> list[str]:
     """The codes the positions hold (qty != 0, the rows build_holdings_payload
     keeps) that the watchlist does not already cover, in positions order."""
@@ -1058,6 +1229,7 @@ def main() -> None:
     holdings_path = out_dir / "stock-holdings.json"
     futures_out_path = out_dir / "futures-quotes.json"
     futures_holdings_path = out_dir / "futures-holdings.json"
+    futures_account_path = out_dir / "futures-account.json"
     futures_codes = split_futures_codes(args.futures)
 
     # The band appends this process's stderr to stock-shioaji.log and the SDK
@@ -1151,6 +1323,7 @@ def main() -> None:
     tick_stats = new_tick_stats()
     stock_positions_clock = PositionsClock(POSITIONS_REFRESH_S)
     futures_positions_clock = PositionsClock(POSITIONS_REFRESH_S)
+    account_fetcher = AccountFetcher()
     try:
         positions = fetch_positions(api)
         stock_positions_clock.fetched()
@@ -1397,6 +1570,11 @@ def main() -> None:
                 if futures_holdings_payload:
                     if write_atomic(futures_holdings_path, futures_holdings_payload):
                         log(f"{len(futures_holdings_payload['holdings'])} 檔期貨庫存 -> {futures_holdings_path}")
+
+                # account data is not quotes: poll() never raises and touches neither `attempted` nor `failed`
+                account_payload = account_fetcher.poll(api, futures_positions)
+                if account_payload and write_atomic(futures_account_path, account_payload):
+                    log(f"期貨帳戶 -> {futures_account_path}")
 
             # A session that died (token expired, connection dropped for good)
             # fails every snapshot - raising, or answering nothing priced -

@@ -7,6 +7,7 @@ import { TIMEFRAMES } from './quotes.ts'
 import type { Bar, FileQuote, Holding, IndexRow, PricedHolding, Timeframe } from './quotes.ts'
 import { asRecord, num, parseHoldingsList, positive, str } from './config.ts'
 import type { Config } from './config.ts'
+import type { AccountFill, AccountMargin, AccountSummary, RealizedWindow } from './board.tsx'
 
 export type QuotesFile = {
   asOf: number
@@ -306,4 +307,76 @@ export function pricedHoldings(
       ...(wasPrice !== undefined && wasPrice !== price ? { was: { price: wasPrice } } : {}),
     }
   })
+}
+
+// --- futures account file (futures-account.json, runtime dir only) ----------
+export type AccountFile = Omit<AccountSummary, 'lines'>
+
+const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
+
+function parseMargin(value: unknown): AccountMargin | null | undefined {
+  if (value === null) return null
+  const m = asRecord(value)
+  const keys = ['asOf', 'riskIndicator', 'equity', 'availableMargin', 'maintenanceMargin', 'marginCall'] as const
+  if (!m || !keys.every(k => finite(m[k]))) return undefined
+  return {
+    asOf: m.asOf as number,
+    riskIndicator: m.riskIndicator as number,
+    equity: m.equity as number,
+    availableMargin: m.availableMargin as number,
+    maintenanceMargin: m.maintenanceMargin as number,
+    marginCall: m.marginCall as number,
+  }
+}
+
+function parseWindow(value: unknown): RealizedWindow | null | undefined {
+  if (value === null) return null
+  const w = asRecord(value)
+  if (!w || !finite(w.pnl) || !finite(w.fee) || !finite(w.tax) || !finite(w.wins) || !finite(w.losses)) return undefined
+  return { pnl: w.pnl, fee: w.fee, tax: w.tax, wins: w.wins, losses: w.losses }
+}
+
+function parseFills(value: unknown): Record<string, AccountFill[]> | undefined {
+  if (value === null || value === undefined) return {}
+  const obj = asRecord(value)
+  if (!obj) return undefined
+  const out: Record<string, AccountFill[]> = {}
+  for (const [code, rows] of Object.entries(obj)) {
+    if (!Array.isArray(rows)) return undefined
+    const fills: AccountFill[] = []
+    for (const raw of rows as unknown[]) {
+      const row = asRecord(raw)
+      if (!row || !finite(row.qty) || !(row.price === null || finite(row.price))) return undefined
+      fills.push({ qty: row.qty, price: row.price as number | null })
+    }
+    out[code] = fills
+  }
+  return out
+}
+
+/**
+ * `futures-account.json` - the 永豐 fetcher's margin, fills and realized P/L
+ * (see references/quote-sources.md). Any section that is not the fetcher's
+ * shape makes the whole file unreadable, which the band treats as no file:
+ * a half-understood account summary is worse than none. Like the holdings
+ * file it never expires; the board prints the margin's age instead.
+ */
+export function parseAccountFile(text: string | undefined): AccountFile | undefined {
+  if (!text) return undefined
+  let root: Record<string, unknown> | undefined
+  try {
+    root = asRecord(JSON.parse(text) as unknown)
+  } catch {
+    return undefined
+  }
+  if (!root) return undefined
+  const margin = parseMargin(root.margin)
+  const realizedRaw = asRecord(root.realized)
+  const fills = parseFills(root.fills)
+  if (margin === undefined || !realizedRaw || !fills) return undefined
+  const today = parseWindow(realizedRaw.today)
+  const month = parseWindow(realizedRaw.month)
+  const year = parseWindow(realizedRaw.year)
+  if (today === undefined || month === undefined || year === undefined) return undefined
+  return { margin, realized: { today, month, year }, fills }
 }
