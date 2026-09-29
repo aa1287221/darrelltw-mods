@@ -485,6 +485,10 @@ const LIVE_LONG = '風險 ≈121% │ 權益 ≈605,000 │ 可用 ≈105,000 �
   delete h.holdings[1].multiplier
   const noMult = await frame({ accountText: withRef(REF_LONG), holdingsFile: h, quotes: liveQuotes() })
   ok(lineOf(noMult.rows[1]).startsWith('風險 120% │ 權益 600,000') && !lineOf(noMult.rows[1]).includes('≈'), `21: MXFJ6 holdings row has no multiplier: broker figures: "${lineOf(noMult.rows[1])}"`)
+  const noIm = JSON.parse(withRef(REF_LONG))
+  delete noIm.margin.initialMargin
+  const noInitial = await frame({ accountText: JSON.stringify(noIm), quotes: liveQuotes() })
+  ok(lineOf(noInitial.rows[1]) === LINE1, `21: margin without initialMargin: file read, broker figures: "${lineOf(noInitial.rows[1])}"`)
   const notHeld = await frame({ accountText: withRef({ ...REF_LONG, TXFJ6: { qty: 1, price: 17000 } }), quotes: liveQuotes() })
   ok(lineOf(notHeld.rows[1]) === LINE1, `21: a ref code with no holdings row and no quote: broker figures: "${lineOf(notHeld.rows[1])}"`)
 }

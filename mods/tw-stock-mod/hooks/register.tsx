@@ -483,8 +483,10 @@ function buildProps(
   // market (quotesFile's dataAt), and only to `now` when neither exists.
   const holdingsAt = rawHoldingsAt || quotesFile?.dataAt || now
   // the live estimate only while tf trades: a held closing snapshot must not move the account
-  const live = phase === 'open' && accountFile ? accountEstimate(accountFile.margin, rawHoldings, quotesFile) : undefined
-  const account = view === 'pnl' && market === 'tf' ? accountFor(accountFile, fit.pnlRows, live) : undefined
+  const account =
+    view === 'pnl' && market === 'tf'
+      ? accountFor(accountFile, fit.pnlRows, phase === 'open' && accountFile ? accountEstimate(accountFile.margin, rawHoldings, quotesFile) : undefined)
+      : undefined
   // the summary lines come out of the holding rows, so the band keeps its height (#27)
   const pnlRows = fit.pnlRows - (account?.lines ?? 0)
   const maxScroll = Math.max(0, priced.length - pnlRows)
@@ -592,7 +594,8 @@ function buildProps(
  * The tf pnl view's account summary, or undefined when there is nothing to
  * draw. Two lines when margin or any realized window is known and the rows
  * leave at least one holding row under them; none otherwise, and a file with
- * only fills still feeds the fills column.
+ * only fills still feeds the fills column. `live` is accountEstimate's
+ * re-estimated margin, passed through for line 1.
  */
 function accountFor(file: AccountFile | undefined, pnlRows: number, live: AccountLive | undefined): AccountSummary | undefined {
   if (!file) return undefined
