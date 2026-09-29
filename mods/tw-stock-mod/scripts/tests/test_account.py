@@ -25,10 +25,10 @@ TODAY = dt.date(2026, 9, 29)
 NOW_MS = 1790000000000
 
 MARGIN_FIELDS = dict(
-    risk_indicator=105.0, equity=1001224, available_margin=54874, initial_margin=946350,
-    maintenance_margin=725500, margin_call=0, today_balance=990000, yesterday_balance=700000,
-    deposit_withdrawal=0, future_open_position=11224, today_future_open_position=5000,
-    future_settle_profitloss=344000, fee=3400, tax=200, plus_margin=0, plus_margin_indicator=0,
+    risk_indicator=120.0, equity=600000, available_margin=100000, initial_margin=500000,
+    maintenance_margin=385000, margin_call=0, today_balance=590000, yesterday_balance=541000,
+    deposit_withdrawal=0, future_open_position=10000, today_future_open_position=4000,
+    future_settle_profitloss=50000, fee=800, tax=100, plus_margin=0, plus_margin_indicator=0,
 )
 # margin() field -> payload key, spelled out so a renamed key is caught
 MARGIN_KEYS = dict(
@@ -84,7 +84,7 @@ class FakeApi:
 
 
 def position(pos_id, code, qty, direction="Buy"):
-    return NS(id=pos_id, code=code, quantity=qty, direction=direction, price=47900.0, last_price=47950.0, pnl=0)
+    return NS(id=pos_id, code=code, quantity=qty, direction=direction, price=23400.0, last_price=23450.0, pnl=0)
 
 
 def detail(dseq, qty, price, direction="Buy", date="2026-09-29", pnl=0):
@@ -92,7 +92,7 @@ def detail(dseq, qty, price, direction="Buy", date="2026-09-29", pnl=0):
               last_price=price, pnl=pnl, fee=0)
 
 
-def pl_row(date, pnl, fee=0, tax=0, entry=47000.0, cover=47100.0, direction="Buy", qty=1, code="TMFJ6"):
+def pl_row(date, pnl, fee=0, tax=0, entry=23300.0, cover=23350.0, direction="Buy", qty=1, code="TMFJ6"):
     return NS(id="x", code=code, date=date, direction=direction, quantity=qty, entry_price=entry,
               cover_price=cover, pnl=pnl, fee=fee, tax=tax)
 
@@ -122,7 +122,7 @@ def test_margin_maps_every_field_and_keeps_raw_risk_percentage():
     assert set(margin) == set(MARGIN_KEYS.values()) | {"asOf"}
     for sdk_name, key in MARGIN_KEYS.items():
         assert margin[key] == MARGIN_FIELDS[sdk_name], key
-    assert margin["riskIndicator"] == 105  # a percentage number, not 1.05
+    assert margin["riskIndicator"] == 120  # a percentage number, not 1.05
     assert margin["asOf"] == NOW_MS
     assert payload["asOf"] == NOW_MS and payload["source"] == "永豐"
 
@@ -143,7 +143,7 @@ def test_all_zero_simulation_margin_still_produces_a_payload():
 def test_fills_signed_for_sell_counted_and_repeated_dseq_kept():
     api, (acct, *_rest) = FakeApi(), make()
     api.details = {
-        "p1": [detail("tA0x1", 3, 47883.0, "Sell"), detail("tA0x1", 2, 47883.0, "Sell"), detail("tA0x2", 5, 48140.0, "Sell")],
+        "p1": [detail("tA0x1", 3, 23400.0, "Sell"), detail("tA0x1", 2, 23400.0, "Sell"), detail("tA0x2", 5, 23520.0, "Sell")],
         "p2": [detail("tB0x1", 4, 17000.0, "Buy")],
     }
     positions = [position("p1", "TMFJ6", 10, "Sell"), position("p2", "TXFJ6", 4, "Buy")]
@@ -158,9 +158,9 @@ def test_fills_signed_for_sell_counted_and_repeated_dseq_kept():
 
 def test_fill_with_zero_price_stores_null_not_zero():
     api, (acct, *_rest) = FakeApi(), make()
-    api.details = {"p1": [detail("tA0x1", 1, 0.0), detail("tA0x2", 1, 47000.0)]}
+    api.details = {"p1": [detail("tA0x1", 1, 0.0), detail("tA0x2", 1, 23450.0)]}
     fills = acct.poll(api, [position("p1", "TMFJ6", 2)])["fills"]["TMFJ6"]
-    assert [f["price"] for f in fills] == [None, 47000.0]
+    assert [f["price"] for f in fills] == [None, 23450.0]
 
 
 def test_no_positions_gives_empty_fills_and_no_detail_query():
@@ -213,9 +213,9 @@ def test_window_bounds_inclusive_both_ends():
 
 
 def test_zero_entry_and_cover_price_is_dropped_not_stored_but_pnl_counts():
-    rows = [pl_row("20260929", 344000, entry=0.0, cover=0.0)]
+    rows = [pl_row("20260929", 50000, entry=0.0, cover=0.0)]
     w = fetcher.realized_window(rows, TODAY, TODAY, NOW_MS)
-    assert (w["pnl"], w["trades"], w["wins"]) == (344000, 1, 1)
+    assert (w["pnl"], w["trades"], w["wins"]) == (50000, 1, 1)
     assert set(w) == {"asOf", "pnl", "fee", "tax", "trades", "wins", "losses"}  # no price key at all
 
 
@@ -273,7 +273,7 @@ def test_between_due_ticks_the_payload_is_still_returned_from_cache():
 def test_raising_margin_keeps_last_value_and_asof_writes_rest_logs_once(capsys):
     api, (acct, fast, slow, state) = FakeApi(), make()
     first = acct.poll(api, [position("p1", "TMFJ6", 1)])
-    api.details = {"p1": [detail("tA0x1", 1, 47000.0)]}
+    api.details = {"p1": [detail("tA0x1", 1, 23450.0)]}
     api.margin_error = RuntimeError("boom")
     capsys.readouterr()
     for _ in range(3):
@@ -345,7 +345,7 @@ def test_absent_account_no_file_no_query():
 
 def test_list_profit_loss_summary_never_called_across_a_full_cycle():
     api, (acct, fast, slow, _s) = FakeApi(), make()
-    api.details = {"p1": [detail("tA0x1", 1, 47000.0)]}
+    api.details = {"p1": [detail("tA0x1", 1, 23450.0)]}
     for _ in range(3):
         acct.poll(api, [position("p1", "TMFJ6", 1)])
         fast.t += 600; slow.t += 600
@@ -354,7 +354,7 @@ def test_list_profit_loss_summary_never_called_across_a_full_cycle():
 
 def test_fills_keep_last_value_when_one_code_query_fails():
     api, (acct, fast, _slow, _s) = FakeApi(), make()
-    api.details = {"p1": [detail("tA0x1", 1, 47000.0)], "p2": [detail("tB0x1", 2, 17000.0)]}
+    api.details = {"p1": [detail("tA0x1", 1, 23450.0)], "p2": [detail("tB0x1", 2, 17000.0)]}
     positions = [position("p1", "TMFJ6", 1), position("p2", "TXFJ6", 2)]
     first = acct.poll(api, positions)["fills"]
     api.list_position_detail = lambda account, detail_id=None: (_ for _ in ()).throw(RuntimeError("detail down"))
@@ -365,7 +365,7 @@ def test_fills_keep_last_value_when_one_code_query_fails():
 
 def test_one_failing_code_keeps_its_own_last_fills_while_others_refresh():
     api, (acct, fast, _slow, _s) = FakeApi(), make()
-    api.details = {"p1": [detail("tA0x1", 1, 47000.0)], "p2": [detail("tB0x1", 2, 17000.0)]}
+    api.details = {"p1": [detail("tA0x1", 1, 23450.0)], "p2": [detail("tB0x1", 2, 17000.0)]}
     positions = [position("p1", "TMFJ6", 1), position("p2", "TXFJ6", 2)]
     acct.poll(api, positions)
     api.details = {"p2": [detail("tB0x1", 2, 17000.0), detail("tB0x2", 1, 17010.0)]}

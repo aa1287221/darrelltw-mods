@@ -295,21 +295,21 @@ give-up tally. An unsigned or missing account writes no file.
 ```json
 {
   "asOf": 1790000000000, "source": "永豐",
-  "margin": { "asOf": 1790000000000, "riskIndicator": 105, "equity": 1001224, "availableMargin": 54874,
-              "initialMargin": 946350, "maintenanceMargin": 725500, "marginCall": 0,
-              "todayBalance": 990000, "yesterdayBalance": 700000, "depositWithdrawal": 0,
-              "openPnl": 11224, "todayOpenPnl": 5000, "settledPnl": 344000, "fee": 3400, "tax": 200,
+  "margin": { "asOf": 1790000000000, "riskIndicator": 120, "equity": 600000, "availableMargin": 100000,
+              "initialMargin": 500000, "maintenanceMargin": 385000, "marginCall": 0,
+              "todayBalance": 590000, "yesterdayBalance": 541000, "depositWithdrawal": 0,
+              "openPnl": 10000, "todayOpenPnl": 4000, "settledPnl": 50000, "fee": 800, "tax": 100,
               "plusMargin": 0, "plusMarginIndicator": 0 },
-  "fills": { "TMFJ6": [ { "date": "2026-09-29", "dseq": "tA0x1", "qty": -3, "price": 47883, "pnl": -900 } ] },
+  "fills": { "TMFJ6": [ { "date": "2026-09-29", "dseq": "tA0x1", "qty": -3, "price": 23400, "pnl": -900 } ] },
   "realized": {
-    "today": { "asOf": 1790000000000, "pnl": 344000, "fee": 3400, "tax": 200, "trades": 4, "wins": 3, "losses": 1 },
-    "month": { "asOf": 1790000000000, "pnl": 351300, "fee": 0, "tax": 0, "trades": 6, "wins": 4, "losses": 2 },
-    "year":  { "asOf": 1790000000000, "pnl": 130280, "fee": 0, "tax": 0, "trades": 14, "wins": 5, "losses": 9 }
+    "today": { "asOf": 1790000000000, "pnl": 50000, "fee": 800, "tax": 100, "trades": 4, "wins": 3, "losses": 1 },
+    "month": { "asOf": 1790000000000, "pnl": 62000, "fee": 0, "tax": 0, "trades": 6, "wins": 4, "losses": 2 },
+    "year":  { "asOf": 1790000000000, "pnl": 118000, "fee": 0, "tax": 0, "trades": 14, "wins": 5, "losses": 9 }
   }
 }
 ```
 
-`riskIndicator` is the raw percentage (105 = 105 %). `fills[code]` has one row
+`riskIndicator` is the raw percentage (120 = 120 %). `fills[code]` has one row
 per fill (a split fill repeats its `dseq`); `qty` is signed by direction (Sell
 negative) like `futures-holdings.json`, and a `price` of 0 from the broker
 is written as `null`. `realized` windows sum gross `pnl` (fee and tax separate)
