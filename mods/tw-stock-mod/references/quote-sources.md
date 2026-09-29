@@ -283,6 +283,41 @@ contract rather than a lookup table. This route is `tf`'s only source: there
 is no Yahoo or MIS fallback, so a stale file shows `無報價`, not a demo walk.
 See the README's [Taiwan futures (tf)](../README.md#taiwan-futures-tf).
 
+**Futures account.** While `tf` work runs and the futures account is signed,
+the script also writes `futures-account.json` (`source: "永豐"`), read-only
+broker queries only: `api.margin()`, `api.list_position_detail()` per held
+position and `api.list_profit_loss()` (never `list_profit_loss_summary`, which
+disagrees with it on a same-day closing). Every section is `null` until its
+first successful query; a query that fails keeps the section's last value and
+its own `asOf`, is logged once per change of error, and never counts toward the
+give-up tally. An unsigned or missing account writes no file.
+
+```json
+{
+  "asOf": 1790000000000, "source": "永豐",
+  "margin": { "asOf": 1790000000000, "riskIndicator": 105, "equity": 1001224, "availableMargin": 54874,
+              "initialMargin": 946350, "maintenanceMargin": 725500, "marginCall": 0,
+              "todayBalance": 990000, "yesterdayBalance": 700000, "depositWithdrawal": 0,
+              "openPnl": 11224, "todayOpenPnl": 5000, "settledPnl": 344000, "fee": 3400, "tax": 200,
+              "plusMargin": 0, "plusMarginIndicator": 0 },
+  "fills": { "TMFJ6": [ { "date": "2026-09-29", "dseq": "tA0x1", "qty": -3, "price": 47883, "pnl": -900 } ] },
+  "realized": {
+    "today": { "asOf": 1790000000000, "pnl": 344000, "fee": 3400, "tax": 200, "trades": 4, "wins": 3, "losses": 1 },
+    "month": { "asOf": 1790000000000, "pnl": 351300, "fee": 0, "tax": 0, "trades": 6, "wins": 4, "losses": 2 },
+    "year":  { "asOf": 1790000000000, "pnl": 130280, "fee": 0, "tax": 0, "trades": 14, "wins": 5, "losses": 9 }
+  }
+}
+```
+
+`riskIndicator` is the raw percentage (105 = 105 %). `fills[code]` has one row
+per fill (a split fill repeats its `dseq`); `qty` is signed by direction (Sell
+negative) like `futures-holdings.json`, and a `price` of 0 from the broker
+is written as `null`. `realized` windows sum gross `pnl` (fee and tax separate)
+over Taipei dates: today, the 1st of the month to today, 1 Jan to today, both
+ends inclusive; `wins`/`losses` count rows with pnl above/below 0. `margin`,
+`fills` and `realized.today` refresh at most every 60 s, `realized.month` and
+`realized.year` at most every 600 s (and once at start).
+
 ## 4. 群益 Capital API, through `scripts/fetch-quotes-capital.py`
 
 The Windows counterpart of §3: another real-time route through a brokerage
