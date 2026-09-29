@@ -404,7 +404,8 @@ who opens it keeps their own preference — see
 The broker paths are more than a preference: `shioaji.python`/`capital.python`
 name the program the band runs, `*.env` the file it reads credentials from and
 `capital.dll` a directory it loads code from. A project file comes with a
-cloned repository, so those five keys are **user-level only** — a project file
+cloned repository, so those five keys — plus `shioaji.liquidationRiskPct`, the
+line 強平價 is drawn at — are **user-level only**: a project file
 that sets one is ignored for that key (the band logs it once), and the rest of
 its `shioaji`/`capital` block (`interval`, `indices`) still merges key by key.
 
@@ -419,7 +420,7 @@ its `shioaji`/`capital` block (`interval`, `indices`) still merges key by key.
 | `columns` | `"auto"` | how many symbols a row draws: `auto` = the fewest of 1–4 that hold the watchlist in the band's quote rows, as many as the terminal's width allows (1 when the list is 5 symbols or fewer; 2 from 77 columns, 3 from 118, 4 from 159); `1`/`2`/`3`/`4` force it, capped by the same width rule (a 74-column terminal draws one column whatever this says) — see [What the band shows](#what-the-band-shows) |
 | `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only. `tf` is not a value here — a non-empty `futures` list feeds itself automatically whenever `feed` is not `"off"`, on top of whatever this says, since it costs no HTTP request — see [Taiwan futures (tf)](#taiwan-futures-tf) |
 | `twSources` | `["yahoo"]` | Taiwan's routes, in preference order — the band tries the first and falls through to the next for a tick that one has nothing fresh for. `yahoo` = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `shioaji` = 永豐 real-time ticks on macOS/Linux and `capital` = 群益 real-time ticks on Windows, the band runs the fetcher itself either way — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher) and [群益 Capital as that fetcher](#群益-capital-as-that-fetcher). A legacy `"twSource": "x"` (a single string) still works as an alias for `["x"]`. An empty list (or one naming no known route) means the default, so a project stating `[]` clears a user's broker routes back to Yahoo. The shipped default never includes a broker route — put that in your own `~/.claude/stock-band.json` |
-| `shioaji` | `{ "python": "python3", "env": "~/.sinobon.env", "interval": 10 }` | read only when `"shioaji"` is somewhere in `twSources` — the interpreter, the env file holding `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` (`~` expands to `$HOME`), and seconds between snapshots. `python` and `env` are read from `~/.claude/stock-band.json` only: a project file's values are ignored and logged, since a cloned repo must not pick the program the band runs |
+| `shioaji` | `{ "python": "python3", "env": "~/.sinobon.env", "interval": 10, "liquidationRiskPct": 25 }` | read only when `"shioaji"` is somewhere in `twSources` — the interpreter, the env file holding `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` (`~` expands to `$HOME`), and seconds between snapshots. `liquidationRiskPct` (default 25, the TAIFEX forced-liquidation line, unverified for 永豐; 0-100, anything else reads 25) is where 期貨庫存's 強平價 is drawn. `python`, `env` and `liquidationRiskPct` are read from `~/.claude/stock-band.json` only: a project file's values are ignored and logged, since a cloned repo must not pick the program the band runs or move the risk line |
 | `capital` | `{ "python": "python", "env": "~/.capital.env", "dll": "", "interval": 10, "indices": [TSEA, OTCA] }` | read only when `"capital"` is somewhere in `twSources` — the interpreter (must have `comtypes` and match the registered 元件's bitness), the env file holding `CAPITAL_USER_ID`/`CAPITAL_PASSWORD`, the path to the registered `SKCOM.dll` (**no default** — 群益 ships a zip with no install location), seconds between snapshots, and the SKCOM 商品代號 the footer's index board flaps through (`[]` turns it off). `python`, `env` and `dll` are read from `~/.claude/stock-band.json` only, for the same reason as `shioaji`'s |
 | `feedMs` | `30000` | seconds between feed requests, in ms (floor 15000 — below that Yahoo answers 429; the request budget can widen it further) |
 | `pageMs` | `10000` | how long one page holds before the board turns, in ms (floor 4000; `0` turns auto-paging off and leaves `翻頁` as the only way to page). Pressing `翻頁` restarts this countdown |
@@ -949,6 +950,33 @@ range) when the terminal is wide enough. Both ends use the fewest decimals that
 show every fill price exactly (0-2: `106.25–107.00`, `107.5–108.0`), and a single
 distinct price shows once (`4筆 23,450`). The column is not sortable. No file, or one that does not parse, leaves 期貨庫存 exactly
 as before.
+
+**追繳價 / 強平價.** With a margin in the file, two columns sit between 損益%
+and 建倉明細 (made-up numbers; TMF and MXF both track 加權指數, SRF tracks 0050):
+
+```
+代號   …    口數  …    損益%  追繳價  強平價
+TMFJ6  …    5 口  …    0.00%  19,150  13,950
+SRFJ6  …   20 口  …    0.00%   95.50   82.50
+```
+
+追繳價 is the price at which equity reaches the maintenance margin and 強平價
+the price at which the risk indicator (equity ÷ initialMargin) reaches the
+forced-liquidation line, assuming every contract on the row's underlying moves
+by the same number of points and every other underlying stays put: row price −
+cushion ÷ Σ(口數 × multiplier) over that underlying. Positions are grouped by
+the fetcher's `underlying` field. The liquidation line is **25 %, the TAIFEX
+rule — not verified against 永豐's own threshold**; set
+`shioaji.liquidationRiskPct` in `~/.claude/stock-band.json` if yours differs.
+Both round toward the current price (a long's up, a short's down) to the
+row's own decimals, carry `≈` under the live estimate, turn orange within 2 %
+of the current price, and read `追繳中` / `強平` (bold white on red) once the
+cushion is gone; a hedged underlying, a row without `underlying` or a price
+at or below 0 reads `—`. No maintenance margin hides 追繳價, no
+`initialMargin` hides 強平價. A narrow terminal drops 建倉明細 first, then
+強平價, then 追繳價. With positions on more than one underlying (or one
+without `underlying`), 距追繳 on line 1 shows the cushion in TWD
+(`距追繳 215,000 元`) instead of points.
 
 **Tick overlay.** On top of the 10-second snapshot loop the fetcher
 subscribes to 永豐's tick stream for every code it serves (stocks while the

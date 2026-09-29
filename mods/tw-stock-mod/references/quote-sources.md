@@ -279,7 +279,12 @@ the holdings file's own `price`/`prevClose`.
 off `api.Contracts.Futures[code]` — month codes or `R1`/`R2` aliases both
 resolve — and writes `futures-quotes.json`/`futures-holdings.json` the same
 way, with `multiplier`/`decimal_locator`/`reference` always read from the
-contract rather than a lookup table. This route is `tf`'s only source: there
+contract rather than a lookup table. Each `futures-holdings.json` row also
+carries `underlying`, the contract's `underlying_code` (`"IX0001"` for
+TXF/MXF/TMF, month codes and `R1` aliases alike; `"0050"` for SRF), or `null`
+when the SDK gives none; the band groups positions by it for 追繳價/強平價
+(below). `category`/`symbol` are `None` on these contracts and are not used.
+This route is `tf`'s only source: there
 is no Yahoo or MIS fallback, so a stale file shows `無報價`, not a demo walk.
 See the README's [Taiwan futures (tf)](../README.md#taiwan-futures-tf).
 
@@ -334,6 +339,25 @@ initialMargin × 100⌋`. The estimate is all or nothing: a quotes file whose
 price or no multiplier, a closed market, a `null` or malformed `ref`, or a move
 of exactly 0 leaves the broker figures on screen. A file without `ref` reads
 exactly as before.
+
+**追繳價 / 強平價.** From the same margin (the live estimate's equity when one
+applies, else the broker's), the band derives two per-position prices. For a
+row whose `underlying` is G, with `exposure(G) = Σ qty × multiplier` over every
+held row on G (signed, short negative):
+
+- 追繳價 = row price − (equity − maintenanceMargin) ÷ exposure(G)
+- 強平價 = row price − (equity − liquidationRiskPct % × initialMargin) ÷ exposure(G)
+
+The assumption: every contract on G moves by the same number of points, and
+every other underlying stays where it is. Hedged rows (exposure 0), a row
+without `underlying` and a result at or below 0 read `—`. The forced-liquidation
+line uses risk indicator = equity ÷ initialMargin × 100 — observed on 永豐 from
+one production sample — and a threshold of **25 %, the TAIFEX rule; that 永豐
+force-closes at exactly 25 % is inferred, not verified**. A different line can
+be set in `~/.claude/stock-band.json` as `shioaji.liquidationRiskPct` (0-100;
+a project file cannot set it). With several underlyings, line 1's 距追繳 is the
+cushion in TWD (`距追繳 215,000 元`) rather than points, since there is no one
+index to count points on.
 
 ## 4. 群益 Capital API, through `scripts/fetch-quotes-capital.py`
 

@@ -29,6 +29,11 @@
 //  26  a quotes rewrite between account writes re-renders the estimate
 //  27-34  fills column: adaptive decimals, one price when min == max, the 建倉明細 header
 //         (present iff the column, aligned with it, not a sort target)
+//  35-52  追繳價 / 強平價 per row: cushion over the row's underlying group only, the
+//         live estimate when it applies, conservative rounding, adaptive decimals,
+//         追繳中 / 強平 danger, orange within 2%, header iff column, drop order
+//         建倉明細 -> 強平價 -> 追繳價, clicks unchanged; line 1 switches to 元 for a
+//         multi-underlying book; shioaji.liquidationRiskPct is user-level only
 //
 // Usage: node account-summary.mjs $OUT/register.js $OUT/board.js [--capture]
 process.env.TZ = 'Asia/Taipei' // row 0 prints 更新 HH:MM; the baseline must not depend on the runner's zone
@@ -69,8 +74,8 @@ const holdings = (tmf = 5, mxf = 1) => ({
   market: 'tf',
   source: '永豐 期貨',
   holdings: [
-    { code: 'TMFJ6', name: '微型臺指期貨 202610', qty: tmf, cost: 23400, price: 23450, prevClose: 23380, multiplier: 10, direction: tmf < 0 ? 'Sell' : 'Buy' },
-    { code: 'MXFJ6', name: '小型臺指期貨 202610', qty: mxf, cost: 23420, price: 23450, prevClose: 23380, multiplier: 50, direction: mxf < 0 ? 'Sell' : 'Buy' },
+    { code: 'TMFJ6', name: '微型臺指期貨 202610', qty: tmf, cost: 23400, price: 23450, prevClose: 23380, multiplier: 10, direction: tmf < 0 ? 'Sell' : 'Buy', underlying: 'IX0001' },
+    { code: 'MXFJ6', name: '小型臺指期貨 202610', qty: mxf, cost: 23420, price: 23450, prevClose: 23380, multiplier: 50, direction: mxf < 0 ? 'Sell' : 'Buy', underlying: 'IX0001' },
   ],
 })
 const MARGIN = {
@@ -114,18 +119,20 @@ const liveQuotes = (tmf = 23500, mxf = 23500, { asOf = OPEN - 5_000, dataAt = OP
 
 // --- stub host ---------------------------------------------------------------
 let instance = 0
-async function boot({ accountText, holdingsFile = holdings(), clock = OPEN, quotes } = {}) {
+async function boot({ accountText, holdingsFile = holdings(), clock = OPEN, quotes, userConfig, projectExtra } = {}) {
   instance += 1
   const url = pathToFileURL(regPath)
   url.search = `?case=${instance}`
   const { register } = await import(url.href)
   const files = {
-    '.claude/stock-band.json': JSON.stringify(CONFIG),
+    '.claude/stock-band.json': JSON.stringify({ ...CONFIG, ...projectExtra }),
+    ...(userConfig !== undefined ? { [`${HOME}/.claude/stock-band.json`]: JSON.stringify(userConfig) } : {}),
     [`${RUNTIME}futures-holdings.json`]: JSON.stringify(holdingsFile),
     ...(accountText !== undefined ? { [`${RUNTIME}futures-account.json`]: accountText } : {}),
     ...(quotes !== undefined ? { [`${RUNTIME}futures-quotes.json`]: JSON.stringify(quotes) } : {}),
   }
   const timers = []
+  const logs = []
   const $ = {
     clock: { now: async () => clock, every: (_ms, fn) => timers.push(fn) },
     fs: {
@@ -139,7 +146,7 @@ async function boot({ accountText, holdingsFile = holdings(), clock = OPEN, quot
     session: { cwd: async () => '/fake-project' },
     process: { run: async () => { throw new Error('account-summary: no spawn expected') } },
     plugin: { root: '/fake-plugin-root' },
-    ui: { log: () => {}, invalidate: () => {}, resolve: async () => ({ Box: 'Box', Button: 'Button', Client: 'Client', Text: 'Text' }) },
+    ui: { log: m => logs.push(String(m)), invalidate: () => {}, resolve: async () => ({ Box: 'Box', Button: 'Button', Client: 'Client', Text: 'Text' }) },
     http: { fetch: async () => { throw new Error('account-summary: no network expected') } },
   }
   const handlers = new Map()
@@ -171,7 +178,7 @@ async function boot({ accountText, holdingsFile = holdings(), clock = OPEN, quot
     for (const fn of timers) fn()
     for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r))
   }
-  return { draw, landOn, repoll }
+  return { draw, landOn, repoll, logs }
 }
 
 // --- the board, as colored spans ----------------------------------------------
@@ -250,7 +257,9 @@ const BASELINE = {
   twPnl: 'b1a3d05125f82c60',
   // captured with --capture against b206dfe's bundle: an account file without margin.ref next to moved quotes
   // noRef120 was 4d2e8d3099a28860 until the fills column got its 建倉明細 header (the sample carries fills): that is the only row that differs
-  noRef120: '581a5a67efc9232f',
+  // then 581a5a67efc9232f until 追繳價/強平價 (rows 35-52): the sample carries a margin, so at 120 cols the two
+  // columns take cols 98-111 and 建倉明細 drops out; every cell left of col 97 is unchanged (diffed against 887ae0b)
+  noRef120: 'e9075077d6f092f5',
   noRef60: 'a8cbb23c3d9c2b44',
 }
 
@@ -382,18 +391,21 @@ for (const [cols, want1, suffix, want2] of WIDTHS) {
 ok(lineOf((await frame({ accountText: JSON.stringify(account({ margin: { marginCall: 8000 } })) }, 30)).rows[1]) === '風險 120% │ 追繳 8,000', '15: the minimum under a margin call is 風險 + 追繳')
 
 // --- row 16: fills column -------------------------------------------------------------
+// margin null: no 追繳價/強平價 (rows 35-52), so the fills column keeps its own geometry at 98
+const NO_MARGIN = JSON.stringify(account({ margin: null }))
+const plainFills = await frame({ accountText: NO_MARGIN })
 {
   const row = (f, code) => textOf(f.rows.find(r => textOf(r).includes(code)) ?? [])
-  ok(row(sample, 'TMFJ6').includes('4筆 23,410–23,520'), `16: 4 fills at 120 cols: "${row(sample, 'TMFJ6').trim()}"`)
-  ok(!row(sample, 'MXFJ6').includes('筆'), '16: 1 fill: no column')
+  ok(row(plainFills, 'TMFJ6').includes('4筆 23,410–23,520'), `16: 4 fills at 120 cols: "${row(plainFills, 'TMFJ6').trim()}"`)
+  ok(!row(plainFills, 'MXFJ6').includes('筆'), '16: 1 fill: no column')
   // 損益% ends at column 96; the column starts at 98 and is 17 wide, so it needs 98 + 17 <= cols - 1
-  const at116 = await frame({ accountText: SAMPLE }, 116)
-  const at115 = await frame({ accountText: SAMPLE }, 115)
+  const at116 = await frame({ accountText: NO_MARGIN }, 116)
+  const at115 = await frame({ accountText: NO_MARGIN }, 115)
   ok(row(at116, 'TMFJ6').includes('4筆 23,410–23,520'), '16: 116 cols still fits it')
   ok(!row(at115, 'TMFJ6').includes('筆'), '16: 115 cols does not')
-  ok(!row(await frame({ accountText: SAMPLE }, 80), 'TMFJ6').includes('筆'), '16: 80 cols: no column')
+  ok(!row(await frame({ accountText: NO_MARGIN }, 80), 'TMFJ6').includes('筆'), '16: 80 cols: no column')
   const nullPrice = { ...FILLS, TMFJ6: [...FILLS.TMFJ6, { date: '2026-09-17', dseq: 'tA0x9', qty: 0, price: null, pnl: 0 }] }
-  const n = await frame({ accountText: JSON.stringify(account({ fills: nullPrice })) })
+  const n = await frame({ accountText: JSON.stringify(account({ margin: null, fills: nullPrice })) })
   ok(row(n, 'TMFJ6').includes('5筆 23,410–23,520'), `16: a null price counts as a fill but not in the range: "${row(n, 'TMFJ6').trim()}"`)
   const both = await frame({ accountText: JSON.stringify({ ...account(), margin: null, realized: { today: null, month: null, year: null } }) })
   ok(row(both, 'TMFJ6').includes('4筆') && both.props.quoteRows === 5, '16: fills alone draw the column but no summary lines')
@@ -557,7 +569,7 @@ for (const cols of [120, 100, 80, 60, 50, 40, 30]) {
 {
   const fx = prices => prices.map((price, i) => ({ date: '2026-09-17', dseq: `tB0x${i}`, qty: 1, price, pnl: 0 }))
   const fillsFrame = async (tmf, cols = 120) =>
-    frame({ accountText: JSON.stringify(account({ fills: { TMFJ6: fx(tmf), MXFJ6: FILLS.MXFJ6 } })) }, cols)
+    frame({ accountText: JSON.stringify(account({ margin: null, fills: { TMFJ6: fx(tmf), MXFJ6: FILLS.MXFJ6 } })) }, cols)
   const rowOf = (f, code) => textOf(f.rows.find(r => textOf(r).includes(code)) ?? [])
   const headOf = f => f.rows.find(r => textOf(r).includes('代號')) ?? []
   const hasHead = f => textOf(headOf(f)).includes('建倉明細')
@@ -583,22 +595,22 @@ for (const cols of [120, 100, 80, 60, 50, 40, 30]) {
   }
 
   // header: present iff the column is
-  ok(hasHead(sample), `31: header with the column: "${textOf(headOf(sample)).trim()}"`)
+  ok(hasHead(plainFills), `31: header with the column: "${textOf(headOf(plainFills)).trim()}"`)
   for (const cols of [116, 120, 140]) ok(hasHead(await fillsFrame([23410, 23520], cols)), `31: ${cols} cols: header`)
   for (const cols of [115, 100, 80]) {
     const f = await fillsFrame([23410, 23520], cols)
     ok(!hasHead(f) && !rowOf(f, 'TMFJ6').includes('筆'), `31: ${cols} cols: no column, no header`)
   }
   ok(!hasHead(await fillsFrame([23410])), '31: no row with >= 2 fills: no header')
-  ok(!hasHead(await frame({ accountText: JSON.stringify(account({ fills: {} })) })), '31: empty fills: no header')
-  ok(!hasHead(await frame({ accountText: JSON.stringify(account({ fills: null })) })), '31: fills null: no header')
+  ok(!hasHead(await frame({ accountText: JSON.stringify(account({ margin: null, fills: {} })) })), '31: empty fills: no header')
+  ok(!hasHead(await frame({ accountText: JSON.stringify(account({ margin: null, fills: null })) })), '31: fills null: no header')
   ok(hasHead(await fillsFrame([null, null])), '31: an all-null-price column still has its header')
 
   // alignment: the cells' left edge, the other headers' style
   {
     const col = (row, needle) => dispWidth(textOf(row).slice(0, textOf(row).indexOf(needle)))
-    const head = headOf(sample)
-    const tmf = sample.rows.find(r => textOf(r).includes('TMFJ6'))
+    const head = headOf(plainFills)
+    const tmf = plainFills.rows.find(r => textOf(r).includes('TMFJ6'))
     ok(col(head, '建倉明細') === col(tmf, '4筆'), `32: header left edge ${col(head, '建倉明細')} = cell left edge ${col(tmf, '4筆')}`)
     ok(col(head, '建倉明細') === 98, '32: at column 98, right of 損益% (ends at 96)')
     ok(styleOf(head, '建倉明細')?.color === styleOf(head, '代號')?.color && styleOf(head, '建倉明細')?.bold === styleOf(head, '代號')?.bold, '32: styled like the other headers')
@@ -616,17 +628,237 @@ for (const cols of [120, 100, 80, 60, 50, 40, 30]) {
   // clicks: the header is not sortable, the others keep their targets
   {
     const at = (f, needle) => { const t = textOf(headOf(f)); return dispWidth(t.slice(0, t.indexOf(needle))) + 1 }
-    const noFills = await frame({ accountText: JSON.stringify(account({ fills: {} })) })
-    const hy = sample.rows.findIndex(r => textOf(r).includes('代號'))
+    const noFills = await frame({ accountText: JSON.stringify(account({ margin: null, fills: {} })) })
+    const hy = plainFills.rows.findIndex(r => textOf(r).includes('代號'))
     const want = { 代號: 'code', '今日%': 'today', 今日損益: 'todayPnl', 總損益: 'totalPnl', '損益%': 'totalPnlPct' }
     for (const [label, key] of Object.entries(want)) {
-      ok(sample.click(at(sample, label), hy)?.sortPnl === key, `34: with the column, a click on ${label} sorts ${key}`)
+      ok(plainFills.click(at(plainFills, label), hy)?.sortPnl === key, `34: with the column, a click on ${label} sorts ${key}`)
       ok(noFills.click(at(noFills, label), hy)?.sortPnl === key, `34: without the column, a click on ${label} sorts ${key}`)
-      ok(at(sample, label) === at(noFills, label), `34: ${label} keeps its position (${at(sample, label)})`)
+      ok(at(plainFills, label) === at(noFills, label), `34: ${label} keeps its position (${at(plainFills, label)})`)
     }
-    const x0 = at(sample, '建倉明細')
-    for (let x = x0; x < x0 + 8; x++) ok(sample.click(x, hy) === undefined, `34: a click at x=${x} on 建倉明細 does nothing`)
+    const x0 = at(plainFills, '建倉明細')
+    for (let x = x0; x < x0 + 8; x++) ok(plainFills.click(x, hy) === undefined, `34: a click at x=${x} on 建倉明細 does nothing`)
   }
+}
+
+// --- rows 35-52: 追繳價 / 強平價 (synthetic book: equity 600,000, maintenance 385,000, initial 500,000) ------
+const leg = (code, name, qty, price, multiplier, underlying) =>
+  ({ code, name, qty, cost: price, price, prevClose: price, multiplier, direction: qty < 0 ? 'Sell' : 'Buy', ...(underlying !== null ? { underlying } : {}) })
+const TMF = (qty, price = 23450, u = 'IX0001') => leg('TMFJ6', '微型臺指期貨 202610', qty, price, 10, u)
+const MXF = (qty, price = 23450, u = 'IX0001') => leg('MXFJ6', '小型臺指期貨 202610', qty, price, 50, u)
+const SRF = (qty, price = 106.25, u = '0050') => leg('SRFJ6', '小型元大台灣50ETF期貨 202610', qty, price, 1000, u)
+const book = (...legs) => ({ asOf: OPEN - 30_000, market: 'tf', source: '永豐 期貨', holdings: legs })
+const acct = margin => JSON.stringify(account({ margin }))
+const CALL = '追繳價'
+const LIQ = '強平價'
+const headRow = f => f.rows.find(r => textOf(r).includes('代號')) ?? []
+const headCol = (f, label) => { const t = textOf(headRow(f)); const i = t.indexOf(label); return i < 0 ? -1 : dispWidth(t.slice(0, i)) }
+/** the token whose last display cell is right - 1, and its span style */
+function cellEnding(row, right) {
+  const cells = []
+  let col = 0
+  for (const ch of Array.from(textOf(row))) { cells.push({ ch, col }); col += charWidth(ch) }
+  const end = cells.findIndex(c => c.col + charWidth(c.ch) === right)
+  if (end < 0) return { text: '' }
+  let i = end
+  while (i >= 0 && !/[\s ]/.test(cells[i].ch)) i--
+  const text = cells.slice(i + 1, end + 1).map(c => c.ch).join('')
+  return { text, style: text ? row.find(s => s.text.includes(text)) : undefined }
+}
+/** the cell under a right-aligned header in `code`'s row; undefined when the header is absent */
+const cell = (f, code, label) => {
+  const c = headCol(f, label)
+  if (c < 0) return undefined
+  const row = f.rows.find(r => textOf(r).includes(code))
+  return row ? cellEnding(row, c + dispWidth(label)) : undefined
+}
+const val = (f, code, label) => cell(f, code, label)?.text
+const both = async (opts, cols = 120) => frame(opts, cols)
+
+// --- row 35: long: ΔP = -(600,000 - 385,000) / (5 x 10 + 1 x 50) = -2,150; 強平 -(600,000 - 25% x 500,000) / 100 = -4,750
+{
+  const f = sample
+  ok(val(f, 'TMFJ6', CALL) === '21,300' && val(f, 'MXFJ6', CALL) === '21,300', `35: long 追繳價 21,300 on both rows: ${val(f, 'TMFJ6', CALL)} / ${val(f, 'MXFJ6', CALL)}`)
+  ok(val(f, 'TMFJ6', LIQ) === '18,700' && val(f, 'MXFJ6', LIQ) === '18,700', `35: long 強平價 18,700 on both rows: ${val(f, 'TMFJ6', LIQ)} / ${val(f, 'MXFJ6', LIQ)}`)
+  ok(plain(cell(f, 'TMFJ6', CALL)?.style, WHITE) && plain(cell(f, 'TMFJ6', LIQ)?.style, WHITE), '35: far from both: default colour')
+}
+// --- row 36: short: the adverse move is up
+{
+  const f = await both({ accountText: SAMPLE, holdingsFile: holdings(-5, -1) })
+  ok(val(f, 'TMFJ6', CALL) === '25,600' && val(f, 'MXFJ6', CALL) === '25,600', `36: short 追繳價 25,600: ${val(f, 'TMFJ6', CALL)} / ${val(f, 'MXFJ6', CALL)}`)
+  ok(val(f, 'TMFJ6', LIQ) === '28,200' && val(f, 'MXFJ6', LIQ) === '28,200', `36: short 強平價 28,200: ${val(f, 'TMFJ6', LIQ)} / ${val(f, 'MXFJ6', LIQ)}`)
+}
+// --- row 37: one underlying, two prices: each row moves by the same ΔP off its own price
+{
+  const f = await both({ accountText: SAMPLE, holdingsFile: book(TMF(5, 23450), MXF(1, 23470)) })
+  ok(val(f, 'TMFJ6', CALL) === '21,300' && val(f, 'MXFJ6', CALL) === '21,320', `37: TMF+MXF share ΔP -2,150: ${val(f, 'TMFJ6', CALL)} / ${val(f, 'MXFJ6', CALL)}`)
+  ok(val(f, 'TMFJ6', LIQ) === '18,700' && val(f, 'MXFJ6', LIQ) === '18,720', `37: and ΔP -4,750: ${val(f, 'TMFJ6', LIQ)} / ${val(f, 'MXFJ6', LIQ)}`)
+}
+// --- row 38: long 5 TMF + short 1 MXF on one underlying: exposure 0
+{
+  const f = await both({ accountText: SAMPLE, holdingsFile: book(TMF(5), MXF(-1)) })
+  ok([CALL, LIQ].every(l => val(f, 'TMFJ6', l) === '—' && val(f, 'MXFJ6', l) === '—'), `38: hedged to 0: — in both columns: ${[CALL, LIQ].map(l => `${val(f, 'TMFJ6', l)}/${val(f, 'MXFJ6', l)}`).join(' ')}`)
+  ok(lineOf(f.rows[1]).endsWith('距追繳 —'), `38: line 1 —: "${lineOf(f.rows[1])}"`)
+}
+// --- row 39: TMF + SRF: two underlyings, each row uses its own group only
+const TWO = book(TMF(5), SRF(20))
+const twoGroups = await both({ accountText: SAMPLE, holdingsFile: TWO })
+{
+  const f = twoGroups
+  show('TMF 5 long + SRF 20 long, 120 cols', f)
+  // TMF: 215,000 / 50 = 4,300; SRF: 215,000 / 20,000 = 10.75
+  ok(val(f, 'TMFJ6', CALL) === '19,150' && val(f, 'SRFJ6', CALL) === '95.50', `39: 追繳價 per group: ${val(f, 'TMFJ6', CALL)} / ${val(f, 'SRFJ6', CALL)}`)
+  ok(val(f, 'TMFJ6', LIQ) === '13,950' && val(f, 'SRFJ6', LIQ) === '82.50', `39: 強平價 per group: ${val(f, 'TMFJ6', LIQ)} / ${val(f, 'SRFJ6', LIQ)}`)
+  ok(lineOf(f.rows[1]) === '風險 120% │ 權益 600,000 │ 可用 100,000 │ 距追繳 215,000 元', `39: two underlyings: line 1 in 元: "${lineOf(f.rows[1])}"`)
+}
+// --- row 40: cushion <= 0
+{
+  const f = await both({ accountText: acct({ equity: 385000 }) })
+  ok(val(f, 'TMFJ6', CALL) === '追繳中' && isDanger(cell(f, 'TMFJ6', CALL)?.style) && val(f, 'MXFJ6', CALL) === '追繳中', `40: equity == maintenance: 追繳中, danger: ${JSON.stringify(cell(f, 'TMFJ6', CALL))}`)
+  // 強平: 385,000 - 125,000 = 260,000 over 100 -> 20,850, still a price
+  ok(val(f, 'TMFJ6', LIQ) === '20,850' && !cell(f, 'TMFJ6', LIQ)?.style?.bg, `40: 強平價 still a price: ${val(f, 'TMFJ6', LIQ)}`)
+  const g = await both({ accountText: acct({ equity: 125000 }) })
+  ok(val(g, 'TMFJ6', LIQ) === '強平' && isDanger(cell(g, 'TMFJ6', LIQ)?.style), `40: equity == 25% x initial: 強平, danger: ${JSON.stringify(cell(g, 'TMFJ6', LIQ))}`)
+  ok(val(g, 'TMFJ6', CALL) === '追繳中', '40: and 追繳中')
+  const m = await both({ accountText: acct({ equity: 385000 }), holdingsFile: TWO })
+  ok(lineOf(m.rows[1]).endsWith('距追繳 0 元'), `40: two underlyings at maintenance: "${lineOf(m.rows[1])}"`)
+}
+// --- row 41: orange within 2% of the current price (23,450 x 2% = 469)
+{
+  const at = async equity => both({ accountText: acct({ equity }) })
+  const near = await at(431800) // ΔP -468 -> 22,982
+  ok(val(near, 'TMFJ6', CALL) === '22,982' && plain(cell(near, 'TMFJ6', CALL)?.style, ORANGE), `41: 468 away (1.996%): orange: ${JSON.stringify(cell(near, 'TMFJ6', CALL))}`)
+  const edge = await at(431900) // ΔP -469 -> 22,981, exactly 2%
+  ok(val(edge, 'TMFJ6', CALL) === '22,981' && plain(cell(edge, 'TMFJ6', CALL)?.style, WHITE), `41: exactly 2%: default: ${JSON.stringify(cell(edge, 'TMFJ6', CALL))}`)
+  const liqNear = await at(171800) // 強平 ΔP -468; 追繳 is already 追繳中
+  ok(val(liqNear, 'TMFJ6', LIQ) === '22,982' && plain(cell(liqNear, 'TMFJ6', LIQ)?.style, ORANGE), `41: 強平價 468 away: orange: ${JSON.stringify(cell(liqNear, 'TMFJ6', LIQ))}`)
+  const liqEdge = await at(171900)
+  ok(val(liqEdge, 'TMFJ6', LIQ) === '22,981' && plain(cell(liqEdge, 'TMFJ6', LIQ)?.style, WHITE), `41: 強平價 exactly 2%: default: ${JSON.stringify(cell(liqEdge, 'TMFJ6', LIQ))}`)
+  ok(isDanger(cell(liqNear, 'TMFJ6', CALL)?.style), '41: danger wins over orange')
+}
+// --- row 42: the live estimate: equity 605,000 at 23,500 -> 23,500 - 2,200 = 21,300 (broker equity would read 21,350)
+{
+  const f = await both({ accountText: withRef(REF_LONG), quotes: liveQuotes() })
+  ok(val(f, 'TMFJ6', CALL) === '≈21,300' && val(f, 'MXFJ6', CALL) === '≈21,300', `42: estimated 追繳價 ≈21,300: ${val(f, 'TMFJ6', CALL)} / ${val(f, 'MXFJ6', CALL)}`)
+  ok(val(f, 'TMFJ6', LIQ) === '≈18,700', `42: estimated 強平價 ≈18,700: ${val(f, 'TMFJ6', LIQ)}`)
+  const broker = await both({ accountText: SAMPLE, quotes: liveQuotes() })
+  ok(val(broker, 'TMFJ6', CALL) === '21,350' && val(broker, 'TMFJ6', LIQ) === '18,750', `42: no ref: broker equity at the live price, no ≈: ${val(broker, 'TMFJ6', CALL)} / ${val(broker, 'TMFJ6', LIQ)}`)
+}
+// --- row 43: conservative rounding: 215,000 / 70 = 3,071.43; 475,000 / 70 = 6,785.71
+{
+  const l = await both({ accountText: SAMPLE, holdingsFile: book(TMF(7)) })
+  ok(val(l, 'TMFJ6', CALL) === '20,379' && val(l, 'TMFJ6', LIQ) === '16,665', `43: long rounds up (20,378.57 -> 20,379; 16,664.29 -> 16,665): ${val(l, 'TMFJ6', CALL)} / ${val(l, 'TMFJ6', LIQ)}`)
+  const s = await both({ accountText: SAMPLE, holdingsFile: book(TMF(-7)) })
+  ok(val(s, 'TMFJ6', CALL) === '26,521' && val(s, 'TMFJ6', LIQ) === '30,235', `43: short rounds down (26,521.43 -> 26,521; 30,235.71 -> 30,235): ${val(s, 'TMFJ6', CALL)} / ${val(s, 'TMFJ6', LIQ)}`)
+}
+// --- row 44: decimals follow the row's price; SRF 1 x 1,000
+{
+  const one = async (equity, srf) => val(await both({ accountText: acct({ equity }), holdingsFile: book(srf) }), 'SRFJ6', CALL)
+  const CASES = [
+    ['2 decimals, 106.25 - 0.1 (no float creep to 106.16)', 385100, SRF(1, 106.25), '106.15'],
+    ['1 decimal, 106.5 - 0.1', 385100, SRF(1, 106.5), '106.4'],
+    ['0 decimals, 106 - 1.25 rounds up', 386250, SRF(1, 106), '105'],
+    ['2 decimals, 106.25 - 0.333 rounds up', 385333, SRF(1, 106.25), '105.92'],
+    ['2 decimals short, 106.25 + 0.333 rounds down', 385333, SRF(-1, 106.25), '106.58'],
+    ['float-noise price reads as 2 decimals', 385100, SRF(1, 106.2500000001), '106.15'],
+  ]
+  for (const [why, equity, srf, want] of CASES) {
+    const got = await one(equity, srf)
+    ok(got === want, `44: ${why}: ${got} (want ${want})`)
+  }
+  // 強平 cushion 260,100 on 1,000 is past zero: unreachable, so —
+  ok(val(await both({ accountText: acct({ equity: 385100 }), holdingsFile: book(SRF(1)) }), 'SRFJ6', LIQ) === '—', '44: a price at or below 0 reads —')
+}
+// --- row 45: a row without underlying (null: the fetcher could not read underlying_code)
+{
+  const f = await both({ accountText: SAMPLE, holdingsFile: book(TMF(5), MXF(1, 23450, null)) })
+  ok(val(f, 'MXFJ6', CALL) === '—' && val(f, 'MXFJ6', LIQ) === '—', `45: no underlying: —: ${val(f, 'MXFJ6', CALL)} / ${val(f, 'MXFJ6', LIQ)}`)
+  ok(val(f, 'TMFJ6', CALL) === '19,150' && val(f, 'TMFJ6', LIQ) === '13,950', `45: TMF's group is TMF alone: ${val(f, 'TMFJ6', CALL)} / ${val(f, 'TMFJ6', LIQ)}`)
+  ok(lineOf(f.rows[1]).endsWith('距追繳 215,000 元'), `45: line 1 in 元: "${lineOf(f.rows[1])}"`)
+}
+// --- rows 46-47: header iff column; 建倉明細 drops first, then 強平價, then 追繳價
+{
+  // 追繳價 98-103, 強平價 106-111, 建倉明細 114 + 17; each needs its last cell <= cols - 2, as 建倉明細 always did
+  const FH = '建倉明細'
+  const WIDTHS = [[140, [CALL, LIQ, FH]], [132, [CALL, LIQ, FH]], [131, [CALL, LIQ]], [113, [CALL, LIQ]], [112, [CALL]], [105, [CALL]], [104, []], [80, []]]
+    const cellText = { [CALL]: '21,300', [LIQ]: '18,700', [FH]: '4筆 23,410–23,520' }
+  for (const [cols, want] of WIDTHS) {
+    const f = await frame({ accountText: SAMPLE }, cols)
+    const tmf = textOf(f.rows.find(r => textOf(r).includes('TMFJ6')) ?? [])
+    for (const label of [CALL, LIQ, FH]) {
+      const head = headCol(f, label) >= 0
+      const body = tmf.includes(cellText[label])
+      ok(head === want.includes(label) && body === head, `46: ${cols} cols: ${label} ${want.includes(label) ? 'shown' : 'dropped'} (header ${head}, cell ${body})`)
+    }
+    const all = Math.max(...f.rows.map(r => dispWidth(textOf(r).replace(/[\s ]+$/, ''))))
+    ok(cols < 80 || all <= cols - 1, `47: ${cols} cols: no row past the band (${all})`)
+  }
+  const f = await frame({ accountText: SAMPLE }, 140)
+  ok(headCol(f, CALL) + dispWidth(CALL) === 104 && headCol(f, LIQ) + dispWidth(LIQ) === 112 && headCol(f, '建倉明細') === 114, `47: positions: 追繳價 ends 104, 強平價 ends 112, 建倉明細 at 114 (${headCol(f, CALL)}, ${headCol(f, LIQ)}, ${headCol(f, '建倉明細')})`)
+  // one column missing: the others close up
+  const noMm = await frame({ accountText: acct({ maintenanceMargin: 0 }) }, 140)
+  ok(headCol(noMm, CALL) < 0 && headCol(noMm, LIQ) + dispWidth(LIQ) === 104, `47: no maintenance: no 追繳價, 強平價 moves to 98 (${headCol(noMm, LIQ)})`)
+  const noIm = JSON.parse(SAMPLE)
+  delete noIm.margin.initialMargin
+  const noInit = await frame({ accountText: JSON.stringify(noIm) }, 140)
+  ok(headCol(noInit, LIQ) < 0 && headCol(noInit, CALL) >= 0 && headCol(noInit, '建倉明細') === 106, `47: no initialMargin: no 強平價, 建倉明細 at 106 (${headCol(noInit, '建倉明細')})`)
+  const zeroIm = await frame({ accountText: acct({ initialMargin: 0 }) }, 140)
+  ok(headCol(zeroIm, LIQ) < 0, '47: initialMargin 0: no 強平價')
+  const noMargin = await frame({ accountText: NO_MARGIN }, 140)
+  ok(headCol(noMargin, CALL) < 0 && headCol(noMargin, LIQ) < 0 && headCol(noMargin, '建倉明細') === 98, '47: margin null: neither, 建倉明細 back at 98')
+}
+// --- row 48: clicks
+{
+  const f = await frame({ accountText: SAMPLE }, 140)
+  const g = await frame({ accountText: NO_MARGIN }, 140)
+  const hy = f.rows.findIndex(r => textOf(r).includes('代號'))
+  const want = { 代號: 'code', '今日%': 'today', 今日損益: 'todayPnl', 總損益: 'totalPnl', '損益%': 'totalPnlPct' }
+  for (const [label, key] of Object.entries(want)) {
+    ok(headCol(f, label) === headCol(g, label) && f.click(headCol(f, label) + 1, hy)?.sortPnl === key, `48: ${label} keeps its place and sorts ${key}`)
+  }
+  for (const label of [CALL, LIQ]) {
+    const x0 = headCol(f, label)
+    let none = true
+    for (let x = x0; x < x0 + dispWidth(label) + 1; x++) if (f.click(x, hy) !== undefined) none = false
+    ok(none, `48: a click on ${label} does nothing`)
+  }
+}
+// --- row 49: shioaji.liquidationRiskPct, user-level only
+{
+  const liq = async opts => {
+    const f = await frame({ accountText: SAMPLE, ...opts })
+    return { v: val(f, 'TMFJ6', LIQ), logs: f.band.logs }
+  }
+  // 40%: 600,000 - 200,000 = 400,000 / 100 -> 19,450
+  ok((await liq({ userConfig: { shioaji: { liquidationRiskPct: 40 } } })).v === '19,450', '49: user 40%: 19,450')
+  ok((await liq({ userConfig: { shioaji: { liquidationRiskPct: 0 } } })).v === '17,450', '49: user 0%: equity itself, 17,450')
+  const proj = await liq({ projectExtra: { shioaji: { liquidationRiskPct: 40 } } })
+  ok(proj.v === '18,700', `49: project 40% alone: ignored, 25% default: ${proj.v}`)
+  ok(proj.logs.some(l => l.includes('shioaji.liquidationRiskPct') && l.includes('已忽略')), `49: the project value is logged as ignored: ${proj.logs.filter(l => l.includes('忽略')).join(' / ')}`)
+  ok((await liq({ userConfig: { shioaji: { liquidationRiskPct: 40 } }, projectExtra: { shioaji: { liquidationRiskPct: 10 } } })).v === '19,450', '49: user 40% + project 10%: the user wins')
+  for (const bad of [150, -5, '40', null, true]) {
+    const r = await liq({ userConfig: { shioaji: { liquidationRiskPct: bad } } })
+    ok(r.v === '18,700', `49: user ${JSON.stringify(bad)}: falls back to 25%: ${r.v}`)
+  }
+}
+// --- row 50: line 1 in 元 with the estimate; narrow widths still fit
+{
+  const opts = { accountText: withRef({ TMFJ6: { qty: 5, price: 23450 } }), holdingsFile: TWO, quotes: liveQuotes() }
+  const f = await frame(opts)
+  ok(lineOf(f.rows[1]).endsWith('距追繳 ≈217,500 元'), `50: estimated, two underlyings: "${lineOf(f.rows[1])}"`)
+  ok(val(f, 'TMFJ6', CALL) === '≈19,150' && val(f, 'SRFJ6', CALL) === '≈95.38', `50: rows carry ≈ (23,500 - 4,350; 106.25 - 10.875 up): ${val(f, 'TMFJ6', CALL)} / ${val(f, 'SRFJ6', CALL)}`)
+  for (const cols of [60, 40, 30]) {
+    const g = await frame(opts, cols)
+    const l1 = lineOf(g.rows[1])
+    ok(dispWidth(textOf(g.rows[1])) <= cols - 1 && /距追繳 ≈217,500( 元)?$/.test(l1), `50: ${cols} cols: fits, keeps 距追繳: "${l1}"`)
+  }
+}
+// --- row 51: a single-underlying book keeps points, the report's two frames
+{
+  const a = await frame({ accountText: SAMPLE, holdingsFile: book(TMF(5), MXF(1)) }, 120)
+  show('(a) TMF 5 + MXF 1 long, 120 cols', a)
+  ok(lineOf(a.rows[1]) === LINE1, `51: TMF+MXF: points as before: "${lineOf(a.rows[1])}"`)
+  show('(b) TMF 5 + SRF 20 long, 120 cols', twoGroups)
 }
 
 done()

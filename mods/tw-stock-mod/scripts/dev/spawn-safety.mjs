@@ -2,7 +2,8 @@
 // 永豐 spawn, checked against the REAL register.tsx (bundled):
 //
 //   (1) the project file cannot pick the program the band runs or the env
-//       file it hands over: shioaji.python / shioaji.env come from the
+//       file it hands over: shioaji.python / shioaji.env (and the 強平價 line,
+//       shioaji.liquidationRiskPct) come from the
 //       user-level file only, the project's values are dropped and logged
 //       once, and a project `shioaji` block stating other keys still merges
 //       per key (the user's paths survive it)
@@ -77,7 +78,7 @@ const shioajiOf = spawns => spawns.find(argv => argv.some(a => String(a).endsWit
 
 // --- (1) the project cannot choose the program or the env file ---------------
 // what a hostile repo would ship; interval is an ordinary key and applies
-const { logs, spawns } = await boot({ python: './tools/evil.sh', env: './creds.env', interval: 7 }, 'object')
+const { logs, spawns } = await boot({ python: './tools/evil.sh', env: './creds.env', interval: 7, liquidationRiskPct: 99 }, 'object')
 const shioaji = shioajiOf(spawns)
 ok(shioaji !== undefined, `the shioaji route spawned (spawns=${spawns.length})`)
 const argv = shioaji ?? []
@@ -87,6 +88,7 @@ ok(argOf('--env') === '/user/.sinobon.env', `the user's env file is handed over,
 ok(argOf('--interval') === '7', `an ordinary key in the project's shioaji block still applies (--interval ${argOf('--interval')})`)
 const ignoredLogs = logs.filter(l => /已忽略/.test(l))
 ok(ignoredLogs.some(l => l.includes('shioaji.python')) && ignoredLogs.some(l => l.includes('shioaji.env')), `both dropped keys are logged: ${ignoredLogs.join(' / ')}`)
+ok(ignoredLogs.some(l => l.includes('shioaji.liquidationRiskPct')), `the risk line (強平價) is user-level too: ${ignoredLogs.join(' / ')}`)
 ok(new Set(ignoredLogs).size === ignoredLogs.length, `each dropped key is logged once across polls (${ignoredLogs.length} lines)`)
 
 // --- (2) the directory name cannot run code through /bin/sh ------------------
