@@ -7,7 +7,7 @@ import { TIMEFRAMES } from './quotes.ts'
 import type { Bar, FileQuote, Holding, IndexRow, PricedHolding, Timeframe } from './quotes.ts'
 import { asRecord, num, parseHoldingsList, positive, str } from './config.ts'
 import type { Config } from './config.ts'
-import type { AccountFill, AccountMargin, AccountSummary, RealizedWindow } from './board.tsx'
+import type { AccountFill, AccountLive, AccountMargin, AccountRef, AccountSummary, RealizedWindow } from './board.tsx'
 
 export type QuotesFile = {
   asOf: number
@@ -310,7 +310,7 @@ export function pricedHoldings(
 }
 
 // --- futures account file (futures-account.json, runtime dir only) ----------
-export type AccountFile = Omit<AccountSummary, 'lines'>
+export type AccountFile = Omit<AccountSummary, 'lines' | 'live'>
 
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 
@@ -319,6 +319,7 @@ function parseMargin(value: unknown): AccountMargin | null | undefined {
   const m = asRecord(value)
   const keys = ['asOf', 'riskIndicator', 'equity', 'availableMargin', 'maintenanceMargin', 'marginCall'] as const
   if (!m || !keys.every(k => finite(m[k]))) return undefined
+  const ref = parseRef(m.ref)
   return {
     asOf: m.asOf as number,
     riskIndicator: m.riskIndicator as number,
@@ -326,7 +327,50 @@ function parseMargin(value: unknown): AccountMargin | null | undefined {
     availableMargin: m.availableMargin as number,
     maintenanceMargin: m.maintenanceMargin as number,
     marginCall: m.marginCall as number,
+    ...(finite(m.initialMargin) ? { initialMargin: m.initialMargin } : {}),
+    ...(ref !== undefined ? { ref } : {}),
   }
+}
+
+// lenient on purpose: a bad ref only costs the live estimate, never the broker's own figures
+function parseRef(value: unknown): Record<string, AccountRef> | null | undefined {
+  if (value === null) return null
+  const obj = asRecord(value)
+  if (!obj) return undefined
+  const out: Record<string, AccountRef> = {}
+  for (const [code, raw] of Object.entries(obj)) {
+    const r = asRecord(raw)
+    if (!r || !finite(r.qty) || !finite(r.price)) return undefined
+    out[code] = { qty: r.qty, price: r.price }
+  }
+  return out
+}
+
+/**
+ * The margin re-estimated between the fetcher's 60 s margin() queries:
+ * equity moves by Σ ref qty × multiplier × (live − ref price). All or
+ * nothing - every ref code needs a quote traded after margin.asOf (dataAt,
+ * else asOf) and a holdings multiplier, or the broker figures stand. The
+ * caller gates on the market being open; a zero move is no estimate.
+ */
+export function accountEstimate(
+  margin: AccountMargin | null,
+  holdings: Holding[],
+  quotesFile: QuotesFile | undefined,
+): AccountLive | undefined {
+  if (!margin?.ref || !quotesFile || margin.initialMargin === undefined) return undefined
+  if ((quotesFile.dataAt ?? quotesFile.asOf) <= margin.asOf) return undefined
+  let delta = 0
+  for (const [code, ref] of Object.entries(margin.ref)) {
+    const price = quotesFile.quotes[code]?.price
+    const multiplier = holdings.find(h => h.code === code)?.multiplier
+    if (!finite(price) || !finite(multiplier)) return undefined
+    delta += ref.qty * multiplier * (price - ref.price)
+  }
+  if (delta === 0) return undefined
+  const equity = margin.equity + delta
+  const im = margin.initialMargin
+  return { equity, availableMargin: equity - im, riskIndicator: im > 0 ? Math.floor((equity / im) * 100) : null }
 }
 
 function parseWindow(value: unknown): RealizedWindow | null | undefined {

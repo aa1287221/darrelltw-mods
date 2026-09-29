@@ -7,13 +7,13 @@ import { PNL_SORT_KEYS, PNL_SORT_LABELS, TIMEFRAMES, demoBars, demoPrice, quoteR
 import type { Bar, ChartMode, FileQuote, IndexRow, PnlSortKey, PricedHolding, QuoteRow, Timeframe } from './quotes.ts'
 import { asRecord, defaultConfig, effectiveColumns, feedInterval, feedMarkets, fitBand, mergeConfigRoots, num, parseConfigRoot, parseJsonRecord, requestsPerTick, str } from './config.ts'
 import type { BoardLayout, Config, FeedExtras, Fit } from './config.ts'
-import { holdingsFor, parseAccountFile, parseHoldingsFile, parseQuotes, pricedHoldings } from './files.ts'
+import { accountEstimate, holdingsFor, parseAccountFile, parseHoldingsFile, parseQuotes, pricedHoldings } from './files.ts'
 import type { AccountFile } from './files.ts'
 import type { HoldingsFile, QuotesFile } from './files.ts'
 import { FEED_HEADERS, chartUrl, misChannel, misUrl, parseChartBars, parseMis, parseSpark, pionexSymbol, sparkUrl, yahooSymbol } from './feeds.ts'
 import { DIM, MARKET_SELECT_LABEL, MOON, MOON_BLUE, ORANGE, RIGHT_BUTTON_GROUP_COLS, SELECT_LABEL_CHROME_COLS, SUN, buildCycle, cycleButtonLabel, dispWidth, forkTabLabel, marketButtonLabel, marketSelectOptions, nextCycleStop, sameStop, stopOf, tabKey, tabLabel, tabRowWidth, tabsGroupWidth } from './switcher.ts'
 import type { CycleStop, MarketSelectValue, MarketStop } from './switcher.ts'
-import type { AccountSummary, BoardProps as ClientBoardProps } from './board.tsx'
+import type { AccountLive, AccountSummary, BoardProps as ClientBoardProps } from './board.tsx'
 
 // tw-stock-mod: a watchlist band above the Claude Code prompt. Taiwan trading
 // hours show the Taiwan list, US trading hours show the US list, and the
@@ -482,7 +482,11 @@ function buildProps(
   // back to the SAME time the watchlist footer already shows for this
   // market (quotesFile's dataAt), and only to `now` when neither exists.
   const holdingsAt = rawHoldingsAt || quotesFile?.dataAt || now
-  const account = view === 'pnl' && market === 'tf' ? accountFor(accountFile, fit.pnlRows) : undefined
+  // the live estimate only while tf trades: a held closing snapshot must not move the account
+  const account =
+    view === 'pnl' && market === 'tf'
+      ? accountFor(accountFile, fit.pnlRows, phase === 'open' && accountFile ? accountEstimate(accountFile.margin, rawHoldings, quotesFile) : undefined)
+      : undefined
   // the summary lines come out of the holding rows, so the band keeps its height (#27)
   const pnlRows = fit.pnlRows - (account?.lines ?? 0)
   const maxScroll = Math.max(0, priced.length - pnlRows)
@@ -590,15 +594,16 @@ function buildProps(
  * The tf pnl view's account summary, or undefined when there is nothing to
  * draw. Two lines when margin or any realized window is known and the rows
  * leave at least one holding row under them; none otherwise, and a file with
- * only fills still feeds the fills column.
+ * only fills still feeds the fills column. `live` is accountEstimate's
+ * re-estimated margin, passed through for line 1.
  */
-function accountFor(file: AccountFile | undefined, pnlRows: number): AccountSummary | undefined {
+function accountFor(file: AccountFile | undefined, pnlRows: number, live: AccountLive | undefined): AccountSummary | undefined {
   if (!file) return undefined
   const { today, month, year } = file.realized
   const known = file.margin !== null || today !== null || month !== null || year !== null
   const lines = known && pnlRows - ACCOUNT_LINES >= 1 ? ACCOUNT_LINES : 0
   if (lines === 0 && Object.keys(file.fills).length === 0) return undefined
-  return { ...file, lines }
+  return { ...file, lines, ...(live ? { live } : {}) }
 }
 
 // --- module state (memory only: a fresh session starts unsnoozed) ----------

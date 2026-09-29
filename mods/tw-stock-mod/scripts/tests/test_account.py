@@ -58,6 +58,8 @@ class FakeApi:
         self.details = {}   # position id -> [detail rows]
         self.pl_rows = {}   # (begin, end) -> rows; default []
         self.pl_error = None
+        self.positions_result = []
+        self.positions_error = None
 
     def margin(self, account):
         self.calls.append(("margin",))
@@ -79,8 +81,13 @@ class FakeApi:
         self.calls.append(("summary",))  # recorded first: poll() swallows exceptions
         raise AssertionError("list_profit_loss_summary must never be called")
 
-    def list_positions(self, *a, **k):
-        raise AssertionError("the loop hands positions in; the account fetcher does not re-query them")
+    def list_positions(self, account=None, *a, **k):
+        # margin.ref: queried right after a successful margin(), on the futures account only
+        self.calls.append(("positions",))
+        assert account is self.futopt_account, "margin.ref reads the futures account's positions"
+        if self.positions_error:
+            raise self.positions_error
+        return self.positions_result
 
 
 def position(pos_id, code, qty, direction="Buy"):
@@ -119,7 +126,7 @@ def test_margin_maps_every_field_and_keeps_raw_risk_percentage():
     api, (acct, *_rest) = FakeApi(), make()
     payload = acct.poll(api, [])
     margin = payload["margin"]
-    assert set(margin) == set(MARGIN_KEYS.values()) | {"asOf"}
+    assert set(margin) == set(MARGIN_KEYS.values()) | {"asOf", "ref"}
     for sdk_name, key in MARGIN_KEYS.items():
         assert margin[key] == MARGIN_FIELDS[sdk_name], key
     assert margin["riskIndicator"] == 120  # a percentage number, not 1.05
@@ -135,7 +142,7 @@ def test_all_zero_simulation_margin_still_produces_a_payload():
     payload = acct.poll(api, [])
     assert payload is not None
     assert payload["margin"]["equity"] == 0 and payload["margin"]["riskIndicator"] == 0
-    assert set(payload["margin"]) == set(MARGIN_KEYS.values()) | {"asOf"}
+    assert set(payload["margin"]) == set(MARGIN_KEYS.values()) | {"asOf", "ref"}
 
 
 # 3. fills ----------------------------------------------------------------
@@ -394,6 +401,95 @@ def test_default_today_is_the_taipei_date(monkeypatch):
     api = FakeApi()
     fetcher.AccountFetcher().poll(api, [])
     assert ("pl", "2026-10-01", "2026-10-01") in queries(api, "pl")
+
+
+# 9. margin.ref: the positions the margin was read against --------------------
+
+def ref_position(code, qty, direction="Buy", last_price=23450.0):
+    return NS(id="x", code=code, quantity=qty, direction=direction, price=23400.0, last_price=last_price, pnl=0)
+
+
+def test_ref_signed_by_direction_with_last_price():
+    api, (acct, *_rest) = FakeApi(), make()
+    api.positions_result = [ref_position("TMFJ6", 5, "Buy", 23450.0), ref_position("MXFJ6", 2, "Sell", 23460.5)]
+    ref = acct.poll(api, [])["margin"]["ref"]
+    assert ref == {"TMFJ6": {"qty": 5, "price": 23450}, "MXFJ6": {"qty": -2, "price": 23460.5}}
+    assert api.calls.index(("positions",)) == api.calls.index(("margin",)) + 1  # right after margin()
+
+
+def test_ref_skips_zero_quantity_rows():
+    api, (acct, *_rest) = FakeApi(), make()
+    api.positions_result = [ref_position("TMFJ6", 0), ref_position("MXFJ6", 1)]
+    assert acct.poll(api, [])["margin"]["ref"] == {"MXFJ6": {"qty": 1, "price": 23450}}
+
+
+def test_ref_empty_positions_is_an_empty_object_not_null():
+    api, (acct, *_rest) = FakeApi(), make()
+    assert acct.poll(api, [])["margin"]["ref"] == {}
+
+
+def test_ref_sums_rows_of_one_code():
+    api, (acct, *_rest) = FakeApi(), make()
+    api.positions_result = [ref_position("TMFJ6", 3, "Buy", 23450.0), ref_position("TMFJ6", 1, "Sell", 23455.0)]
+    assert acct.poll(api, [])["margin"]["ref"] == {"TMFJ6": {"qty": 2, "price": 23455}}
+
+
+def test_ref_null_when_a_held_row_has_no_last_price():
+    api, (acct, *_rest) = FakeApi(), make()
+    api.positions_result = [ref_position("TMFJ6", 1), ref_position("MXFJ6", 1, last_price=0.0)]
+    payload = acct.poll(api, [])
+    assert payload["margin"]["ref"] is None and payload["margin"]["equity"] == MARGIN_FIELDS["equity"]
+
+
+def test_ref_failure_is_null_margin_kept_and_logged_once(capsys):
+    api, (acct, fast, _slow, state) = FakeApi(), make()
+    api.positions_error = RuntimeError("positions down")
+    for _ in range(3):
+        payload = acct.poll(api, [])
+        margin = payload["margin"]
+        assert margin["ref"] is None
+        assert margin["equity"] == MARGIN_FIELDS["equity"] and margin["asOf"] == state["now"]  # margin still stored
+        fast.t += 60
+        state["now"] += 60000
+    assert capsys.readouterr().err.count("positions down") == 1
+
+
+def test_ref_recovers_after_a_failure():
+    api, (acct, fast, *_rest) = FakeApi(), make()
+    api.positions_error = RuntimeError("positions down")
+    assert acct.poll(api, [])["margin"]["ref"] is None
+    api.positions_error = None
+    api.positions_result = [ref_position("TMFJ6", 1)]
+    fast.t += 60
+    assert acct.poll(api, [])["margin"]["ref"] == {"TMFJ6": {"qty": 1, "price": 23450}}
+
+
+def test_ref_not_queried_when_margin_fails():
+    api, (acct, *_rest) = FakeApi(), make()
+    api.margin_error = RuntimeError("boom")
+    acct.poll(api, [])
+    assert queries(api, "positions") == []
+
+
+def test_ref_queried_only_in_the_fast_tick():
+    api, (acct, fast, slow, _s) = FakeApi(), make()
+    acct.poll(api, [])
+    assert len(queries(api, "positions")) == 1
+    slow.t += 600   # only the slow clock is due
+    assert acct.poll(api, []) is not None
+    assert len(queries(api, "positions")) == 1
+    fast.t += 60
+    acct.poll(api, [])
+    assert len(queries(api, "positions")) == 2 and len(queries(api, "margin")) == 2
+
+
+def test_ref_failure_after_margin_failure_keeps_last_margin_and_its_ref():
+    api, (acct, fast, *_rest) = FakeApi(), make()
+    api.positions_result = [ref_position("TMFJ6", 1)]
+    first = acct.poll(api, [])["margin"]
+    api.margin_error = RuntimeError("boom")
+    fast.t += 60
+    assert acct.poll(api, [])["margin"] == first  # last margin with the ref it was read against
 
 
 # loop integration (subprocess against a stub shioaji, like test_give_up) ---

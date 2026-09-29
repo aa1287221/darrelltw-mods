@@ -967,6 +967,26 @@ def realized_window_starts(today: date) -> dict[str, date]:
     return {"today": today, "month": today.replace(day=1), "year": today.replace(month=1, day=1)}
 
 
+def account_ref(positions: list) -> dict | None:
+    """list_positions read right after margin() -> margin.ref: {code: {qty signed (Sell negative), price: last_price}},
+    the point the band re-estimates equity from between margin queries. A held row without a last price makes
+    the whole ref null - an estimate off a partial ref would be worse than none."""
+    ref: dict = {}
+    for pos in positions or []:
+        code = str(field(pos, "code", "")).strip()
+        qty = float(field(pos, "quantity", 0) or 0)
+        if not code or qty == 0:
+            continue
+        price = float(field(pos, "last_price", 0) or 0)
+        if price <= 0:
+            return None
+        if "Sell" in str(field(pos, "direction", "Buy")):
+            qty = -qty
+        prior = ref.get(code, {}).get("qty", 0)
+        ref[code] = {"qty": account_number(prior + qty), "price": account_number(price)}
+    return ref
+
+
 def build_account_payload(margin: dict | None, fills: dict | None, realized: dict, as_of_ms: int) -> dict:
     """futures-account.json's shape; a section not yet queried successfully is null."""
     return {"asOf": as_of_ms, "source": "永豐", "margin": margin, "fills": fills, "realized": realized}
@@ -974,7 +994,7 @@ def build_account_payload(margin: dict | None, fills: dict | None, realized: dic
 
 class AccountFetcher:
     """Futures account summary state. poll() runs once per tf tick: the fast clock (60 s) gates
-    margin, fills and today's realized P/L, the slow clock (600 s) the month/year windows. A section
+    margin (plus the list_positions behind margin.ref), fills and today's realized P/L, the slow clock (600 s) the month/year windows. A section
     that fails keeps its last value and asOf, logs once per change of error, and never raises out -
     account data is not quotes, so it can not count toward the give-up tally."""
 
@@ -1015,6 +1035,8 @@ class AccountFetcher:
             margin = self._attempt("margin", lambda: api.margin(account))
             if margin is not None:
                 self.margin = account_margin_section(margin, now_ms)
+                positions_now = self._attempt("positions", lambda: api.list_positions(account))
+                self.margin["ref"] = None if positions_now is None else account_ref(positions_now)
             self._poll_fills(api, account, positions)
             today = self.today()
             self._poll_window(api, account, "today", today, today)
