@@ -944,8 +944,10 @@ position with no live price, a closed market or no move at all shows the
 broker's own figures without `≈`. The two lines come out of the table's holding
 rows, so the band is never taller for them, and a band too short to keep a
 holding row under them skips them. A position with two or more fills adds a
-`4筆 23,410–23,520` column (fill count, entry-price range) when the terminal
-is wide enough. No file, or one that does not parse, leaves 期貨庫存 exactly
+`建倉明細` column (header above it; `4筆 23,410–23,520` = fill count, entry-price
+range) when the terminal is wide enough. Both ends use the fewest decimals that
+show every fill price exactly (0-2: `106.25–107.00`, `107.5–108.0`), and a single
+distinct price shows once (`4筆 23,450`). The column is not sortable. No file, or one that does not parse, leaves 期貨庫存 exactly
 as before.
 
 **Tick overlay.** On top of the 10-second snapshot loop the fetcher

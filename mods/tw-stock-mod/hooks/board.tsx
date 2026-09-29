@@ -926,13 +926,18 @@ function drawAccount(line1: Row, line2: Row, account: AccountSummary, props: Boa
 }
 
 /** `4筆 23,410–23,520`: fill count and entry-price range, for 2 or more fills; '' otherwise */
-function fillsLabel(fills: AccountFill[] | undefined, decimals: number | undefined): string {
+function fillsLabel(fills: AccountFill[] | undefined): string {
   if (!fills || fills.length < 2) return ''
-  const prices = fills.map(f => f.price).filter((p): p is number => p !== null)
+  // round first so float noise (106.2500000001) is not read as extra decimals
+  const prices = fills.map(f => f.price).filter((p): p is number => p !== null).map(p => Math.round(p * 100) / 100)
   if (prices.length === 0) return `${fills.length}筆`
-  const digits = decimals ?? (prices.every(Number.isInteger) ? 0 : 2)
-  return `${fills.length}筆 ${thousands(Math.min(...prices), digits)}–${thousands(Math.max(...prices), digits)}`
+  const digits = prices.every(p => Number.isInteger(p)) ? 0 : prices.every(p => Number.isInteger(p * 10)) ? 1 : 2
+  const lo = Math.min(...prices)
+  const hi = Math.max(...prices)
+  return `${fills.length}筆 ${lo === hi ? thousands(lo, digits) : `${thousands(lo, digits)}–${thousands(hi, digits)}`}`
 }
+
+const FILLS_HEADER = '建倉明細'
 
 // --- pnl (損益) layout -------------------------------------------------------
 // One column of right-anchored numeric fields: 張數/成本/現價/今日%/今日損益/
@@ -1668,6 +1673,12 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     putRightSortable(lay.todayPnlRight, 'todayPnl', '今日損益')
     putRightSortable(lay.totalPnlRight, 'totalPnl', '總損益')
     putRightSortable(lay.totalPnlPctRight, 'totalPnlPct', '損益%')
+    // 建倉明細: shown with the column, never without it; not sortable, so no sortHits entry
+    const fillsCol = lay.totalPnlPctRight + 2
+    const fillLabels = page.map(h => (account ? fillsLabel(account.fills[h.code]) : ''))
+    const fillsWidth = Math.max(dispWidth(FILLS_HEADER), ...fillLabels.map(dispWidth))
+    const showFills = fillLabels.some(Boolean) && fillsCol + fillsWidth <= (surface.columns || 80) - 1
+    if (showFills) head.put(fillsCol, FILLS_HEADER, HEAD)
     // header cells only - no row is a click target yet (item 8 of the
     // original spec still holds for the data rows themselves)
     picker.hit = (x, y) => {
@@ -1754,9 +1765,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
         flapRight(r, lay.todayPnlRight, signed(wasTodayPnl, decimals), signed(todayPnl, decimals), tone(props.market, todayPnl), turn, left, stagger)
         flapRight(r, lay.totalPnlRight, signed(wasTotalPnl, decimals), signed(totalPnl, decimals), tone(props.market, totalPnl), turn, left, stagger)
         flapRight(r, lay.totalPnlPctRight, pct(wasTotalPnlPct), pct(totalPnlPct), tone(props.market, totalPnlPct), turn, left, stagger)
-        const fills = account ? fillsLabel(account.fills[h.code], h.decimals) : ''
-        const fillsCol = lay.totalPnlPctRight + 2
-        if (fills && fillsCol + dispWidth(fills) <= (surface.columns || 80) - 1) r.put(fillsCol, fills, DIM)
+        if (showFills && fillLabels[i]) r.put(fillsCol, fillLabels[i], DIM)
       }
     }
 

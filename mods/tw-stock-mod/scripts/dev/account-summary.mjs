@@ -27,6 +27,8 @@
 //  24  delta 0 -> no ≈, broker figures
 //  25  narrow widths with the estimate: no wrap, 風險 + 距追繳 kept
 //  26  a quotes rewrite between account writes re-renders the estimate
+//  27-34  fills column: adaptive decimals, one price when min == max, the 建倉明細 header
+//         (present iff the column, aligned with it, not a sort target)
 //
 // Usage: node account-summary.mjs $OUT/register.js $OUT/board.js [--capture]
 process.env.TZ = 'Asia/Taipei' // row 0 prints 更新 HH:MM; the baseline must not depend on the runner's zone
@@ -247,7 +249,8 @@ const BASELINE = {
   tw: 'fc37c2a3d220223c',
   twPnl: 'b1a3d05125f82c60',
   // captured with --capture against b206dfe's bundle: an account file without margin.ref next to moved quotes
-  noRef120: '4d2e8d3099a28860',
+  // noRef120 was 4d2e8d3099a28860 until the fills column got its 建倉明細 header (the sample carries fills): that is the only row that differs
+  noRef120: '581a5a67efc9232f',
   noRef60: 'a8cbb23c3d9c2b44',
 }
 
@@ -548,6 +551,82 @@ for (const cols of [120, 100, 80, 60, 50, 40, 30]) {
   ok(first.includes('權益 ≈605,000'), `26: first quotes: 權益 ≈605,000: "${first}"`)
   // TMFJ6 +70 (3,500) + MXFJ6 +50 (2,500) = +6,000, same account file
   ok(second.includes('權益 ≈606,000'), `26: rewritten quotes, same account file: 權益 ≈606,000: "${second}"`)
+}
+
+// --- rows 27-34: fills column format and header (synthetic prices) --------------------------
+{
+  const fx = prices => prices.map((price, i) => ({ date: '2026-09-17', dseq: `tB0x${i}`, qty: 1, price, pnl: 0 }))
+  const fillsFrame = async (tmf, cols = 120) =>
+    frame({ accountText: JSON.stringify(account({ fills: { TMFJ6: fx(tmf), MXFJ6: FILLS.MXFJ6 } })) }, cols)
+  const rowOf = (f, code) => textOf(f.rows.find(r => textOf(r).includes(code)) ?? [])
+  const headOf = f => f.rows.find(r => textOf(r).includes('代號')) ?? []
+  const hasHead = f => textOf(headOf(f)).includes('建倉明細')
+  const CASES = [
+    ['27 whole', [23883, 24140, 23900], '3筆 23,883–24,140'],
+    ['27 whole, two fills', [23883, 24140], '2筆 23,883–24,140'],
+    ['27 tenths', [107.5, 108], '2筆 107.5–108.0'],
+    ['27 hundredths', [106.25, 107], '2筆 106.25–107.00'],
+    ['27 hundredths in the middle only', [106, 107.25, 108], '3筆 106.00–108.00'],
+    ['28 float noise is 2 decimals', [106.2500000001, 107], '2筆 106.25–107.00'],
+    ['28 float noise that rounds to whole', [106.0000000001, 107], '2筆 106–107'],
+    ['28 cap at 2: 3rd decimal rounds', [106.256, 107], '2筆 106.26–107.00'],
+    ['28 rounds to whole', [106.004, 107], '2筆 106–107'],
+    ['29 one distinct price', [23450, 23450, 23450, 23450], '4筆 23,450'],
+    ['29 one distinct price, tenths', [23450.5, 23450.5], '2筆 23,450.5'],
+    ['29 one distinct price after rounding', [106.25, 106.2500000001], '2筆 106.25'],
+    ['30 a null price is skipped', [107.5, null, 108], '3筆 107.5–108.0'],
+    ['30 all prices null', [null, null], '2筆'],
+  ]
+  for (const [why, prices, want] of CASES) {
+    const line = rowOf(await fillsFrame(prices), 'TMFJ6').trimEnd()
+    ok(line.endsWith(' ' + want), `${why}: "${line.slice(line.indexOf('TMFJ6') + 90).trim()}" ends with "${want}"`)
+  }
+
+  // header: present iff the column is
+  ok(hasHead(sample), `31: header with the column: "${textOf(headOf(sample)).trim()}"`)
+  for (const cols of [116, 120, 140]) ok(hasHead(await fillsFrame([23410, 23520], cols)), `31: ${cols} cols: header`)
+  for (const cols of [115, 100, 80]) {
+    const f = await fillsFrame([23410, 23520], cols)
+    ok(!hasHead(f) && !rowOf(f, 'TMFJ6').includes('筆'), `31: ${cols} cols: no column, no header`)
+  }
+  ok(!hasHead(await fillsFrame([23410])), '31: no row with >= 2 fills: no header')
+  ok(!hasHead(await frame({ accountText: JSON.stringify(account({ fills: {} })) })), '31: empty fills: no header')
+  ok(!hasHead(await frame({ accountText: JSON.stringify(account({ fills: null })) })), '31: fills null: no header')
+  ok(hasHead(await fillsFrame([null, null])), '31: an all-null-price column still has its header')
+
+  // alignment: the cells' left edge, the other headers' style
+  {
+    const col = (row, needle) => dispWidth(textOf(row).slice(0, textOf(row).indexOf(needle)))
+    const head = headOf(sample)
+    const tmf = sample.rows.find(r => textOf(r).includes('TMFJ6'))
+    ok(col(head, '建倉明細') === col(tmf, '4筆'), `32: header left edge ${col(head, '建倉明細')} = cell left edge ${col(tmf, '4筆')}`)
+    ok(col(head, '建倉明細') === 98, '32: at column 98, right of 損益% (ends at 96)')
+    ok(styleOf(head, '建倉明細')?.color === styleOf(head, '代號')?.color && styleOf(head, '建倉明細')?.bold === styleOf(head, '代號')?.bold, '32: styled like the other headers')
+  }
+
+  // width = max(header 8, widest cell): `2筆 1–2` is 7 wide
+  {
+    const at107 = await fillsFrame([1, 2], 107)
+    const at106 = await fillsFrame([1, 2], 106)
+    ok(rowOf(at107, 'TMFJ6').includes('2筆 1–2') && hasHead(at107), '33: 107 cols: 98 + 8 fits, cell and header')
+    ok(!rowOf(at106, 'TMFJ6').includes('筆') && !hasHead(at106), '33: 106 cols: the header does not fit, so neither does the column')
+    ok(hasHead(await fillsFrame([23410, 23520], 116)) && !hasHead(await fillsFrame([23410, 23520], 115)), '33: a wider cell (17) decides the edge')
+  }
+
+  // clicks: the header is not sortable, the others keep their targets
+  {
+    const at = (f, needle) => { const t = textOf(headOf(f)); return dispWidth(t.slice(0, t.indexOf(needle))) + 1 }
+    const noFills = await frame({ accountText: JSON.stringify(account({ fills: {} })) })
+    const hy = sample.rows.findIndex(r => textOf(r).includes('代號'))
+    const want = { 代號: 'code', '今日%': 'today', 今日損益: 'todayPnl', 總損益: 'totalPnl', '損益%': 'totalPnlPct' }
+    for (const [label, key] of Object.entries(want)) {
+      ok(sample.click(at(sample, label), hy)?.sortPnl === key, `34: with the column, a click on ${label} sorts ${key}`)
+      ok(noFills.click(at(noFills, label), hy)?.sortPnl === key, `34: without the column, a click on ${label} sorts ${key}`)
+      ok(at(sample, label) === at(noFills, label), `34: ${label} keeps its position (${at(sample, label)})`)
+    }
+    const x0 = at(sample, '建倉明細')
+    for (let x = x0; x < x0 + 8; x++) ok(sample.click(x, hy) === undefined, `34: a click at x=${x} on 建倉明細 does nothing`)
+  }
 }
 
 done()
