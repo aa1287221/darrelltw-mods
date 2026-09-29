@@ -260,12 +260,22 @@ def test_clocks_are_independent_slow_advancing_does_not_hold_fast_back():
     assert len(queries(api, "margin")) == 2 and len(queries(api, "pl")) == 4  # today again, month/year not
 
 
-def test_between_due_ticks_the_payload_is_still_returned_from_cache():
-    api, (acct, fast, _slow, _s) = FakeApi(), make()
-    first = acct.poll(api, [])
-    fast.t += 1
-    second = acct.poll(api, [])
-    assert second["margin"] == first["margin"] and second["realized"] == first["realized"]
+def test_poll_returns_none_when_no_section_was_queried_this_tick():
+    api, (acct, fast, slow, _s) = FakeApi(), make()
+    assert acct.poll(api, []) is not None
+    calls_after_first = len(api.calls)
+    fast.t += 10; slow.t += 10   # a later tick inside both periods
+    assert acct.poll(api, []) is None
+    assert len(api.calls) == calls_after_first   # and nothing was queried
+    fast.t += 50   # 60 s since the first fast poll
+    assert acct.poll(api, [])["margin"]["asOf"] == NOW_MS
+
+
+def test_poll_returns_payload_when_only_the_slow_clock_is_due():
+    api, (acct, fast, slow, _s) = FakeApi(), make()
+    acct.poll(api, [])
+    slow.t += 600   # only the slow clock moved
+    assert acct.poll(api, []) is not None
 
 
 # 6. a raising margin() ---------------------------------------------------

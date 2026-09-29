@@ -1002,11 +1002,14 @@ class AccountFetcher:
         return value
 
     def poll(self, api, positions: list) -> dict | None:
-        """The payload to write, or None (no signed futures account: nothing is queried)."""
+        """The payload to write, or None: no signed futures account (nothing is queried), or no
+        section was due this tick - the file keeps its last write, so the loop does not rewrite it."""
         account = getattr(api, "futopt_account", None)
         if account is None or not getattr(account, "signed", True):
             return None
+        queried = False
         if self.fast.due():
+            queried = True
             now_ms = self.now_ms()
             self.fast.fetched()  # attempt-based: a failing query waits its period, not every tick
             margin = self._attempt("margin", lambda: api.margin(account))
@@ -1016,11 +1019,14 @@ class AccountFetcher:
             today = self.today()
             self._poll_window(api, account, "today", today, today)
         if self.slow.due():
+            queried = True
             self.slow.fetched()
             today = self.today()
             starts = realized_window_starts(today)
             for name in ("month", "year"):
                 self._poll_window(api, account, name, starts[name], today)
+        if not queried:
+            return None
         return build_account_payload(self.margin, self.fills, self.realized, self.now_ms())
 
     def _poll_fills(self, api, account, positions: list) -> None:
