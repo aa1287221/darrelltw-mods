@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One entry point for the scripts/dev harnesses that can fail: builds
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
-# tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
+# tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross / sticky-rank /
 # file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view /
 # fit-rows / pytest / feed-errors / feed-budget / spawn-safety / sources-order / close-snapshot / account-summary /
 # crypto-feed / crypto-sort / market-select against them (feed-errors, spawn-safety, sources-order, close-snapshot,
@@ -13,7 +13,7 @@
 #
 # rank-cross and chart-nav's "名次交叉" section once pinned the PR-a bug
 # (focus/was.code tracked a table position, not a symbol); that is fixed, so
-# every check here is expected to PASS.
+# every check here is expected to PASS. sticky-rank pins the frozen rank order.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,6 +113,8 @@ JSON
 }
 write_cross_fixture "$FIXTURES/chart-nav"
 write_cross_fixture "$FIXTURES/rank-cross"
+# sticky-rank writes its own config and quotes (12 symbols per market) into this dir
+mkdir -p "$FIXTURES/sticky-rank"
 
 # file-bars: a quotes-file price with no bars of its own, so it has to ask
 # Yahoo for K bars - real network, feed left "auto" since feedBars() itself
@@ -313,6 +315,7 @@ net_check() { if [[ "${SKIP_NETWORK:-0}" == 1 ]]; then skip_check "$1"; else run
 net_check "feed-idle"      node "$SCRIPT_DIR/feed-idle.mjs"   "$OUT/register.js" "$FIXTURES/feed-idle"
 run_check "chart-nav"      node "$SCRIPT_DIR/chart-nav.mjs"   "$OUT/register.js" "$FIXTURES/chart-nav"
 run_check "rank-cross"     node "$SCRIPT_DIR/rank-cross.mjs"  "$OUT/board.js" "$OUT/register.js" "$FIXTURES/rank-cross"
+run_check "sticky-rank"    node "$SCRIPT_DIR/sticky-rank.mjs" "$OUT/register.js" "$FIXTURES/sticky-rank"
 net_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/file-bars"
 run_check "tf-market"      node "$SCRIPT_DIR/tf-market.mjs"   "$OUT/register.js" "$FIXTURES/tf-market" "$FIXTURES/tf-plain"
 run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-quotes" "$FIXTURES/tf-override"

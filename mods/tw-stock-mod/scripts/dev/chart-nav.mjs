@@ -6,6 +6,10 @@
 // (props.quotes[props.focus])，不是代碼。兩檔漲跌幅名次交叉時，同一個 focus
 // 位置換了別檔坐在上面 - 聚焦會靜靜跳到別檔頭上。這段現在預期是紅的（PR-a
 // target），本任務不修 register.tsx，只記錄它。
+//
+// 後記：PR-a 已修，之後名次又改成凍結（sticky order，見 sticky-rank.mjs）：純價格
+// 對調不再重排，所以「名次交叉」段現在只確認 focus 沒動；真正讓名次重排的是清單
+// 代碼組改變，分頁跟隨段改用它來製造「名次掉到第 2 頁」。
 import { readFile, writeFile } from 'node:fs/promises'
 import { ok, done } from './assert.mjs'
 globalThis.h = (t, p, ...k) => ({ type: t, props: p ?? {}, kids: k.flat() })
@@ -178,23 +182,34 @@ const rank5Code = p13.quotes[p13.focus]?.code
 ok(rank5Code === '8888', '連按 4 次下一檔，焦點停在名次第五 8888（仍在第 1 頁）')
 ok(p13.page === 0, '名次第五還在第 1 頁')
 
-// 讓 8888（目前名次第五）與 9999（名次第六）對調 -> 8888 掉到第 6 名，該
-// 翻到第 2 頁；page/autoPage 在 chart 視圖凍結，唯一該動 page 的是本次要
-// 修的 page-follow 邏輯。
-await writeSixQuotes([106, 105, 104, 103, 101, 102]) // 8888 變最低、9999 變第五
-for (const fn of timers) { await fn(); await new Promise(r => setTimeout(r, 400)) }
+// 名次已凍結（sticky order），單純改價格不會讓 8888 掉名次；能讓名次真的重排
+// 的是清單代碼組改變。所以加一檔 3000（漲幅最高）-> 重排，8888 掉到第 6 名，該
+// 翻到第 2 頁；page/autoPage 在 chart 視圖凍結，唯一該動 page 的是 page-follow 邏輯。
+const setCodes = async (codes, prices) => {
+  await writeFile(bandPath, JSON.stringify({ ...sixBand, tw: codes.map(code => ({ code, name: `第${code}檔`, prevClose: 100 })) }, null, 2))
+  await writeFile(
+    quotesPath,
+    JSON.stringify(
+      { asOf: (clock += 1000), market: 'tw', quotes: Object.fromEntries(codes.map(code => [code, { price: prices[code], prevClose: 100, name: `第${code}檔` }])) },
+      null,
+      2,
+    ),
+  )
+  for (const fn of timers) { await fn(); await new Promise(r => setTimeout(r, 400)) }
+}
+const sevenPrices = { 3000: 110, 4444: 106, 5555: 105, 6666: 104, 7777: 103, 8888: 102, 9999: 101 }
+await setCodes(['3000', ...sixCodes], sevenPrices)
 
 let { props: p14, btns: b14 } = await show('分頁跟隨：掉到第六名（該翻頁）')
 ok(p14.view === 'chart', '掉名次後仍在圖表畫面')
 ok(p14.page === 1, '8888 掉到第六名後，page 跟著翻到第 2 頁')
-ok(p14.quotes.length === 1, '第 2 頁只有 1 檔（6 檔 / 每頁 5 檔）')
+ok(p14.quotes.length === 2, '第 2 頁有 2 檔（7 檔 / 每頁 5 檔）')
 ok(p14.quotes[p14.focus]?.code === rank5Code, `K 線標題仍是 ${rank5Code}，不是被換成第 2 頁的新占位者`)
 const nextBtn14 = b14.find(x => x.label.startsWith('下一檔'))
-ok(nextBtn14.label === '下一檔 ▶ 1/1', `按鈕列位置顯示 1/1，反映新頁位置：實際 "${nextBtn14.label}"`)
+ok(nextBtn14.label === '下一檔 ▶ 1/2', `按鈕列位置顯示 1/2，反映新頁位置：實際 "${nextBtn14.label}"`)
 
-// 再讓 8888 升回名次第一，驗證跟得回去（page 退回第 1 頁）。
-await writeSixQuotes([105, 104, 103, 102, 110, 101]) // 8888 變最高
-for (const fn of timers) { await fn(); await new Promise(r => setTimeout(r, 400)) }
+// 再拿掉 3000 並讓 8888 變最高 -> 重排，8888 升回名次第一，驗證跟得回去（page 退回第 1 頁）。
+await setCodes(sixCodes, { 4444: 105, 5555: 104, 6666: 103, 7777: 102, 8888: 110, 9999: 101 })
 
 let { props: p15 } = await show('分頁跟隨：升回第一名')
 ok(p15.page === 0, '8888 升回第一名後，page 跟著退回第 1 頁')

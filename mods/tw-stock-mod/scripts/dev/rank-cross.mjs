@@ -1,17 +1,15 @@
-// PR-a target: 表格畫面（board.tsx 的九列）在漲跌幅名次交叉時，代碼欄應該要
-// 跟翻頁時一樣用 was.code/was.name 標出「這格剛換過人」，讓人看得出來剛剛坐
-// 在這裡的是哪一檔。但 hooks/register.tsx 的 buildProps 只在真的翻頁
-// （setPage 寫入 pageFrom）才會把 was 併進 shown[i]；純粹排序重排（sort 名次
-// 對調、沒有 setPage）完全不會設 was - 代碼欄靜靜換人，翻牌動畫也不會播。
-// 這裡讓兩檔漲跌幅名次對調（單頁清單，pageMs:0 關掉自動翻頁，排除任何巧合的
-// 翻頁事件），斷言換位那一列出現 was.code。這條斷言現在預期是紅的。
-//
-// board-harness.mjs 的既有結構是單次、非時鐘驅動的 render，retrofit 成能在
-// render 之間換報價、推時鐘、手動觸發 poll() 的 timer 不容易塞回去而不動它
-// 原本的用途（印文字板給人看），所以另立這支：register.tsx 的 props 才是
-// PR-a 的戰場（was 是 buildProps 算出來的），board.tsx 只是把它畫出來，這裡
-// 兩者都做 - 印出 board 的文字板給人眼睛核對，斷言則直接讀 props，不去拆
-// board.tsx 的翻牌動畫frame（那是時間軸換算，跟這個 bug 無關，見 README）。
+// Rank cross, after the sticky order (see sticky-rank.mjs). This file used to
+// assert the opposite: that two symbols swapping rank mid-page marks the row
+// with was.code (PR-a). The table no longer re-sorts on every snapshot, so a
+// pct swap does not move anyone - there is no occupant change to mark, and
+// that old assertion is superseded, not weakened. What this still guards:
+//   1. a pct swap keeps the order and flaps prices only (was without code);
+//   2. an occupant change that DOES happen outside a page turn (the watchlist
+//      grows, so the order is re-ranked) is still marked with was.code - the
+//      PR-a safety net in buildProps' else branch.
+// Single page (pageMs:0), feed off, so no page turn or network is involved.
+// register.tsx's props are the battlefield; board.tsx is only printed for
+// eyes (its flap timeline is not this bug's business, see README).
 //
 // Usage: node rank-cross.mjs <board.js> <register.js> <projDir>
 import { readFile, writeFile } from 'node:fs/promises'
@@ -69,16 +67,17 @@ const boardText = props => {
 }
 
 let props = await drawProps()
-console.log('交叉前板面：')
+console.log('對調前板面：')
 for (const line of boardText(props)) console.log('|' + line + '|')
 ok(props.view === 'table', '起始是清單畫面')
 
 const beforeOrder = props.quotes.map(q => q.code)
-console.log(`交叉前名次  ${props.quotes.map(q => `${q.code}(${q.pct}%)`).join(' > ')}`)
+console.log(`對調前名次  ${props.quotes.map(q => `${q.code}(${q.pct}%)`).join(' > ')}`)
 ok(props.quotes.every(q => q.was === undefined), '交叉前沒有任何一列在翻牌狀態')
 
-// 讓名次第一、第二對調（見 chart-nav.mjs 同一招）
+// swap the top two pcts (same trick as chart-nav.mjs)
 const quotesPath = `${projDir}/.claude/stock-quotes.json`
+const configPath = `${projDir}/.claude/stock-band.json`
 const before = JSON.parse(await readFile(quotesPath, 'utf8'))
 const [topCode, secondCode] = beforeOrder
 const swapped = {
@@ -90,16 +89,32 @@ await writeFile(quotesPath, JSON.stringify(swapped, null, 2))
 for (const fn of timers) { await fn(); await new Promise(r => setTimeout(r, 400)) }
 
 props = await drawProps()
-console.log('\n交叉後板面：')
+console.log('\n對調後板面（名次凍結）：')
 for (const line of boardText(props)) console.log('|' + line + '|')
-const afterOrder = props.quotes.map(q => q.code)
-console.log(`交叉後名次  ${props.quotes.map(q => `${q.code}(${q.pct}%)`).join(' > ')}`)
-ok(afterOrder[0] === secondCode && afterOrder[1] === topCode, '交叉後名次第一、第二確實對調了（sort 已經重排）')
-
-const crossedRow = props.quotes[0]
+ok(props.quotes.map(q => q.code).join() === beforeOrder.join(), `pct 對調後名次凍結，沒有人換位：${props.quotes.map(q => q.code).join(' > ')}`)
+ok(props.quotes.every(q => q.was?.code === undefined), '沒有任何一列換代碼（was.code 全空）')
+const moved = props.quotes.filter(q => q.was !== undefined)
 ok(
-  crossedRow.was?.code === topCode,
-  `第 0 列的代碼從 ${topCode} 換成 ${secondCode}，但沒有 was.code 標記翻牌，代碼欄靜靜換人 (PR-a target)`,
+  moved.some(q => q.code === topCode) && moved.some(q => q.code === secondCode),
+  `價格變動的兩列仍只翻價格（was 有 price、沒有 code）：${moved.map(q => q.code).join(' ')}`,
 )
+
+// grow the watchlist: a NEW top-ranked symbol re-ranks the order, every row below
+// it changes occupant, and that must still show as was.code (no page turn here)
+const config = JSON.parse(await readFile(configPath, 'utf8'))
+config.tw = [...config.tw, { code: '4444', name: '丁', prevClose: 100 }]
+await writeFile(configPath, JSON.stringify(config, null, 2))
+const grown = JSON.parse(await readFile(quotesPath, 'utf8'))
+await writeFile(quotesPath, JSON.stringify({ ...grown, asOf: (clock += 1000), quotes: { ...grown.quotes, 4444: { price: 110, prevClose: 100, name: '丁' } } }, null, 2))
+for (const fn of timers) { await fn(); await new Promise(r => setTimeout(r, 400)) }
+
+props = await drawProps()
+console.log('\n新增代碼後板面：')
+for (const line of boardText(props)) console.log('|' + line + '|')
+ok(props.quotes[0].code === '4444', `新增的最高漲幅代碼排第一：${props.quotes.map(q => q.code).join(' > ')}`)
+// frozen order was 1111, 2222, 3333: row 0 and row 2 change occupant, row 1 (2222) does not
+ok(props.quotes[0].was?.code === beforeOrder[0], `第 0 列換了人（${beforeOrder[0]} -> 4444），沒有 page turn 也要有 was.code (PR-a)`)
+ok(props.quotes[2].was?.code === beforeOrder[2], `第 2 列換了人（${beforeOrder[2]} -> ${props.quotes[2].code}），同樣要有 was.code`)
+ok(props.quotes[1].was?.code === undefined, '第 1 列同一檔（2222），沒有 was.code')
 
 done()

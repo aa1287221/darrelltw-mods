@@ -16,7 +16,7 @@ synthetic fixture per family, and that a failed search is an error.
 `assert.mjs` is a two-function helper (`ok(cond, msg)`, `done()`) that turns a
 harness's printed output into a real pass/fail: `ok` prints `ok `/`FAIL ` and
 sets `process.exitCode = 1` on a miss, `done()` prints the final tally.
-`feed-idle.mjs`, `chart-nav.mjs`, `rank-cross.mjs`, the four `tf-*.mjs`
+`feed-idle.mjs`, `chart-nav.mjs`, `rank-cross.mjs`, `sticky-rank.mjs`, the four `tf-*.mjs`
 harnesses (`tf-market`, `tf-quotes`, `tf-feed`, `tf-pnl`), `tabs.mjs`,
 `chart-view.mjs`, `fit-rows.mjs`, `feed-errors.mjs`, `feed-budget.mjs`, `spawn-safety.mjs`, `close-snapshot.mjs`, `account-summary.mjs`, `crypto-feed.mjs`,
 `crypto-sort.mjs` and `market-select.mjs` use it - they are the harnesses this exits non-zero on a
@@ -67,7 +67,8 @@ copy theirs if you add a new harness.
 | `real-click.py` | does a REAL click in a REAL Claude Code open the chart | `python3 real-click.py <proj> [x] [row] [--plugin-dir <path>]` |
 | `feed-idle.mjs` | does a closed market stop being polled, and does its snapshot still hold **(asserts)** | `node feed-idle.mjs $OUT/register.js <proj>` |
 | `feed-open-snooze.mjs` | does an open market still get polled, and does 收起 stop it | `node feed-open-snooze.mjs $OUT/register.js <proj>` |
-| `rank-cross.mjs` | when two symbols' 漲跌幅 cross in rank, does the table mark the row that changed occupant with `was.code` **(asserts; pins the PR-a fix, see below)** | `node rank-cross.mjs $OUT/board.js $OUT/register.js <proj>` |
+| `rank-cross.mjs` | after the sticky order: a pct swap keeps the order and flaps prices only; a watchlist change (occupant change outside a page turn) still marks `was.code` **(asserts)** | `node rank-cross.mjs $OUT/board.js $OUT/register.js <proj>` |
+| `sticky-rank.mjs` | the table's rank order stays frozen between page turns / market switches / watchlist edits / demo-to-real: later snapshots produce no `was.code`, price-only flaps still appear, a page turn re-ranks and flaps every row **(asserts)** | `node sticky-rank.mjs $OUT/register.js <proj>` |
 | `tf-market.mjs` | 台指期 sessions (日盤/夜盤 across midnight and the weekend), the auto pick, the 台指期 cycle stop, no-data rows with no quotes source, and a project without `futures` unchanged **(asserts)** | `node tf-market.mjs $OUT/register.js <proj-with-futures> <proj-without>` |
 | `tf-quotes.mjs` | does a runtime-dir `futures-quotes.json` price the 台指期 table (永豐 footer, 5 分 K（永豐）, per-row decimals, alias → resolved month), feed the chart without a Yahoo request, and go no-data once stale; does the stock override stay as it was **(asserts)** | `node tf-quotes.mjs $OUT/register.js $OUT/board.js <tf-proj> <tw-proj>` |
 | `tf-feed.mjs` | with 美股 on screen during 夜盤, is the heartbeat still written every feed tick naming `tf`; is the fetcher spawned once with both `--codes` and `--futures` (also during 台股 hours, also as `--futures ""` without a list); does a Yahoo back-off leave the heartbeat alone; does a project without `futures` write no heartbeat at night **(asserts)** | `node tf-feed.mjs $OUT/register.js <proj>` |
@@ -112,7 +113,7 @@ made against the real endpoint, not an estimate.
 
 `chart-nav.mjs`'s 名次交叉 section and `rank-cross.mjs` both pin down the same
 bug, from two angles - now fixed in `hooks/register.tsx`, so both assert
-green; this stays here as the regression guard and the reason they assert
+green (since the sticky order, `rank-cross.mjs` asserts the safety net - an occupant change outside a page turn still gets `was.code` - and `sticky-rank.mjs` the freeze itself); this stays here as the regression guard and the reason they assert
 what they do:
 
 - `buildProps` re-sorts `quotes` by `pct` on every render when `cfg.sort ===
@@ -144,7 +145,7 @@ Builds `register.js`/`board.js` into `$OUT` (default
 `npx -y esbuild` (same flags) on a machine without bun; writes disposable
 fixture projects under a `mktemp -d` (never inside the repo, never touching
 your real project or `~/.claude`); runs `feed-idle.mjs` → `chart-nav.mjs` →
-`rank-cross.mjs` → `file-bars.mjs` → `tf-market.mjs` → `tf-quotes.mjs` →
+`rank-cross.mjs` → `sticky-rank.mjs` → `file-bars.mjs` → `tf-market.mjs` → `tf-quotes.mjs` →
 `tf-feed.mjs` → `tf-pnl.mjs` → `tabs.mjs` → `chart-view.mjs` → `fit-rows.mjs`
 → `pytest` (`scripts/tests`, via `~/.claude/stock-band-venv/bin/python` when
 present, else `python3`) → `feed-errors.mjs` → `feed-budget.mjs` → `spawn-safety.mjs` → `sources-order.mjs` → `close-snapshot.mjs` → `account-summary.mjs` → `crypto-feed.mjs` → `crypto-sort.mjs` →
