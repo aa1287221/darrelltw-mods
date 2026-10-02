@@ -678,15 +678,25 @@ let fileSeen: Partial<Record<MarketId, { asOf: number; quotes: Record<string, Fi
  * previous file's quotes become that market's `prev`, and `turnSeq` bumps
  * exactly once for a changed asOf, never for a re-read of the same file.
  */
-function noteFileSnapshots(): void {
+function noteFileSnapshots(now: number): void {
   for (const market of Object.keys(quotesFiles) as MarketId[]) {
     const file = quotesFiles[market]
     if (!file) continue
     const seen = fileSeen[market]
     if (seen?.asOf === file.asOf) continue
     fileSeen[market] = { asOf: file.asOf, quotes: file.quotes, prev: seen?.quotes }
-    if (seen) turnSeq += 1
+    if (seen && !turnWindowOpen(now)) turnSeq += 1
   }
+}
+
+/**
+ * Whether a page/pnl turn is still flapping. A snapshot landing inside it must
+ * not bump `turnSeq`: the board would restart the whole-page flap from scratch
+ * (pageFrom still marks every row), so the turn played twice. The running flap
+ * lands on the new prices anyway.
+ */
+function turnWindowOpen(now: number): boolean {
+  return now - pageFromAt < PAGE_TURN_WINDOW_MS || now - pnlPageAt < PAGE_TURN_WINDOW_MS
 }
 // keyed `<market>:<code>`, since a Taiwan code and a US ticker share a namespace
 let liveBars: Record<string, { bars: Bar[]; at: number }> = {}
@@ -1265,7 +1275,7 @@ export const register: Register = on => {
       const futuresQuotes = parseQuotes(futuresQuotesText, now, 'futures')
       futuresQuotesFresh = futuresQuotes !== undefined && now - futuresQuotes.asOf <= QUOTE_STALE_MS
       fillQuoteSlots([futuresQuotes], ['tf'], now)
-      noteFileSnapshots()
+      noteFileSnapshots(now)
       // The project-path holdings file only: a 0.9-era Shioaji fetcher wrote
       // its output straight here (before runtimeDir existed) and always
       // stamped it "永豐 庫存" - see parseHoldingsFile's docblock. That file
@@ -1414,7 +1424,7 @@ export const register: Register = on => {
       const idx = opts.parsed[opts.indexKey]
       const idxPrev = idx?.prevClose ?? idx?.price ?? 0
       feedSeq += 1
-      turnSeq += 1
+      if (!turnWindowOpen(opts.now)) turnSeq += 1
       nextFeedAt = nextFeedTickAt(opts.now, opts.market)
       liveBy[opts.market] = {
         prev: liveBy[opts.market]?.file.quotes,
