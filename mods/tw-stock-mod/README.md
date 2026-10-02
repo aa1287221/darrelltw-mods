@@ -925,15 +925,14 @@ trade.
 two lines between its title and the table (amounts below are made up):
 
 ```
-風險 120% │ 權益 600,000 │ 可用 100,000 │ 距追繳 -2,150 點
+風險 120% │ 權益 600,000 │ 可用 100,000 │ 距追繳 215,000 元
 已實現 今日 +50,000 │ 本月 +62,500 │ 今年 -12,300（3勝4敗）│ 費稅 -900
 ```
 
-距追繳 is how many index points the market can move against the net
-position before equity reaches the maintenance margin: `(權益 − 維持保證金)
-÷ Σ(口數 × multiplier)`, negative for a net long, positive for a net short,
-`—` with no net exposure, `0` once equity is at or under maintenance. A
-margin call replaces it with `追繳 8,000`. A margin call, or equity within
+距追繳 is the cushion in TWD before equity reaches the maintenance margin:
+`權益 − 維持保證金`, whatever the positions are (hedged or on several
+underlyings included), `—` with no maintenance margin, `0 元` once equity is
+at or under maintenance. A margin call replaces it with `追繳 8,000`. A margin call, or equity within
 5 % of maintenance, draws 風險 (and 追繳) as bold white on a red fill, which
 reads as danger under either colour convention; 風險 turns orange below
 100 %. 已實現 is gross P&L for today, this month and this year (the
@@ -979,9 +978,7 @@ of the current price, and read `追繳中` / `強平` (bold white on red) once t
 cushion is gone; a hedged underlying, a row without `underlying` or a price
 at or below 0 reads `—`. No maintenance margin hides 追繳價, no
 `initialMargin` hides 強平價. A narrow terminal drops 建倉明細 first, then
-強平價, then 追繳價. With positions on more than one underlying (or one
-without `underlying`), 距追繳 on line 1 shows the cushion in TWD
-(`距追繳 215,000 元`) instead of points.
+強平價, then 追繳價.
 
 **Tick overlay.** On top of the 10-second snapshot loop the fetcher
 subscribes to 永豐's tick stream for every code it serves (stocks while the

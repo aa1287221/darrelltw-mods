@@ -8,7 +8,7 @@
 //      origin/main's (BASELINE below, captured with --capture from 58b982b,
 //      whose hooks/ equal origin/main); other markets never change
 //  10  the issue's sample renders line 1 and line 2 exactly
-//  11  距追繳: long, short, mixed-to-zero exposure, equity <= maintenance
+//  11  距追繳: always the TWD cushion (equity - maintenance): long, short, hedged, equity <= maintenance
 //  12  marginCall -> 追繳, and equity <= maintenance x 1.05 -> 風險: bold white on a
 //      red fill; riskIndicator < 100 -> orange text
 //  13  a null realized window -> —; wins/losses text
@@ -32,8 +32,8 @@
 //  35-52  追繳價 / 強平價 per row: cushion over the row's underlying group only, the
 //         live estimate when it applies, conservative rounding, adaptive decimals,
 //         追繳中 / 強平 danger, orange within 2%, header iff column, drop order
-//         建倉明細 -> 強平價 -> 追繳價, clicks unchanged; line 1 switches to 元 for a
-//         multi-underlying book; shioaji.liquidationRiskPct is user-level only
+//         建倉明細 -> 強平價 -> 追繳價, clicks unchanged; line 1's 距追繳 is always the 元
+//         cushion, whatever the book; shioaji.liquidationRiskPct is user-level only
 //
 // Usage: node account-summary.mjs $OUT/register.js $OUT/board.js [--capture]
 process.env.TZ = 'Asia/Taipei' // row 0 prints 更新 HH:MM; the baseline must not depend on the runner's zone
@@ -68,7 +68,7 @@ const CONFIG = {
   us: [{ code: 'AAPL', name: 'Apple', prevClose: 300 }],
   futures: [],
 }
-// exposure = 5 x 10 + 1 x 50 = 100 index-point TWD: (600,000 - 385,000) / 100 = 2,150 points
+// cushion = equity 600,000 - maintenance 385,000 = 215,000 TWD
 const holdings = (tmf = 5, mxf = 1) => ({
   asOf: OPEN - 30_000,
   market: 'tf',
@@ -259,8 +259,9 @@ const BASELINE = {
   // noRef120 was 4d2e8d3099a28860 until the fills column got its 建倉明細 header (the sample carries fills): that is the only row that differs
   // then 581a5a67efc9232f until 追繳價/強平價 (rows 35-52): the sample carries a margin, so at 120 cols the two
   // columns take cols 98-111 and 建倉明細 drops out; every cell left of col 97 is unchanged (diffed against 887ae0b)
-  noRef120: 'e9075077d6f092f5',
-  noRef60: 'a8cbb23c3d9c2b44',
+  // both noRef hashes re-captured when 距追繳 became the 元 cushion (the line-1 text is in the frame)
+  noRef120: '77d77a97363b1196',
+  noRef60: '576404aaa78261e9',
 }
 
 // --- row 9: no file, malformed, wrong shape -> main's frame -------------------
@@ -301,7 +302,7 @@ ok(nulls.id === BASELINE['120x0'], `9: every section null: nothing to show, fram
 // --- row 10: the issue's sample ---------------------------------------------
 const sample = await frame({ accountText: SAMPLE })
 show('sample, 120 cols, stub host', sample)
-const LINE1 = '風險 120% │ 權益 600,000 │ 可用 100,000 │ 距追繳 -2,150 點'
+const LINE1 = '風險 120% │ 權益 600,000 │ 可用 100,000 │ 距追繳 215,000 元'
 const LINE2 = '已實現 今日 +50,000 │ 本月 +62,500 │ 今年 -12,300（3勝4敗）│ 費稅 -900'
 ok(lineOf(sample.rows[1]) === LINE1, `10: line 1 is "${LINE1}": "${lineOf(sample.rows[1])}"`)
 ok(lineOf(sample.rows[2]) === LINE2, `10: line 2 is "${LINE2}": "${lineOf(sample.rows[2])}"`)
@@ -313,12 +314,12 @@ ok(sample.props.quoteRows === 3 && sample.props.boardRows === 8, `10: stub host:
 
 // --- row 11: 距追繳 --------------------------------------------------------------
 const line1 = async (opts, cols = 120) => lineOf((await frame(opts, cols)).rows[1])
-ok((await line1({ accountText: SAMPLE, holdingsFile: holdings(-5, -1) })).endsWith('距追繳 +2,150 點'), '11: net short: +2,150 點 (the adverse move is up)')
-ok((await line1({ accountText: SAMPLE, holdingsFile: holdings(5, -1) })).endsWith('距追繳 —'), '11: long 5x10 + short 1x50 = exposure 0: 距追繳 —')
+ok((await line1({ accountText: SAMPLE, holdingsFile: holdings(-5, -1) })).endsWith('距追繳 215,000 元'), '11: net short: the same 215,000 元 cushion')
+ok((await line1({ accountText: SAMPLE, holdingsFile: holdings(5, -1) })).endsWith('距追繳 215,000 元'), '11: long 5x10 + short 1x50 = exposure 0: still 215,000 元')
 ok((await line1({ accountText: JSON.stringify(account({ margin: { maintenanceMargin: 0 } })) })).endsWith('距追繳 —'), '11: no maintenance margin: 距追繳 —')
-ok((await line1({ accountText: JSON.stringify(account({ margin: { equity: 380000 } })) })).endsWith('距追繳 0'), '11: equity below maintenance: 距追繳 0')
-ok((await line1({ accountText: JSON.stringify(account({ margin: { equity: 385000 } })) })).endsWith('距追繳 0'), '11: equity == maintenance: 距追繳 0')
-ok((await line1({ accountText: JSON.stringify(account({ margin: { equity: 385100 } })) })).endsWith('距追繳 -1 點'), '11: 100 TWD over maintenance on exposure 100: -1 點')
+ok((await line1({ accountText: JSON.stringify(account({ margin: { equity: 380000 } })) })).endsWith('距追繳 0 元'), '11: equity below maintenance: 距追繳 0 元')
+ok((await line1({ accountText: JSON.stringify(account({ margin: { equity: 385000 } })) })).endsWith('距追繳 0 元'), '11: equity == maintenance: 距追繳 0 元')
+ok((await line1({ accountText: JSON.stringify(account({ margin: { equity: 385100 } })) })).endsWith('距追繳 100 元'), '11: 100 TWD over maintenance: 100 元')
 
 // --- row 12: colours ------------------------------------------------------------
 {
@@ -361,16 +362,16 @@ ok(isDanger(await riskStyle({ riskIndicator: 99, equity: 404250 }, '99%')), '12:
 
 // --- row 15: narrow widths ------------------------------------------------------------
 const STALE = JSON.stringify(account({ margin: { asOf: OPEN - 600_000 } }))
-const L1 = { risk: '風險 120%', eq: '權益 600,000', av: '可用 100,000', dist: '距追繳 -2,150 點' }
+const L1 = { risk: '風險 120%', eq: '權益 600,000', av: '可用 100,000', dist: '距追繳 215,000 元', distC: '距追繳 215,000' }
 const L2 = { today: '已實現 今日 +50,000', month: '本月 +62,500', year: '今年 -12,300（3勝4敗）', fee: '費稅 -900' }
 const WIDTHS = [
   [120, [L1.risk, L1.eq, L1.av, L1.dist], true, [L2.today, L2.month, L2.year, L2.fee]],
   [100, [L1.risk, L1.eq, L1.av, L1.dist], true, [L2.today, L2.month, L2.year, L2.fee]],
   [80, [L1.risk, L1.eq, L1.av, L1.dist], true, [L2.today, L2.month, L2.year, L2.fee]],
-  [60, [L1.risk, L1.eq, L1.av, L1.dist], false, [L2.today, L2.month]],
+  [60, [L1.risk, L1.eq, L1.dist], false, [L2.today, L2.month]],
   [50, [L1.risk, L1.eq, L1.dist], false, [L2.today, L2.month]],
   [40, [L1.risk, L1.dist], false, [L2.today, L2.month]],
-  [30, [L1.risk, L1.dist], false, [L2.today]],
+  [30, [L1.risk, L1.distC], false, [L2.today]],
 ]
 for (const [cols, want1, suffix, want2] of WIDTHS) {
   const f = await frame({ accountText: STALE }, cols)
@@ -460,20 +461,20 @@ const quoted = (f, price) => priceCell(f, 'TMFJ6').includes(price)
 }
 
 // --- row 19: the math ------------------------------------------------------------------
-const LIVE_LONG = '風險 ≈121% │ 權益 ≈605,000 │ 可用 ≈105,000 │ 距追繳 ≈-2,200 點'
+const LIVE_LONG = '風險 ≈121% │ 權益 ≈605,000 │ 可用 ≈105,000 │ 距追繳 ≈220,000 元'
 {
   // +50 points: 5 x 10 x 50 + 1 x 50 x 50 = +5,000
   const f = await frame({ accountText: withRef(REF_LONG), quotes: liveQuotes() })
   show('live estimate, long, 120 cols', f)
   ok(lineOf(f.rows[1]) === LIVE_LONG, `19: long +5,000: "${lineOf(f.rows[1])}"`)
   ok(lineOf(f.rows[2]) === LINE2, '19: line 2 is not estimated')
-  // short -5 / -1 at the same move: -5,000; 距追繳 is +2,100 點 on exposure -100
+  // short -5 / -1 at the same move: -5,000, so the cushion is 210,000 元
   const s = await frame({ accountText: withRef({ TMFJ6: { qty: -5, price: 23450 }, MXFJ6: { qty: -1, price: 23450 } }), holdingsFile: holdings(-5, -1), quotes: liveQuotes() })
-  const SHORT = '風險 ≈119% │ 權益 ≈595,000 │ 可用 ≈95,000 │ 距追繳 ≈+2,100 點'
+  const SHORT = '風險 ≈119% │ 權益 ≈595,000 │ 可用 ≈95,000 │ 距追繳 ≈210,000 元'
   ok(lineOf(s.rows[1]) === SHORT, `19: short -5,000: "${lineOf(s.rows[1])}"`)
-  // mixed: +5 TMF at +50 (+2,500), -1 MXF at +30 (-1,500) = +1,000; exposure 0 -> 距追繳 — (no ≈ on a dash)
+  // mixed: +5 TMF at +50 (+2,500), -1 MXF at +30 (-1,500) = +1,000; exposure 0 no longer blanks 距追繳: 216,000 元
   const m = await frame({ accountText: withRef({ TMFJ6: { qty: 5, price: 23450 }, MXFJ6: { qty: -1, price: 23450 } }), holdingsFile: holdings(5, -1), quotes: liveQuotes(23500, 23480) })
-  const MIXED = '風險 ≈120% │ 權益 ≈601,000 │ 可用 ≈101,000 │ 距追繳 —'
+  const MIXED = '風險 ≈120% │ 權益 ≈601,000 │ 可用 ≈101,000 │ 距追繳 ≈216,000 元'
   ok(lineOf(m.rows[1]) === MIXED, `19: mixed +1,000: "${lineOf(m.rows[1])}"`)
   ok(styleOf(f.rows[1], '≈121%')?.color === WHITE, '19: the estimated risk keeps the default colour above 100')
 }
@@ -548,7 +549,7 @@ for (const cols of [120, 100, 80, 60, 50, 40, 30]) {
   const l1 = lineOf(f.rows[1])
   const widest = Math.max(dispWidth(textOf(f.rows[1])), dispWidth(textOf(f.rows[2])))
   ok(widest <= cols - 1, `25: ${cols} cols with the estimate: no wrap (widest ${widest}): "${l1}"`)
-  ok(l1.startsWith('風險 ≈121%') && /距追繳 ≈-2,200( 點)?$/.test(l1), `25: ${cols} cols keeps 風險 and 距追繳: "${l1}"`)
+  ok(l1.startsWith('風險 ≈121%') && /距追繳 ≈220,000( 元)?$/.test(l1), `25: ${cols} cols keeps 風險 and 距追繳: "${l1}"`)
   const optional = l1.split(' │ ').slice(1, -1).map(x => x.split(' ')[0])
   ok(['權益', '可用'].slice(0, optional.length).join() === optional.join(), `25: ${cols} cols drops right to left: ${optional.join(',') || '(none)'}`)
 }
@@ -698,7 +699,7 @@ const both = async (opts, cols = 120) => frame(opts, cols)
 {
   const f = await both({ accountText: SAMPLE, holdingsFile: book(TMF(5), MXF(-1)) })
   ok([CALL, LIQ].every(l => val(f, 'TMFJ6', l) === '—' && val(f, 'MXFJ6', l) === '—'), `38: hedged to 0: — in both columns: ${[CALL, LIQ].map(l => `${val(f, 'TMFJ6', l)}/${val(f, 'MXFJ6', l)}`).join(' ')}`)
-  ok(lineOf(f.rows[1]).endsWith('距追繳 —'), `38: line 1 —: "${lineOf(f.rows[1])}"`)
+  ok(lineOf(f.rows[1]).endsWith('距追繳 215,000 元'), `38: line 1 still 215,000 元: "${lineOf(f.rows[1])}"`)
 }
 // --- row 39: TMF + SRF: two underlyings, each row uses its own group only
 const TWO = book(TMF(5), SRF(20))
@@ -709,7 +710,7 @@ const twoGroups = await both({ accountText: SAMPLE, holdingsFile: TWO })
   // TMF: 215,000 / 50 = 4,300; SRF: 215,000 / 20,000 = 10.75
   ok(val(f, 'TMFJ6', CALL) === '19,150' && val(f, 'SRFJ6', CALL) === '95.50', `39: 追繳價 per group: ${val(f, 'TMFJ6', CALL)} / ${val(f, 'SRFJ6', CALL)}`)
   ok(val(f, 'TMFJ6', LIQ) === '13,950' && val(f, 'SRFJ6', LIQ) === '82.50', `39: 強平價 per group: ${val(f, 'TMFJ6', LIQ)} / ${val(f, 'SRFJ6', LIQ)}`)
-  ok(lineOf(f.rows[1]) === '風險 120% │ 權益 600,000 │ 可用 100,000 │ 距追繳 215,000 元', `39: two underlyings: line 1 in 元: "${lineOf(f.rows[1])}"`)
+  ok(lineOf(f.rows[1]) === '風險 120% │ 權益 600,000 │ 可用 100,000 │ 距追繳 215,000 元', `39: two underlyings: line 1 is the same 元 cushion: "${lineOf(f.rows[1])}"`)
 }
 // --- row 40: cushion <= 0
 {
@@ -853,11 +854,11 @@ const twoGroups = await both({ accountText: SAMPLE, holdingsFile: TWO })
     ok(dispWidth(textOf(g.rows[1])) <= cols - 1 && /距追繳 ≈217,500( 元)?$/.test(l1), `50: ${cols} cols: fits, keeps 距追繳: "${l1}"`)
   }
 }
-// --- row 51: a single-underlying book keeps points, the report's two frames
+// --- row 51: a single-underlying book shows the same 元 cushion, the report's two frames
 {
   const a = await frame({ accountText: SAMPLE, holdingsFile: book(TMF(5), MXF(1)) }, 120)
   show('(a) TMF 5 + MXF 1 long, 120 cols', a)
-  ok(lineOf(a.rows[1]) === LINE1, `51: TMF+MXF: points as before: "${lineOf(a.rows[1])}"`)
+  ok(lineOf(a.rows[1]) === LINE1, `51: TMF+MXF: 元 like any book: "${lineOf(a.rows[1])}"`)
   show('(b) TMF 5 + SRF 20 long, 120 cols', twoGroups)
 }
 
