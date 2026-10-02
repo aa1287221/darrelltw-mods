@@ -893,21 +893,11 @@ function drawAccount(line1: Row, line2: Row, account: AccountSummary, props: Boa
     if (m.marginCall > 0) {
       fields1.push({ pieces: [{ text: `追繳 ${thousands(m.marginCall, 0)}`, ...danger }], keep: true })
     } else {
-      // points only mean something when every contract tracks one underlying; otherwise the cushion in TWD
-      const underlyings = new Set(props.holdings.map(h => h.underlying))
-      const oneUnderlying = underlyings.size <= 1 && !underlyings.has(undefined)
-      let text: string
-      if (!oneUnderlying) {
-        text = mm <= 0 ? '—' : `${approx}${thousands(Math.max(0, Math.floor(equity - mm)), 0)} 元`
-      } else {
-        // index points the market can move against the net position before equity reaches maintenance
-        const exposure = props.holdings.reduce((sum, h) => sum + h.qty * h.multiplier, 0)
-        const points = mm > 0 && exposure !== 0 && equity > mm ? Math.trunc(-(equity - mm) / exposure) : 0
-        text = mm <= 0 || exposure === 0 ? '—' : points === 0 ? `${approx}0` : `${approx}${signed(points, 0)} 點`
-      }
+      // cushion in TWD: the book's index points are meaningless once contracts differ in multiplier or underlying
+      const text = mm <= 0 ? '—' : `${approx}${thousands(Math.max(0, Math.floor(equity - mm)), 0)} 元`
       const label: SummaryPiece = { text: '距追繳 ', fg: DIM }
-      // the ≈ costs two cells; at the narrowest widths the unit goes rather than the line wrapping
-      const compact = live && / [點元]$/.test(text) ? [label, { text: text.slice(0, -2), fg: WHITE }] : undefined
+      // at the narrowest widths the unit goes rather than the line wrapping
+      const compact = text.endsWith(' 元') ? [label, { text: text.slice(0, -2), fg: WHITE }] : undefined
       fields1.push({ pieces: [label, { text, fg: WHITE }], keep: true, ...(compact ? { compact } : {}) })
     }
     if (props.phase === 'open' && props.now - m.asOf > ACCOUNT_STALE_MS) {

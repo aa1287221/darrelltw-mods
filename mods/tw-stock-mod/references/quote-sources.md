@@ -355,9 +355,8 @@ line uses risk indicator = equity ÷ initialMargin × 100 — observed on 永豐
 one production sample — and a threshold of **25 %, the TAIFEX rule; that 永豐
 force-closes at exactly 25 % is inferred, not verified**. A different line can
 be set in `~/.claude/stock-band.json` as `shioaji.liquidationRiskPct` (0-100;
-a project file cannot set it). With several underlyings, line 1's 距追繳 is the
-cushion in TWD (`距追繳 215,000 元`) rather than points, since there is no one
-index to count points on.
+a project file cannot set it). Line 1's 距追繳 is always the cushion in TWD
+(`距追繳 215,000 元`), whatever the underlyings.
 
 ## 4. 群益 Capital API, through `scripts/fetch-quotes-capital.py`
 
