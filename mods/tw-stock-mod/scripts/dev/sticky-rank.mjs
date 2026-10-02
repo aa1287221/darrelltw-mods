@@ -142,6 +142,22 @@ clock += 3000 // past the page-turn window, so only the snapshot itself is under
 props = await snapshot(++pk)
 ok(codeFlaps(props) === 0 && order(props) === frozen8, 'after the turn the order is frozen again (no occupant change)')
 
+// --- a snapshot inside the page-turn window must not restart the full flip ---------------
+// Live us data showed turn +1 again ~100 ms after an autoPage turn: the board restarted the
+// whole-page flap from scratch, so every page turn could play twice.
+clock += PAGE_MS
+await writeQuotes(++pk)
+await poll()
+props = (await draw()).props
+const pageTurn = props.turn
+ok(codeFlaps(props) > 0, `control: the page turn itself flaps code/name (${codeFlaps(props)})`)
+props = await snapshot(++pk)
+ok(props.turn === pageTurn, `snapshot 1 s into the page turn: turn unchanged (${pageTurn} -> ${props.turn})`)
+ok(props.quotes.some(q => q.price === priceOf(codes.tw.indexOf(q.code), pk)), 'that snapshot still prices the rows')
+clock += 3000
+props = await snapshot(++pk)
+ok(props.turn > pageTurn && codeFlaps(props) === 0, 'past the window a snapshot turns again, price-only')
+
 // --- market switch tw -> us -> tw ----------------------------------------------------
 const press = async key => { const { btns } = await draw(); btns.find(b => b.key === key)?.press() ; return (await draw()).props }
 props = await press('stock-band:tab:us')
