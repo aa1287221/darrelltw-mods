@@ -285,29 +285,40 @@ function buildProps(
   })
 
   const sort = effectiveSort(cfg.sort, market)
-  if (sort === 'change') {
-    quotes.sort((a, b) => b.pct - a.pct)
-  } else if (sort === 'volume') {
-    // Pionex's `amount` is 24h turnover in USDT - `volume` (not used here)
-    // is the coin's own unit count, and DOGE's ~800M coins next to BTC's
-    // ~40K would rank purely on which coin happens to be cheap, not which
-    // one actually trades the most money. `amount` is the apples-to-apples
-    // number (see QuoteRow.amount).
-    quotes.sort((a, b) => (b.amount ?? 0) - (a.amount ?? 0))
-  } else if (sort === 'marketcap') {
-    if (Object.keys(cryptoSupply).length > 0) {
-      quotes.sort((a, b) => marketCapOf(b) - marketCapOf(a))
+  const marketCapReady = Object.keys(cryptoSupply).length > 0
+  // Pionex's `amount` is 24h turnover in USDT - `volume` (not used here) is
+  // the coin's own unit count, which would rank on which coin is cheap, not on
+  // which trades the most money (see QuoteRow.amount). marketcap falls back to
+  // the same ranking until CoinGecko has answered (fetchCryptoSupply logs
+  // that once - not here, buildProps must stay side-effect free).
+  const byAmount = (a: QuoteRow, b: QuoteRow) => (b.amount ?? 0) - (a.amount ?? 0)
+  const compare: ((a: QuoteRow, b: QuoteRow) => number) | undefined =
+    sort === 'change'
+      ? (a, b) => b.pct - a.pct
+      : sort === 'volume' || (sort === 'marketcap' && !marketCapReady)
+        ? byAmount
+        : sort === 'marketcap'
+          ? (a, b) => marketCapOf(b) - marketCapOf(a)
+          : undefined
+  if (compare) {
+    // Sticky order: re-ranking on every snapshot swapped occupants mid-page, which
+    // the board draws as a full page-turn flap. Rank again only when the frozen
+    // order no longer describes this board (see StickyOrder).
+    const key = `${sort}:${sort === 'marketcap' && !marketCapReady ? 'amount' : 'cap'}`
+    const watch = list.map(s => s.code).sort().join(',')
+    const real = quotesFile !== undefined
+    const st = stickyOrder
+    if (rerank || !st || st.market !== market || st.key !== key || st.watch !== watch || (real && !st.real)) {
+      quotes.sort(compare)
+      stickyOrder = { market, key, watch, real, rank: new Map(quotes.map((q, i) => [q.code, i])) }
+      rerank = false
     } else {
-      // CoinGecko has never answered this session (or its cache is still
-      // empty) - market cap cannot be computed at all yet, so this falls
-      // back to volume, the next-best liquidity ranking, rather than
-      // leaving `quotes` in whatever order `list` happened to name them.
-      // fetchCryptoSupply logs this once (cryptoSupplyWarned) - not here,
-      // since buildProps runs every render and must stay side-effect free.
-      quotes.sort((a, b) => (b.amount ?? 0) - (a.amount ?? 0))
+      // a code the frozen order lacks (cannot happen while `watch` matches) goes last
+      const at = (q: QuoteRow) => st.rank.get(q.code) ?? Infinity
+      quotes.sort((a, b) => (at(a) === at(b) ? compare(a, b) : at(a) < at(b) ? -1 : 1))
     }
   }
-  // sort === 'list': no sort, the watchlist's own order stands.
+  // sort === 'list': no sort, the watchlist's own order stands (already stable).
 
   // One page is `quoteRows × columns` symbols - the rows the band has (see
   // fitBand) times the columns effectiveColumns() picks - or, on the ticker,
@@ -363,28 +374,13 @@ function buildProps(
       }
     }
   } else {
-    // No page turn is running, but a row's OCCUPANT can still change: with
-    // `sort !== 'list'` the list re-sorts every render, so a rank
-    // cross moves a code to a different on-screen position without page or
-    // sort key ever changing. Comparing this render's row at position i
-    // against what `lastShown` actually drew there last render catches
-    // that - the whole-page flap above cannot, because it only runs inside
-    // a page turn's own window. Merging into whatever price-only `was`
-    // quoteRow() already attached (rather than requiring the row have none)
-    // makes a rank cross that also lands on a row whose own price moved
-    // turn both halves, not just the price side.
+    // Safety net: the sticky order keeps occupants still between re-ranks, so
+    // this only fires when one changes outside a page turn (watchlist edit,
+    // demo -> real data) - marked with was.code instead of swapping silently.
+    // Merges into quoteRow's price-only `was`, so a moved price turns too.
     let ranksCrossed = false
-    // `lastShown` only means something as a rank-cross baseline when it was
-    // drawn for THIS market - onSelectMarket can switch markets without a page turn
-    // or a pnl turn (see `lastShownMarket` above), and a stale other-market
-    // `lastShown` would compare AAPL's row against 2330's row on nothing more
-    // than shared position. Gated on `quotesFile` too: with no quotes file
-    // the whole page is priced by demoPrice()'s continuous sine walk, whose
-    // pct keeps drifting by a hair every render - with `sort === 'change'`
-    // that alone reshuffles two close-ranked rows on almost every
-    // poll, so the demo/off/backoff board would flap nearly every tick for
-    // noise instead of a real rank change. A quotes-file-backed row only
-    // moves rank when its actual price moved, so real data keeps this check.
+    // Only against a same-market baseline, and only on real data: the demo walk
+    // drifts every render, which is noise, not a rank change.
     if (quotesFile && lastShownMarket === market) {
       for (let i = 0; i < shown.length; i++) {
         const before = lastShown[i]
@@ -803,6 +799,15 @@ let lastShown: QuoteRow[] = [] // the page on the board right now
 // rank cross and flaps a price/pct/code/name that never actually turned.
 let lastShownMarket: MarketId | undefined
 let pageFrom: QuoteRow[] | undefined // the page it turned away from
+/**
+ * The rank order the table keeps between re-ranks: valid only for the market,
+ * sort key and watchlist it was taken for, and replaced when real data first
+ * replaces the demo walk (whose ranks mean nothing).
+ */
+type StickyOrder = { market: MarketId; key: string; watch: string; real: boolean; rank: Map<string, number> }
+let stickyOrder: StickyOrder | undefined
+// set by a page turn or a market switch: the next buildProps re-ranks
+let rerank = false
 // which market `pageFrom` was captured from - a market switch that lands
 // back on a table can still fall inside `PAGE_TURN_WINDOW_MS` with a
 // `pageFrom` snapshot from a market visited turns ago. Same guard as
@@ -904,6 +909,7 @@ function setPage(next: number, now: number) {
   pageFromAt = now
   pageAt = now
   page = next
+  rerank = true
   turnSeq += 1
 }
 
@@ -2431,7 +2437,10 @@ export const register: Register = on => {
       // STOP on the same market (table <-> pnl) leaves the table's own page
       // alone, since the pnl view has no page of its own to collide with it
       // (see holdingsScroll instead).
-      if (stop.market !== props.market) page = 0
+      if (stop.market !== props.market) {
+        page = 0
+        rerank = true
+      }
       modeOverride = stop.market
       view = stop.pnl ? 'pnl' : 'table'
       resetPnlScroll() // "changing the stop" always resets the pnl scroll position

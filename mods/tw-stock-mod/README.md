@@ -246,6 +246,11 @@ highlighted top mover:
   mover gets the highlighted row in the single-column table. Two-column mode
   drops the highlight — a row there can hold two unrelated symbols, so there
   is no single "this row" to stripe. `"sort": "list"` keeps your own order.
+  The order holds still between page turns: it is refreshed at each page turn
+  (`翻頁` or the automatic one) and each market switch, not on every quote, so
+  between those moments a row keeps its symbol and only its price flaps — the
+  full-row flip (代號 + 名稱 + 價格) plays when the page comes up or turns,
+  not whenever two symbols cross in rank.
 - **Closed**: prices go gray, the blink stops, and the header reads
   `休市 下次開盤 09:00` with `收盤 13:30` on the right. Outside both sessions the
   band keeps showing the market that closed **most recently** — its closing
