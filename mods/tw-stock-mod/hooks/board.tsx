@@ -203,7 +203,7 @@ export type BoardProps = {
    * set only when the band draws on the desktop Code tab: register.tsx's
    * ui.render adds it on the Client element, and it is absent on the terminal
    * so those props stay exactly as they were. Switches the final assembly to
-   * fixed-width cells (see deskRow).
+   * one-line rows of fixed-width cells and pixel Boxes (see deskBoard).
    */
   desktop?: true
 }
@@ -691,93 +691,294 @@ function rowChildren(row: Row, Text: TextTag): RenderNode[] {
   return rowRuns(row).map(run => runNode(run, Text))
 }
 
-/**
- * One fixed-width cell of a desktop row: the runs it draws, its width in
- * display columns, and the background its Box paints - its LAST run's, since
- * the slack a cell has always sits after that run (earlier runs paint their
- * own through their Text).
- */
-type DeskCell = { runs: Run[]; width: number; bg?: string; blank: boolean; open: boolean }
+// --- the desktop Code tab ----------------------------------------------------
+// The board is the same Row grid on every surface; only the desktop assembles
+// it differently. The desktop Code tab draws a Client's Text in a
+// proportional font (13px on a 19px line): a space is narrower than a digit,
+// a CJK glyph is not two spaces wide, and █ ▀ ▄, braille and ─ ┈ │ come from
+// fallback fonts that are wider than 1ch and do not fill the line - so space
+// padding does not line the columns up there, and a glyph chart cannot tile.
+// So on the desktop:
+//   - every row is a Box exactly one line tall that clips: nothing in it can
+//     push the rows below down, out of the Client's fixed height (the footer
+//     and the last quote row used to drop off the bottom);
+//   - text sits in cells, each a Box exactly as many `ch` wide as its terminal
+//     columns, so every column starts where it does on the terminal; a cell's
+//     runs are one truncating Text each, straight in the Box. Never a Text
+//     inside a Text: a truncating Text is an inline-block whose baseline is
+//     its bottom edge, so a nested one grew every row from 19px to 24px;
+//   - block and braille cells are pixels, coloured Boxes - half a row tall
+//     where only one half is lit - so candles are solid and tile;
+//   - blank columns are the next node's left margin, or a Box painting their
+//     bg where they carry one (a highlighted row, the 曲線 area shade).
+// The page refuses a Client tree past 2000 nodes or depth 32 (the board then
+// unmounts), so deskBoard counts what it built and steps down in detail
+// while it is over budget.
+
+/** a desktop node in the shape the page receives - built first, so it can be counted before it is drawn */
+type DeskBoxProps = {
+  flexDirection?: 'row' | 'column'
+  width?: number
+  height?: number | string
+  flexShrink?: number
+  overflow?: 'hidden'
+  marginLeft?: number
+  backgroundColor?: string
+  justifyContent?: 'flex-end'
+  alignSelf?: 'flex-start' | 'flex-end'
+}
+type DeskTextProps = { color?: string; backgroundColor?: string; bold?: boolean; wrap?: 'truncate' }
+type DeskText = { type: 'Text'; props: DeskTextProps; children: (DeskText | string)[] }
+type DeskBox = { type: 'Box'; props: DeskBoxProps; children: (DeskBox | DeskText)[] }
+type DeskNode = DeskBox | DeskText
+
+/** a stretch of one desktop row, by terminal column: a text cell, a blank run, or same-coloured pixels */
+type DeskItem =
+  | { kind: 'text'; start: number; width: number; runs: Run[] }
+  | { kind: 'blank'; start: number; width: number; bg?: string }
+  | { kind: 'pixel'; start: number; width: number; top?: string; bottom?: string }
 
 const isBlank = (text: string): boolean => /^ +$/.test(text)
 /** glyph against glyph: a space on either side of the seam starts a new cell, so text after a gap is placed by its own column */
 const touches = (left: string, right: string): boolean => !left.endsWith(' ') && !right.startsWith(' ')
+/** the rule glyph `ch` is (the table rule, 昨結's dotted line, a session boundary, the time axis), or '' */
+const ruleOf = (ch: string): string => ('─┈│'.includes(ch) ? ch : '')
+const isRule = (text: string): boolean => ruleOf(text[0] ?? '') !== ''
+/**
+ * Touching runs share a cell (a price tag in two colours stays one piece),
+ * but a rule never does. A rule glyph draws wider than its column, so
+ * whatever follows it in the same cell lands too far right - a session
+ * boundary's │ inside 昨結's ┈ line, a time-axis label after its ─ - and
+ * each run of one rule glyph is a cell of its own (deskItems cuts runs where
+ * the glyph changes).
+ */
+const joins = (left: string, right: string): boolean => touches(left, right) && !isRule(left) && !isRule(right)
+
+/** █ ▀ ▄ and lit braille: drawn as coloured Boxes on the desktop, never as text */
+function isPixel(ch: string): boolean {
+  const cp = ch.codePointAt(0) ?? 0
+  return ch === '█' || ch === '▀' || ch === '▄' || (cp > 0x2800 && cp <= 0x28ff)
+}
+/** a pixel cell's [top, bottom] colours; a braille half is lit if any of its dots is (1,2,4,5 top; 3,6,7,8 bottom) */
+function pixelHalves(c: Cell): [string | undefined, string | undefined] {
+  if (c.ch === '█') return [c.fg, c.fg]
+  if (c.ch === '▀') return [c.fg, c.bg]
+  if (c.ch === '▄') return [c.bg, c.fg]
+  const dots = (c.ch.codePointAt(0) ?? 0x2800) - 0x2800
+  return [dots & 0x1b ? c.fg : c.bg, dots & 0xe4 ? c.fg : c.bg]
+}
+function luma(hex: string): number {
+  const v = parseInt(hex.slice(1, 7), 16)
+  return Number.isNaN(v) ? 0 : 0.299 * (v >> 16) + 0.587 * ((v >> 8) & 0xff) + 0.114 * (v & 0xff)
+}
+/** one colour for a whole pixel cell: the lit half, or the brighter of two - a candle's body over its darkened wick, the line over its shade */
+function wholeCell(top?: string, bottom?: string): string | undefined {
+  if (!top || !bottom) return top ?? bottom
+  return luma(bottom) > luma(top) ? bottom : top
+}
+
+/** a row as text cells, blank runs and pixel runs; `whole` draws each pixel cell in one colour */
+function deskItems(row: Row, whole: boolean): DeskItem[] {
+  const items: DeskItem[] = []
+  let run: (Run & { start: number; width: number; rule: string }) | undefined
+  const close = () => {
+    if (!run) return
+    const { start, width } = run
+    const style: Run = { text: run.text, fg: run.fg, bg: run.bg, bold: run.bold }
+    run = undefined
+    const prev = items[items.length - 1]
+    if (isBlank(style.text)) items.push({ kind: 'blank', start, width, bg: style.bg })
+    else if (prev?.kind === 'text' && joins(prev.runs[prev.runs.length - 1].text, style.text)) {
+      prev.runs.push(style)
+      prev.width += width
+    } else items.push({ kind: 'text', start, width, runs: [style] })
+  }
+  let col = 0
+  for (const c of row.cells) {
+    const w = charWidth(c.ch)
+    if (isPixel(c.ch)) {
+      close()
+      let [top, bottom] = pixelHalves(c)
+      if (whole) top = bottom = wholeCell(top, bottom)
+      const prev = items[items.length - 1]
+      if (prev?.kind === 'pixel' && prev.top === top && prev.bottom === bottom) prev.width += w
+      else items.push({ kind: 'pixel', start: col, width: w, top, bottom })
+    } else if (run && run.fg === c.fg && run.bg === c.bg && run.bold === c.bold && run.rule === ruleOf(c.ch)) {
+      run.text += c.ch
+      run.width += w
+    } else {
+      close()
+      run = { text: c.ch, fg: c.fg, bg: c.bg, bold: c.bold, start: col, width: w, rule: ruleOf(c.ch) }
+    }
+    col += w
+  }
+  close()
+  return items
+}
+
+const deskBox = (props: DeskBoxProps, children: DeskBox['children'] = []): DeskBox => ({ type: 'Box', props, children })
+/** one desktop line: exactly one row tall, never squeezed, clipping whatever does not fit */
+const deskLine = (children: DeskBox['children']): DeskBox =>
+  deskBox({ flexDirection: 'row', height: 1, flexShrink: 0, overflow: 'hidden' }, children)
+
+// A run truncates rather than wraps, so text too wide for its cell ends in an
+// ellipsis instead of folding. Rule glyphs are the exception: ─ ┈ │ draw wider
+// than their columns, and an ellipsis there shows as `──── … 09:00` along the
+// time axis (or stands in for a session boundary's only glyph). Unwrapped, a
+// rule folds at the cell's edge instead, and the one-line row clips the fold.
+function deskRun(run: Run, truncate = true): DeskText {
+  const props: DeskTextProps = truncate && !isRule(run.text) ? { wrap: 'truncate' } : {}
+  if (run.fg) props.color = run.fg
+  if (run.bg) props.backgroundColor = run.bg
+  if (run.bold) props.bold = true
+  return { type: 'Text', props, children: [run.text] }
+}
+/** a text cell; its Box paints `bg` over its slack (the runs paint their own) */
+function textCell(width: number, runs: Run[], bg: string | undefined, flushRight: boolean): DeskBox {
+  const props: DeskBoxProps = { width, flexShrink: 0 }
+  if (bg) props.backgroundColor = bg
+  if (flushRight) props.justifyContent = 'flex-end'
+  return deskBox(props, runs.map(run => deskRun(run)))
+}
+/** pixels of one colour pair: one Box, half height where one half is lit, a Box in a Box for two colours */
+function pixelBox(width: number, top?: string, bottom?: string): DeskBox | undefined {
+  if (top && bottom && top !== bottom) {
+    return deskBox({ width, flexShrink: 0, flexDirection: 'column', justifyContent: 'flex-end', backgroundColor: top }, [
+      deskBox({ height: '50%', backgroundColor: bottom }),
+    ])
+  }
+  if (top && bottom) return deskBox({ width, flexShrink: 0, backgroundColor: top })
+  if (top) return deskBox({ width, flexShrink: 0, height: '50%', alignSelf: 'flex-start', backgroundColor: top })
+  if (bottom) return deskBox({ width, flexShrink: 0, height: '50%', alignSelf: 'flex-end', backgroundColor: bottom })
+  return undefined
+}
 
 /**
- * The desktop Code tab draws Text in a proportional font, where a space is
- * narrower than a digit and a CJK glyph is not two spaces wide - the
- * terminal's space padding no longer lines the columns up. There the row is
- * cut at its blank runs into cells, each a Box exactly as many `ch` wide as
- * its terminal columns, so every column still starts where it does on the
- * terminal. Runs whose glyphs touch (no space at the seam: a candle row, a
- * colored price tag) share one cell, which keeps a per-column colored chart
- * far below the Client's size limits. A cell also takes the blank run
- * right after it (same bg, so the look is unchanged) into its own width, as
- * slack for glyphs wider than 1ch (M, W, ▲, %) instead of an ellipsis.
- * Padding BEFORE a cell is never taken in: a right-aligned number has to end
- * where its own Box ends.
+ * One desktop row. A text cell takes the blank run right after it (same bg,
+ * so the look is unchanged) into its own width, as slack for glyphs wider
+ * than 1ch (M, W, ▲, %) instead of an ellipsis; padding BEFORE a cell is not
+ * taken in, since a right-aligned number has to end where its own Box ends.
+ * A text cell that ends the row (only bare blanks after it) is the exception
+ * both ways. If it ends at the Client's right edge (the terminal
+ * right-aligned it there), nothing follows it to take, so it takes the blank
+ * run before it and draws flush right (`↓變更%` lost its last glyph to an
+ * ellipsis). Otherwise it runs on to the Client's right edge with no Box bg
+ * over that stretch, so a highlighted row still ends where it does on the
+ * terminal (its runs paint their own bg). Blanks that carry a bg after it
+ * (the 曲線 shade past a session boundary's │) keep it from ending the row.
  */
-function deskCells(row: Row): DeskCell[] {
-  const out: DeskCell[] = []
-  for (const run of rowRuns(row)) {
-    const width = dispWidth(run.text)
-    const blank = isBlank(run.text)
-    const prev = out[out.length - 1]
-    if (prev && !prev.blank && blank && prev.bg === run.bg) {
-      // the padding after a cell: slack for it, and nothing may join it now
-      prev.width += width
-      prev.open = false
-    } else if (prev && prev.open && !blank && touches(prev.runs[prev.runs.length - 1].text, run.text)) {
-      prev.runs.push(run)
-      prev.width += width
-      prev.bg = run.bg
+function deskRow(row: Row, columns: number, whole: boolean): DeskBox {
+  const items = deskItems(row, whole)
+  const cellBg = (it: Extract<DeskItem, { kind: 'text' }>) => it.runs[it.runs.length - 1].bg
+  const bare = (it: DeskItem) => it.kind === 'blank' && !it.bg
+  let lastAt = items.length - 1
+  while (lastAt >= 0 && bare(items[lastAt])) lastAt--
+  const last = items[lastAt]
+  const before = items[lastAt - 1]
+  const lead =
+    last?.kind === 'text' && last.start + last.width >= columns && before?.kind === 'blank' && (!before.bg || before.bg === cellBg(last))
+      ? before
+      : undefined
+  const kids: DeskBox[] = []
+  let margin = 0
+  const place = (node: DeskBox) => {
+    if (margin > 0) node.props.marginLeft = margin
+    margin = 0
+    kids.push(node)
+  }
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]
+    if (it === lead) continue
+    if (it.kind === 'blank') {
+      if (it.bg) place(deskBox({ width: it.width, flexShrink: 0, backgroundColor: it.bg }))
+      else margin += it.width
+      continue
+    }
+    if (it.kind === 'pixel') {
+      const node = pixelBox(it.width, it.top, it.bottom)
+      if (node) place(node)
+      else margin += it.width
+      continue
+    }
+    const next = items[i + 1]
+    const slack = next?.kind === 'blank' && next !== lead && next.bg === cellBg(it) ? next.width : 0
+    if (i !== lastAt) {
+      place(textCell(it.width + slack, it.runs, cellBg(it), false))
+      i += slack ? 1 : 0
+    } else if (lead) {
+      place(textCell(lead.width + it.width, it.runs, lead.bg, true))
+      break
     } else {
-      out.push({ runs: [run], width, bg: run.bg, blank, open: !blank })
+      const width = Math.max(it.width + slack, columns - it.start)
+      place(textCell(width, it.runs, width > it.width + slack ? undefined : cellBg(it), false))
+      break
     }
   }
-  return out
+  return deskLine(kids)
+}
+
+// The page takes 2000 nodes and 262144 characters of JSON; these keep a
+// margin under both. Only a tree near the node budget can come near the
+// length budget, so only such a tree is serialized to measure it.
+const DESK_NODE_BUDGET = 1600
+const DESK_JSON_BUDGET = 200_000
+const DESK_JSON_CHECK_FROM = 1000
+
+/**
+ * The page's own check on a Client tree (`Os` in the app's renderer, walked
+ * the same way): an element or a string child is one node, depth counts
+ * elements, nesting counts every object and array - plus the length of the
+ * JSON it arrives as.
+ */
+function pageTakes(root: DeskNode): boolean {
+  const stack: { value: unknown; depth: number; nesting: number; child: boolean }[] = [
+    { value: root, depth: 0, nesting: 0, child: true },
+  ]
+  let nodes = 0
+  for (let e = stack.pop(); e !== undefined; e = stack.pop()) {
+    const v = e.value
+    const obj = typeof v === 'object' && v !== null
+    const typed = obj && 'type' in v
+    const depth = typed ? e.depth + 1 : e.depth
+    const nesting = obj ? e.nesting + 1 : e.nesting
+    if (typed || (e.child && typeof v === 'string')) nodes += 1
+    if (nodes > DESK_NODE_BUDGET || depth > 32 || nesting > 66) return false
+    if (obj) {
+      const child = Array.isArray(v)
+      for (const x of Object.values(v)) stack.push({ value: x, depth, nesting, child })
+    }
+  }
+  return nodes < DESK_JSON_CHECK_FROM || JSON.stringify(root).length <= DESK_JSON_BUDGET
 }
 
 /**
- * A desktop row as one Box per cell. The last cell runs on to the Client's
- * right edge, the only slack a row-final (right-aligned) cell can get - with
- * no Box bg over that stretch, so a highlighted row still ends where it does
- * on the terminal (its runs paint their own bg). Every run sits in a Text of
- * its own, uncolored ones too, inside a plain outer Text: a Text holding only
- * strings can be drawn monospace on the desktop, and every cell has to draw
- * in the same font its Box's `ch` width is measured in. A blank cell keeps
- * its spaces, since a fixed-width Box with no content can collapse to zero
- * height.
+ * The desktop board, in as much detail as the page will take: half-row
+ * pixels; else one colour per pixel cell (a dense two-colour chart halves
+ * its Boxes); else the terminal's own rows, one Text of runs per line -
+ * misaligned in a proportional font, but drawn; else the same rows without
+ * colour, which always fits. Each level is built only when the one before
+ * it is over budget.
  */
-// Every desktop run carries `wrap` too: a Text without it is drawn
-// `white-space:pre-wrap; overflow-wrap:anywhere`, which overrides the outer
-// Text's `pre` - a run wider than its cell (the 94-column rule, whose ─ draws
-// about 2ch wide in a proportional font) then folds onto extra lines instead
-// of being clipped, which is the blank-rows-under-the-header symptom.
-function deskRunNode(run: Run, Text: TextTag): RenderNode {
-  if (run.bold) return <Text color={run.fg} backgroundColor={run.bg} bold wrap="truncate">{run.text}</Text>
-  return <Text color={run.fg} backgroundColor={run.bg} wrap="truncate">{run.text}</Text>
+function deskBoard(rows: Row[], columns: number): DeskBox {
+  const column = (lines: DeskBox[]) => deskBox({ flexDirection: 'column' }, lines)
+  const plain = (children: DeskText['children']): DeskText => ({ type: 'Text', props: {}, children })
+  const levels = [
+    () => column(rows.map(r => deskRow(r, columns, false))),
+    () => column(rows.map(r => deskRow(r, columns, true))),
+    () =>
+      column(rows.map(r => deskLine([plain(rowRuns(r).map(run => (run.fg || run.bg || run.bold ? deskRun(run, false) : run.text)))]))),
+  ]
+  for (const level of levels) {
+    const tree = level()
+    if (pageTakes(tree)) return tree
+  }
+  return column(rows.map(r => deskLine([plain([r.cells.map(c => c.ch).join('')])])))
 }
 
-function deskRow(row: Row, columns: number, Box: BoxTag, Text: TextTag): RenderNode {
-  const cells = deskCells(row)
-  let start = 0
-  return (
-    <Box flexDirection="row">
-      {cells.map((cell, i) => {
-        const width = i === cells.length - 1 ? Math.max(cell.width, columns - start) : cell.width
-        const bg = width > cell.width ? undefined : cell.bg
-        start += cell.width
-        return (
-          <Box width={width} flexShrink={0} backgroundColor={bg}>
-            <Text wrap="truncate">
-              {cell.runs.map(run => deskRunNode(run, Text))}
-            </Text>
-          </Box>
-        )
-      })}
-    </Box>
-  )
+function deskJsx(node: DeskNode | string, Box: BoxTag, Text: TextTag): RenderNode {
+  if (typeof node === 'string') return node
+  const kids = node.children.map(k => deskJsx(k, Box, Text))
+  return node.type === 'Text' ? <Text {...node.props}>{kids}</Text> : <Box {...node.props}>{kids}</Box>
 }
 
 // --- number formatting (no Intl: the hooks sandbox is not guaranteed to have
@@ -903,12 +1104,21 @@ function layoutN(width: number, n: number): HalfLayout[] {
     const nameCol = leftEdge + 7
     return { symCol: leftEdge, nameCol, priceCol, priceRight, pctRight, showName: priceCol - nameCol >= 8 }
   }
+  // `halfW` budgets TWO_COL_GUTTER columns a gutter, but a gutter actually
+  // clears one more (pctRight is the column after 變更%), so the halves can
+  // run up to n - 1 columns past `width` - one past every odd width at two
+  // columns, which the desktop Code tab clips. That many gutters close to
+  // TWO_COL_GUTTER clear columns instead, left to right; a width the halves
+  // already fit keeps every gutter (and every row) as it was.
+  let over = Math.max(0, 1 + n * halfW + (TWO_COL_GUTTER + 1) * (n - 1) - width)
   const cols: HalfLayout[] = []
   let leftEdge = 1
   for (let j = 0; j < n; j++) {
     const half = mkHalf(leftEdge)
     cols.push(half)
-    leftEdge = half.pctRight + 1 + TWO_COL_GUTTER
+    const squeeze = over > 0 ? 1 : 0
+    over -= squeeze
+    leftEdge = half.pctRight + 1 + TWO_COL_GUTTER - squeeze
   }
   return cols
 }
@@ -2170,10 +2380,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
   // an empty <Text> collapses to zero height, so blank rows hold a
   // non-breaking space to keep their line
   for (const r of rows) if (r.cells.length === 0) r.put(0, '\u00a0')
-  if (props.desktop) {
-    const columns = surface.columns || 80
-    return <Box flexDirection="column">{rows.map(r => deskRow(r, columns, Box, Text))}</Box>
-  }
+  if (props.desktop) return deskJsx(deskBoard(rows, surface.columns || 80), Box, Text)
   return (
     <Box flexDirection="column">
       {rows.map(r => (

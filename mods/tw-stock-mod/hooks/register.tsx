@@ -2787,7 +2787,7 @@ export const register: Register = on => {
           </Box>
         </Box>
         {/* the desktop Code tab draws Text in a proportional font, so the board
-            lays out in fixed-width cells there (board.tsx: deskRow); `desktop`
+            lays out in fixed-width cells there (board.tsx: deskBoard); `desktop`
             is added only there, so the terminal's props stay as they were */}
         <Client
           key="stock-band:table"
