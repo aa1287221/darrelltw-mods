@@ -2786,12 +2786,15 @@ export const register: Register = on => {
             <Button key="stock-band:snooze" label="收起 30分" onPress={onSnooze} />
           </Box>
         </Box>
+        {/* the desktop Code tab draws Text in a proportional font, so the board
+            lays out in fixed-width cells there (board.tsx: deskRow); `desktop`
+            is added only there, so the terminal's props stay as they were */}
         <Client
           key="stock-band:table"
           module="./board.tsx"
           width={cols}
           height={props.boardRows}
-          props={{ ...props }}
+          props={{ ...props, ...(e.surface === 'desktop' ? { desktop: true } : {}) }}
         />
         {await next(e)}
       </Box>

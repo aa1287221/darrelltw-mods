@@ -2,6 +2,7 @@
 import type { ClientElements, ClientSurface, RenderNode } from 'claude-code'
 
 type TextTag = ClientElements['Text']
+type BoxTag = ClientElements['Box']
 
 // The stock band's Client board: pure drawing, on its own frame clock
 // (surface.every), independent of the hooks module. Quotes, market session and
@@ -198,6 +199,13 @@ export type BoardProps = {
   holdingsScroll: number
   /** tf pnl with a futures-account.json only; absent otherwise, so every other frame is unchanged */
   account?: AccountSummary
+  /**
+   * set only when the band draws on the desktop Code tab: register.tsx's
+   * ui.render adds it on the Client element, and it is absent on the terminal
+   * so those props stay exactly as they were. Switches the final assembly to
+   * fixed-width cells (see deskRow).
+   */
+  desktop?: true
 }
 
 // `turn` is the change the rows last turned for, and `since` is when that turn
@@ -657,26 +665,102 @@ class Row {
   }
 }
 
-// groups consecutive same-color cells into one span; takes the Text tag as a
-// parameter since Row is built before we are inside the component's JSX scope
-function rowChildren(row: Row, Text: TextTag): RenderNode[] {
-  const out: RenderNode[] = []
-  let run: { text: string; fg?: string; bg?: string; bold?: boolean } | null = null
-  const flush = () => {
-    if (!run) return
-    if (run.bold) out.push(<Text color={run.fg} backgroundColor={run.bg} bold>{run.text}</Text>)
-    else out.push(!run.fg && !run.bg ? run.text : <Text color={run.fg} backgroundColor={run.bg}>{run.text}</Text>)
-    run = null
-  }
+type Run = { text: string; fg?: string; bg?: string; bold?: boolean }
+
+/** groups consecutive same-style cells into runs - what both the terminal and the desktop assembly draw */
+function rowRuns(row: Row): Run[] {
+  const out: Run[] = []
+  let run: Run | null = null
   for (const c of row.cells) {
     if (run && run.fg === c.fg && run.bg === c.bg && run.bold === c.bold) run.text += c.ch
     else {
-      flush()
       run = { text: c.ch, fg: c.fg, bg: c.bg, bold: c.bold }
+      out.push(run)
     }
   }
-  flush()
   return out
+}
+
+// one span per run, an uncolored run as a bare string; takes the Text tag as a
+// parameter since Row is built before we are inside the component's JSX scope
+function runNode(run: Run, Text: TextTag): RenderNode {
+  if (run.bold) return <Text color={run.fg} backgroundColor={run.bg} bold>{run.text}</Text>
+  return !run.fg && !run.bg ? run.text : <Text color={run.fg} backgroundColor={run.bg}>{run.text}</Text>
+}
+function rowChildren(row: Row, Text: TextTag): RenderNode[] {
+  return rowRuns(row).map(run => runNode(run, Text))
+}
+
+/**
+ * One fixed-width cell of a desktop row: the runs it draws, its width in
+ * display columns, and the background its Box paints (only when every run in
+ * it shares one - a highlighted row's fillBg - else the runs paint their own).
+ */
+type DeskCell = { runs: Run[]; width: number; bg?: string; blank: boolean; open: boolean }
+
+const isBlank = (text: string): boolean => /^ +$/.test(text)
+/** glyph against glyph: a space on either side of the seam starts a new cell, so text after a gap is placed by its own column */
+const touches = (left: string, right: string): boolean => !left.endsWith(' ') && !right.startsWith(' ')
+
+/**
+ * The desktop Code tab draws Text in a proportional font, where a space is
+ * narrower than a digit and a CJK glyph is not two spaces wide - the
+ * terminal's space padding no longer lines the columns up. There the row is
+ * cut at its blank runs into cells, each a Box exactly as many `ch` wide as
+ * its terminal columns, so every column still starts where it does on the
+ * terminal. Runs whose glyphs touch (no space at the seam: a candle row, a
+ * colored price tag) share one cell, which keeps a per-column colored chart
+ * far below the Client's size limits. A cell also takes the blank run
+ * right after it (same bg, so the look is unchanged) into its own width, as
+ * slack for glyphs wider than 1ch (M, W, ▲, %) instead of an ellipsis.
+ * Padding BEFORE a cell is never taken in: a right-aligned number has to end
+ * where its own Box ends.
+ */
+function deskCells(row: Row): DeskCell[] {
+  const out: DeskCell[] = []
+  for (const run of rowRuns(row)) {
+    const width = dispWidth(run.text)
+    const blank = isBlank(run.text)
+    const prev = out[out.length - 1]
+    if (prev && !prev.blank && blank && prev.bg === run.bg) {
+      // the padding after a cell: slack for it, and nothing may join it now
+      prev.width += width
+      prev.open = false
+    } else if (prev && prev.open && !blank && touches(prev.runs[prev.runs.length - 1].text, run.text)) {
+      prev.runs.push(run)
+      prev.width += width
+      if (prev.bg !== run.bg) prev.bg = undefined
+    } else {
+      out.push({ runs: [run], width, bg: run.bg, blank, open: !blank })
+    }
+  }
+  return out
+}
+
+/**
+ * A desktop row as one Box per cell. The last cell runs on to the Client's
+ * right edge, the only slack a row-final (right-aligned) cell can get. Each
+ * cell's Text nests its colored runs inside a plain outer Text, so every cell
+ * draws in the same font the Box's `ch` width is measured in; a blank cell
+ * keeps its spaces, since a fixed-width Box with no content can collapse to
+ * zero height.
+ */
+function deskRow(row: Row, columns: number, Box: BoxTag, Text: TextTag): RenderNode {
+  const cells = deskCells(row)
+  let start = 0
+  return (
+    <Box flexDirection="row">
+      {cells.map((cell, i) => {
+        const width = i === cells.length - 1 ? Math.max(cell.width, columns - start) : cell.width
+        start += cell.width
+        return (
+          <Box width={width} flexShrink={0} backgroundColor={cell.bg}>
+            <Text wrap="truncate">{cell.runs.map(run => runNode(run, Text))}</Text>
+          </Box>
+        )
+      })}
+    </Box>
+  )
 }
 
 // --- number formatting (no Intl: the hooks sandbox is not guaranteed to have
@@ -2069,6 +2153,10 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
   // an empty <Text> collapses to zero height, so blank rows hold a
   // non-breaking space to keep their line
   for (const r of rows) if (r.cells.length === 0) r.put(0, '\u00a0')
+  if (props.desktop) {
+    const columns = surface.columns || 80
+    return <Box flexDirection="column">{rows.map(r => deskRow(r, columns, Box, Text))}</Box>
+  }
   return (
     <Box flexDirection="column">
       {rows.map(r => (
