@@ -215,7 +215,7 @@ const deskColumns = (row, problems, where) => {
  * (with/without colour). Returns the desktop cells as [width|text] rows for a
  * human to read.
  */
-const checkBoard = (name, deskProps, columns) => {
+const checkBoard = (name, deskProps, columns, opts = {}) => {
   const termProps = { ...deskProps }
   delete termProps.desktop
   const termRows = render(termProps, columns).kids
@@ -246,6 +246,16 @@ const checkBoard = (name, deskProps, columns) => {
     const { cols, end, lastIsText } = deskColumns(row, problems, where)
     if (end > columns) problems.push(`${where}: its nodes end at ${end}, past the Client's ${columns}`)
     if (lastIsText && end !== columns) problems.push(`${where}: a text cell ends the row at ${end}, not at the Client's edge ${columns}`)
+    if (opts.squeezed) {
+      // an odd width the terminal overflows by a column: only the desktop
+      // closes one gutter (layoutN), so its columns are not the terminal's -
+      // the same glyphs in the same order is what still has to hold
+      // (a rule spans the layout's width, so its run of ─ is one shorter there)
+      const glyphs = list => list.filter(g => g && !g.cont && g.ch !== undefined && g.ch !== ' ').map(g => `${g.ch}|${g.fg}|${g.bg}|${!!g.bold}`)
+        .filter((g, i, all) => !(g.startsWith('─|') && all[i - 1] === g)).join(',')
+      if (glyphs(cols) !== glyphs(term)) problems.push(`${where}: not the terminal row's glyphs in the terminal row's order`)
+      return
+    }
     for (let c = 0; c < Math.max(term.length, cols.length); c++) {
       const t = term[c]
       const d = cols[c] ?? {}
@@ -284,13 +294,20 @@ const checkBoard = (name, deskProps, columns) => {
 }
 
 /** asserts one view on both surfaces off the real ui.render props */
-const check = async (name, hostProps, columns) => {
+const check = async (name, hostProps, columns, opts = {}) => {
   const term = await draw('terminal', hostProps)
   const desk = await draw('desktop', hostProps)
   const { desktop, ...rest } = desk.props
   ok(desktop === true && !('desktop' in term.props), `${name}: only the desktop Client carries desktop: true`)
   ok(JSON.stringify(rest) === JSON.stringify(term.props), `${name}: the desktop props are the terminal's plus that one key`)
-  return { ...checkBoard(name, desk.props, columns), props: desk.props }
+  if (opts.squeezed) {
+    // the odd-width fix is desktop-only: the terminal's rows stay exactly as
+    // they always were, one column past this width
+    const termRows = render(rest, columns).kids
+    const widest = Math.max(...termRows.map(row => dispWidth(text(row))))
+    ok(widest > columns, `${name}: the terminal's layout is untouched (still ${widest} wide at ${columns}); only the desktop closes a gutter`)
+  }
+  return { ...checkBoard(name, desk.props, columns, opts), props: desk.props }
 }
 
 const show = lines => { for (const l of lines) console.log(l) }
@@ -320,11 +337,11 @@ ok(r.level === 0, `table @100: drawn in full (level ${r.level})`)
   ok(hi >= 0 && nodes.slice(0, -1).every(c => c.props.backgroundColor === HILIGHT), `highlight: every node but the last paints the row's bg on its Box (row ${hi})`)
   ok(last && last.props.backgroundColor === undefined && last.kids.every(k => k.props.backgroundColor === HILIGHT), "highlight: the edge-wide last cell leaves its Box bare and its runs paint the bg, so the band ends where the terminal's does")
 }
-r = await check('table @95', { maxRows: 20, bodyColumns: 95 }, 95)
+r = await check('table @95', { maxRows: 20, bodyColumns: 95 }, 95, { squeezed: true })
 show(r.table)
 r = await check('table @190', { maxRows: 20, bodyColumns: 190 }, 190)
 ok(r.props.columns === 4, `table @190: four symbol columns on desktop too (${r.props.columns})`)
-r = await check('table @191', { maxRows: 20, bodyColumns: 191 }, 191)
+r = await check('table @191', { maxRows: 20, bodyColumns: 191 }, 191, { squeezed: true })
 ok(r.props.columns === 4, `table @191: four symbol columns (${r.props.columns})`)
 r = await check('ticker @100', { maxRows: 3, bodyColumns: 100 }, 100)
 ok(r.props.layout === 'ticker', `ticker @100: the one-line ticker (${r.props.layout})`)

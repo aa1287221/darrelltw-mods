@@ -1094,7 +1094,7 @@ const MIN_HALF_WIDTH = 35
 const columnsCap = (n: number) => HALF_MAX_WIDTH * n + TWO_COL_GUTTER * (n - 1)
 const columnsMin = (n: number) => MIN_HALF_WIDTH * n + TWO_COL_GUTTER * (n - 1)
 
-function layoutN(width: number, n: number): HalfLayout[] {
+function layoutN(width: number, n: number, desktop: boolean): HalfLayout[] {
   const cap = Math.min(width - 1, columnsCap(n))
   const halfW = Math.floor((cap - TWO_COL_GUTTER * (n - 1)) / n)
   const mkHalf = (leftEdge: number): HalfLayout => {
@@ -1107,10 +1107,11 @@ function layoutN(width: number, n: number): HalfLayout[] {
   // `halfW` budgets TWO_COL_GUTTER columns a gutter, but a gutter actually
   // clears one more (pctRight is the column after 變更%), so the halves can
   // run up to n - 1 columns past `width` - one past every odd width at two
-  // columns, which the desktop Code tab clips. That many gutters close to
-  // TWO_COL_GUTTER clear columns instead, left to right; a width the halves
-  // already fit keeps every gutter (and every row) as it was.
-  let over = Math.max(0, 1 + n * halfW + (TWO_COL_GUTTER + 1) * (n - 1) - width)
+  // columns, which the desktop Code tab clips. There, that many gutters close
+  // to TWO_COL_GUTTER clear columns instead, left to right; a width the halves
+  // already fit keeps every gutter (and every row) as it was. Desktop only:
+  // the terminal's layout is left exactly as it has always been.
+  let over = desktop ? Math.max(0, 1 + n * halfW + (TWO_COL_GUTTER + 1) * (n - 1) - width) : 0
   const cols: HalfLayout[] = []
   let leftEdge = 1
   for (let j = 0; j < n; j++) {
@@ -2202,7 +2203,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     const compact = props.layout === 'compact'
     const quoteRows = Math.max(1, props.quoteRows)
     const columns = Math.min(props.columns, maxColumns(surface.columns || 80))
-    const halves = columns >= 2 ? layoutN(surface.columns || 80, columns) : undefined
+    const halves = columns >= 2 ? layoutN(surface.columns || 80, columns, props.desktop === true) : undefined
     const pctRight = halves ? halves[halves.length - 1].pctRight : lay.pctRight
     const first = compact ? 1 : 2 // the first quote row
 
