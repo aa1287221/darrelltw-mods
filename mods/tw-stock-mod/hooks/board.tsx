@@ -749,6 +749,16 @@ function deskCells(row: Row): DeskCell[] {
  * its spaces, since a fixed-width Box with no content can collapse to zero
  * height.
  */
+// Every desktop run carries `wrap` too: a Text without it is drawn
+// `white-space:pre-wrap; overflow-wrap:anywhere`, which overrides the outer
+// Text's `pre` - a run wider than its cell (the 94-column rule, whose ─ draws
+// about 2ch wide in a proportional font) then folds onto extra lines instead
+// of being clipped, which is the blank-rows-under-the-header symptom.
+function deskRunNode(run: Run, Text: TextTag): RenderNode {
+  if (run.bold) return <Text color={run.fg} backgroundColor={run.bg} bold wrap="truncate">{run.text}</Text>
+  return <Text color={run.fg} backgroundColor={run.bg} wrap="truncate">{run.text}</Text>
+}
+
 function deskRow(row: Row, columns: number, Box: BoxTag, Text: TextTag): RenderNode {
   const cells = deskCells(row)
   let start = 0
@@ -761,7 +771,7 @@ function deskRow(row: Row, columns: number, Box: BoxTag, Text: TextTag): RenderN
         return (
           <Box width={width} flexShrink={0} backgroundColor={bg}>
             <Text wrap="truncate">
-              {cell.runs.map(run => (!run.fg && !run.bg && !run.bold ? <Text>{run.text}</Text> : runNode(run, Text)))}
+              {cell.runs.map(run => deskRunNode(run, Text))}
             </Text>
           </Box>
         )
