@@ -2310,18 +2310,18 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey || e.surface !== 'terminal') return next(e)
+    // AbovePrompt is raised on terminal and desktop only, and those are the
+    // two tables that carry a `Client` for board.tsx (d.ts Elements).
+    if (e.props.hasSurvey || (e.surface !== 'terminal' && e.surface !== 'desktop')) return next(e)
     const now = await $.clock.now()
     if (!ready) return next(e)
 
     const { Box, Button, Client, Text, Select } = await $.ui.resolve(e)
     // Capability check, not a surface-name check: terminal and desktop both
     // resolve a Select (d.ts Elements), mobile does not (no `ui_select`
-    // message yet). The AbovePrompt guard above only ever lets `terminal`
-    // reach here today, so this reads as always-true in production - but
-    // writing it as "did the table hand out a Select" rather than
-    // `e.surface === 'terminal'` means desktop starts drawing the same
-    // dropdown the day that guard widens, with no second change needed here.
+    // message yet). Both surfaces that reach here hand one out today, so this
+    // reads as always-true in production - but asking "did the table hand
+    // out a Select" keeps the dropdown right if a surface's table changes.
     const canSelect = Boolean(Select)
 
     // Snoozing used to drop the band with no way back: the only exits were

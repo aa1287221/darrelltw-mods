@@ -44,10 +44,11 @@ first if the numbers in `hooks/board.tsx` look arbitrary.
   ```
 
   (Merge the `env` key if the file already has one.)
-- An interactive terminal. The band is `AbovePrompt`, so nothing draws in
-  `claude -p`, the desktop app or mobile. Measured on macOS iTerm2,
-  Terminal.app, and tmux. Windows and the VS Code integrated terminal are
-  untested — reports welcome.
+- An interactive terminal or the desktop app's Code tab. The band is
+  `AbovePrompt`, which the engine raises on those two surfaces only, so
+  nothing draws in `claude -p`, VS Code or mobile. Measured on macOS iTerm2,
+  Terminal.app, and tmux. The desktop Code tab, Windows terminals and the
+  VS Code integrated terminal are untested — reports welcome.
 
 ## Install
 
