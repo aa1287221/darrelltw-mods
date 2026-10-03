@@ -35,7 +35,11 @@ def setup(tmp_path, monkeypatch, user_env=None):
     repo_creds.write_text("SINOBON_API_KEY=from-repo\nSINOBON_SECRET_KEY=from-repo\n", encoding="utf-8")
     (project / ".claude" / "stock-band.json").write_text(json.dumps({"shioaji": {"env": str(repo_creds)}}), encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("USERPROFILE", raising=False)
+    # Point USERPROFILE at the fake home too, never just delete it: with it
+    # gone, Windows' expanduser falls back to HOMEDRIVE+HOMEPATH - the real
+    # profile - and a real ~/.sinobon.env there makes main() actually log in
+    # and loop instead of exiting on the missing file
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("SINOBON_API_KEY", raising=False)
     monkeypatch.delenv("SINOBON_SECRET_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
@@ -50,8 +54,8 @@ def test_the_project_config_never_names_the_env_file(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exit_info:
         fetcher.main()
     # the repo's creds.env is ignored: the default ~/.sinobon.env is what it
-    # looked for (where `~` lands is expanduser's business - on Windows it
-    # reads USERPROFILE, not the HOME set here)
+    # looked for (where `~` lands is expanduser's business - HOME on POSIX,
+    # USERPROFILE on Windows; setup() points both at the fake home)
     message = str(exit_info.value)
     assert ".sinobon.env" in message and "creds.env" not in message
 
