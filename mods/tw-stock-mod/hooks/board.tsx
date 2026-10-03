@@ -693,8 +693,9 @@ function rowChildren(row: Row, Text: TextTag): RenderNode[] {
 
 /**
  * One fixed-width cell of a desktop row: the runs it draws, its width in
- * display columns, and the background its Box paints (only when every run in
- * it shares one - a highlighted row's fillBg - else the runs paint their own).
+ * display columns, and the background its Box paints - its LAST run's, since
+ * the slack a cell has always sits after that run (earlier runs paint their
+ * own through their Text).
  */
 type DeskCell = { runs: Run[]; width: number; bg?: string; blank: boolean; open: boolean }
 
@@ -729,7 +730,7 @@ function deskCells(row: Row): DeskCell[] {
     } else if (prev && prev.open && !blank && touches(prev.runs[prev.runs.length - 1].text, run.text)) {
       prev.runs.push(run)
       prev.width += width
-      if (prev.bg !== run.bg) prev.bg = undefined
+      prev.bg = run.bg
     } else {
       out.push({ runs: [run], width, bg: run.bg, blank, open: !blank })
     }
@@ -739,11 +740,14 @@ function deskCells(row: Row): DeskCell[] {
 
 /**
  * A desktop row as one Box per cell. The last cell runs on to the Client's
- * right edge, the only slack a row-final (right-aligned) cell can get. Each
- * cell's Text nests its colored runs inside a plain outer Text, so every cell
- * draws in the same font the Box's `ch` width is measured in; a blank cell
- * keeps its spaces, since a fixed-width Box with no content can collapse to
- * zero height.
+ * right edge, the only slack a row-final (right-aligned) cell can get - with
+ * no Box bg over that stretch, so a highlighted row still ends where it does
+ * on the terminal (its runs paint their own bg). Every run sits in a Text of
+ * its own, uncolored ones too, inside a plain outer Text: a Text holding only
+ * strings can be drawn monospace on the desktop, and every cell has to draw
+ * in the same font its Box's `ch` width is measured in. A blank cell keeps
+ * its spaces, since a fixed-width Box with no content can collapse to zero
+ * height.
  */
 function deskRow(row: Row, columns: number, Box: BoxTag, Text: TextTag): RenderNode {
   const cells = deskCells(row)
@@ -752,10 +756,13 @@ function deskRow(row: Row, columns: number, Box: BoxTag, Text: TextTag): RenderN
     <Box flexDirection="row">
       {cells.map((cell, i) => {
         const width = i === cells.length - 1 ? Math.max(cell.width, columns - start) : cell.width
+        const bg = width > cell.width ? undefined : cell.bg
         start += cell.width
         return (
-          <Box width={width} flexShrink={0} backgroundColor={cell.bg}>
-            <Text wrap="truncate">{cell.runs.map(run => runNode(run, Text))}</Text>
+          <Box width={width} flexShrink={0} backgroundColor={bg}>
+            <Text wrap="truncate">
+              {cell.runs.map(run => (!run.fg && !run.bg && !run.bold ? <Text>{run.text}</Text> : runNode(run, Text)))}
+            </Text>
           </Box>
         )
       })}

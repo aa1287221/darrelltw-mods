@@ -7,12 +7,14 @@
 //   - the terminal tree has no Box rows (it is still one Text per row)
 //   - on desktop every row is a row Box of cell Boxes, each a positive integer
 //     `ch` wide, no shrink, holding one `wrap="truncate"` Text whose text fits
-//     in the cell; the cells add up to the Client's width (the last one runs to
+//     in the cell and whose runs are all Texts (a Text of bare strings can be
+//     drawn monospace there, off the Box's `ch`); the cells add up to the Client's width (the last one runs to
 //     the edge); and laying each cell's text out at its own start column
 //     rebuilds the terminal row exactly - every column starts where it does on
 //     the terminal
 // for the table at 100 and 190 columns, 損益, the chart (K線 and 曲線) and the
-// one-line ticker.
+// one-line ticker; and the single-column table's highlighted top-mover row
+// keeps its bg on every cell up to where the terminal's fillBg ends.
 //
 // Usage: node desktop-cells.mjs $OUT/register.js $OUT/board.js <proj>
 // <proj> is a copy of the fit-rows fixture: no `tw` list (the built-in 20
@@ -109,6 +111,7 @@ const check = async (name, hostProps, columns) => {
       if (cell.type !== 'Box' || !Number.isInteger(w) || w < 1) problems.push(`row ${i}: cell width ${w}`)
       if (cell.props.flexShrink !== 0) problems.push(`row ${i}: a cell may shrink`)
       if (cell.kids?.length !== 1 || inner?.type !== 'Text' || inner.props.wrap !== 'truncate') problems.push(`row ${i}: a cell is not one truncating Text`)
+      if ((inner?.kids ?? []).some(k => typeof k !== 'object')) problems.push(`row ${i}: a cell's Text holds a bare string (the desktop may draw it monospace)`)
       if (dispWidth(t) > w) problems.push(`row ${i}: "${t}" (${dispWidth(t)}) overflows its ${w}-column cell`)
       rebuilt += t + ' '.repeat(Math.max(0, w - dispWidth(t)))
       sum += w
@@ -126,6 +129,19 @@ const show = lines => { for (const l of lines) console.log(l) }
 
 let r = await check('table @100', { maxRows: 20, bodyColumns: 100 }, 100)
 show(r.table)
+// the top-mover highlight is single-column only: the same props at columns 1
+{
+  const props = { ...r.desk.props, columns: 1, highlight: true }
+  const termRows = render({ ...props, desktop: undefined }, 100).kids
+  const deskRows = render(props, 100).kids
+  const HILIGHT = '#1b2436'
+  const hi = termRows.findIndex(row => (row.kids ?? []).some(k => k?.props?.backgroundColor === HILIGHT))
+  const cells = hi >= 0 ? deskRows[hi].kids : []
+  const last = cells[cells.length - 1]
+  console.log(`highlighted row ${hi}:`, cells.map(c => `[${c.props.width}${c.props.backgroundColor ? '/bg' : ''}|${text(c)}]`).join(''))
+  ok(hi >= 0 && cells.slice(0, -1).every(c => c.props.backgroundColor === HILIGHT), `highlight: every cell but the last paints the row's bg on its Box (row ${hi})`)
+  ok(last && last.props.backgroundColor === undefined && last.kids[0].kids.every(k => k.props.backgroundColor === HILIGHT), "highlight: the edge-wide last cell leaves its Box bare and its runs paint the bg, so the band ends where the terminal's does")
+}
 r = await check('table @190', { maxRows: 20, bodyColumns: 190 }, 190)
 ok(r.desk.props.columns === 4, `table @190: four symbol columns on desktop too (${r.desk.props.columns})`)
 r = await check('ticker @100', { maxRows: 3, bodyColumns: 100 }, 100)
