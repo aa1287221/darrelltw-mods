@@ -39,11 +39,11 @@ SCRIPT_MODULES = {
 SHARED_BY = {
     "fetch-quotes-shioaji.py": [
         "claim_pidfile", "release_pidfile", "failed_ticks_limit", "runtime_dir", "user_home",
-        "read_env_file", "load_env", "read_watchlist", "write_atomic", "field",
+        "read_env_file", "load_env", "read_watchlist", "write_atomic", "field", "relaunch_detached",
     ],
     "fetch-quotes-capital.py": [
         "claim_pidfile", "release_pidfile", "failed_ticks_limit", "runtime_dir", "user_home",
-        "read_env_file", "load_env", "read_watchlist", "write_atomic",
+        "read_env_file", "load_env", "read_watchlist", "write_atomic", "relaunch_detached",
     ],
     "order-shioaji.py": ["field", "load_env"],
 }

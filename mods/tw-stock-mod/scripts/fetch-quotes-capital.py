@@ -25,8 +25,8 @@ loop, and writes both files - a fresh quotes file wins over the built-in feed
 
 Windows only. SKCOM is a 32/64-bit COM DLL with no macOS or Linux build, so
 this route simply does not exist off Windows - use 永豐 Shioaji there
-(scripts/fetch-quotes-shioaji.py), which is the mirror image: POSIX only,
-because the band spawns it with `nohup`.
+(scripts/fetch-quotes-shioaji.py), which runs everywhere: under `nohup` on
+macOS/Linux, and on Windows through the same `--detach` this script uses.
 
 Three ways to run it:
   * by hand - stop it with Ctrl-C, the band falls back to its own feed 120s
@@ -89,7 +89,6 @@ import calendar
 import ctypes
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -104,6 +103,7 @@ from _common import (
     log,
     read_env_file,
     read_watchlist,
+    relaunch_detached,
     release_pidfile,
     runtime_dir,
     user_home,
@@ -743,33 +743,6 @@ def heartbeat_stale(path: Path) -> bool:
     return (time.time() * 1000 - ts) > HEARTBEAT_MAX_AGE_MS
 
 
-def relaunch_detached(log_path: Path) -> None:
-    """
-    `--detach`: hand the real work to a DETACHED_PROCESS child and return, so
-    the band's one-shot `$.process.run` resolves at once instead of waiting
-    out a long-lived fetcher's pipes. This is the Windows counterpart of the
-    `nohup ... &` wrapper hooks/register.tsx uses for the 永豐 route; there is
-    no `nohup` here, and `start /b` would put the quoting of a python path
-    with spaces in cmd.exe's hands, so the child is launched from Python
-    where the argument list stays a list.
-    """
-    argv = [sys.executable, os.path.abspath(__file__)] + [a for a in sys.argv[1:] if a != "--detach"]
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    flags = 0
-    flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
-    flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    with open(log_path, "a", encoding="utf-8", errors="replace") as log:
-        subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
-            creationflags=flags,
-            close_fds=True,
-            cwd=str(log_path.parent),
-        )
-
-
 # --- --check ----------------------------------------------------------------
 
 
@@ -976,7 +949,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.detach:
-        relaunch_detached(Path(args.log) if args.log else out_dir / "stock-capital.log")
+        relaunch_detached(os.path.abspath(__file__), Path(args.log) if args.log else out_dir / "stock-capital.log")
         return
 
     # SKCenterLib_SetLogPath points SKCOM's own CapitalLog folder here rather

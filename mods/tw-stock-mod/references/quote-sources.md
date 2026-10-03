@@ -51,9 +51,11 @@ project and therefore never lands in version control:
 }
 ```
 
-The two broker routes are also split by platform, because their SDKs are:
-`shioaji` is a POSIX-only Python package the band launches with `nohup`, and
-`capital` is a Windows COM server. Listing the one this machine cannot run
+The two broker routes differ by platform, because their SDKs do:
+`shioaji` is a Python package with wheels for macOS, Linux and Windows (the
+band launches it with `nohup` on the first two and with the script's own
+`--detach` on Windows), and `capital` is a Windows-only COM server. Listing
+the one this machine cannot run
 costs nothing beyond a log line - it simply never writes a fresh file, and the
 tick falls through to the next entry.
 
@@ -81,7 +83,7 @@ column and the trend view.
 
 **Freshness.** US quotes are real-time. Taiwan quotes through Yahoo run about
 20 minutes behind the exchange's own tape. Real intraday Taiwan prices are
-available through a 永豐 brokerage account instead (§3, macOS/Linux) or a 群益
+available through a 永豐 brokerage account instead (§3, any OS) or a 群益
 one (§4, Windows).
 
 **Turn it on.** Nothing to do — it is the default for both markets. To be
@@ -165,8 +167,10 @@ less counts as unknown (the row reads flat).
   1.7.2).
 - `SINOBON_API_KEY` / `SINOBON_SECRET_KEY` in `~/.sinobon.env` (`--env`'s
   default) or another env file outside the repo.
-- macOS or Linux — the band spawns the script with `nohup`, which Windows
-  does not have.
+- macOS, Linux or Windows — `shioaji` ships a wheel for each. The band
+  spawns the script with `nohup` on macOS/Linux; Windows has no `nohup` (nor
+  `/bin/sh`), so there it passes `--detach` and the script detaches itself
+  (see below).
 - **Run `<python> scripts/fetch-quotes-shioaji.py --check` first.** It
   diagnoses the Python version, the `shioaji` install, the env file, a real
   login, and the platform, then exits without writing anything. An HTTP 406
@@ -203,6 +207,10 @@ Once Taiwan needs a feed, `hooks/register.tsx`'s `feedTwShioaji` runs this
 same script itself, detached (`$.process.run(['/bin/sh', '-c', 'nohup ... &'],
 ...)` — the `nohup`/`&` wrapper is what lets a one-shot `run()` call return
 while the script keeps going past it; see the function's own comment for why).
+On Windows, which has neither `/bin/sh` nor `nohup`, the band runs the plain
+argv with `--log` and `--detach` instead, and the script re-launches itself
+as a `DETACHED_PROCESS` child appending to `stock-shioaji.log` and returns at
+once — the same trick §4's 群益 route uses.
 The band and the script then talk over two files instead of a socket:
 
 - **The heartbeat** (`stock-band.heartbeat`, in the runtime dir
@@ -367,10 +375,9 @@ Contributed by [@ianyuchuang](https://github.com/ianyuchuang) in
 
 **What you need:**
 
-- **Windows.** SKCOM is a COM DLL with no macOS or Linux build. The two
-  broker routes are exact mirror images that way — `shioaji` is POSIX-only
-  because the band launches it with `nohup`, `capital` is Windows-only
-  because its SDK is.
+- **Windows.** SKCOM is a COM DLL with no macOS or Linux build, so
+  `capital` is Windows-only because its SDK is (`shioaji`, by contrast, runs
+  on all three).
 - A 群益 account with API 權限 開通, **including a 證券帳戶**. Without one you
   cannot subscribe to 上市櫃 quotes at all — the manual says so next to
   `SKQuoteLib_RequestStocks` itself, and it is not a permissions error you

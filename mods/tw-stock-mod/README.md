@@ -424,7 +424,7 @@ its `shioaji`/`capital` block (`interval`, `indices`) still merges key by key.
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
 | `columns` | `"auto"` | how many symbols a row draws: `auto` = the fewest of 1–4 that hold the watchlist in the band's quote rows, as many as the terminal's width allows (1 when the list is 5 symbols or fewer; 2 from 77 columns, 3 from 118, 4 from 159); `1`/`2`/`3`/`4` force it, capped by the same width rule (a 74-column terminal draws one column whatever this says) — see [What the band shows](#what-the-band-shows) |
 | `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only. `tf` is not a value here — a non-empty `futures` list feeds itself automatically whenever `feed` is not `"off"`, on top of whatever this says, since it costs no HTTP request — see [Taiwan futures (tf)](#taiwan-futures-tf) |
-| `twSources` | `["yahoo"]` | Taiwan's routes, in preference order — the band tries the first and falls through to the next for a tick that one has nothing fresh for. `yahoo` = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `shioaji` = 永豐 real-time ticks on macOS/Linux and `capital` = 群益 real-time ticks on Windows, the band runs the fetcher itself either way — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher) and [群益 Capital as that fetcher](#群益-capital-as-that-fetcher). A legacy `"twSource": "x"` (a single string) still works as an alias for `["x"]`. An empty list (or one naming no known route) means the default, so a project stating `[]` clears a user's broker routes back to Yahoo. The shipped default never includes a broker route — put that in your own `~/.claude/stock-band.json` |
+| `twSources` | `["yahoo"]` | Taiwan's routes, in preference order — the band tries the first and falls through to the next for a tick that one has nothing fresh for. `yahoo` = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `shioaji` = 永豐 real-time ticks on macOS, Linux or Windows and `capital` = 群益 real-time ticks on Windows only, the band runs the fetcher itself either way — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher) and [群益 Capital as that fetcher](#群益-capital-as-that-fetcher). A legacy `"twSource": "x"` (a single string) still works as an alias for `["x"]`. An empty list (or one naming no known route) means the default, so a project stating `[]` clears a user's broker routes back to Yahoo. The shipped default never includes a broker route — put that in your own `~/.claude/stock-band.json` |
 | `shioaji` | `{ "python": "python3", "env": "~/.sinobon.env", "interval": 10, "liquidationRiskPct": 25 }` | read only when `"shioaji"` is somewhere in `twSources` — the interpreter, the env file holding `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` (`~` expands to `$HOME`), and seconds between snapshots. `liquidationRiskPct` (default 25, the TAIFEX forced-liquidation line, unverified for 永豐; 0-100, anything else reads 25) is where 期貨庫存's 強平價 is drawn. `python`, `env` and `liquidationRiskPct` are read from `~/.claude/stock-band.json` only: a project file's values are ignored and logged, since a cloned repo must not pick the program the band runs or move the risk line |
 | `capital` | `{ "python": "python", "env": "~/.capital.env", "dll": "", "interval": 10, "indices": [TSEA, OTCA] }` | read only when `"capital"` is somewhere in `twSources` — the interpreter (must have `comtypes` and match the registered 元件's bitness), the env file holding `CAPITAL_USER_ID`/`CAPITAL_PASSWORD`, the path to the registered `SKCOM.dll` (**no default** — 群益 ships a zip with no install location), seconds between snapshots, and the SKCOM 商品代號 the footer's index board flaps through (`[]` turns it off). `python`, `env` and `dll` are read from `~/.claude/stock-band.json` only, for the same reason as `shioaji`'s |
 | `feedMs` | `30000` | seconds between feed requests, in ms (floor 15000 — below that Yahoo answers 429; the request budget can widen it further) |
@@ -516,7 +516,7 @@ instead of leaving it on demo prices until the next tick.
   20-symbol list plus its index is 21 symbols, so it costs two requests a
   tick the same way a 20-symbol US list would. Yahoo's Taiwan quotes run
   about twenty minutes behind the exchange's own tape.
-- **Taiwan: `"twSources": ["shioaji"]` (macOS/Linux) or `["capital"]`
+- **Taiwan: `"twSources": ["shioaji"]` (any OS) or `["capital"]`
   (Windows) for a broker's own real-time ticks — the band runs the fetcher,
   you never touch a terminal.** See
   [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher) and
@@ -667,6 +667,9 @@ script serves 台指期 all evening and does no stock work while 台股 is off t
 band (美股 or 台指期 on screen).
 The script is spawned once with both the `tw` codes and the `futures` codes;
 a changed `futures` list takes effect on its next spawn, not on a running one.
+On macOS/Linux the band backgrounds it with `nohup`; Windows has neither
+`nohup` nor `/bin/sh`, so there the band passes `--detach` and the script
+detaches **itself**, the same way the 群益 route does.
 A `stock-shioaji.pid` file, same directory, keeps two Claude Code
 sessions on the same project from logging in twice. Nothing to run by hand;
 script output lands in `stock-shioaji.log`, same directory. Past 5 MB that
