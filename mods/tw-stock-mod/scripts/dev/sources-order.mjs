@@ -45,10 +45,11 @@ function findClient(node) {
 
 let moduleTick = 0
 
-// `homeVar` picks which environment variable carries the home directory, and
-// `cwd` what $.session.cwd() answers - both so a case can stand in for
-// Windows, where $HOME is unset and a project path looks like `D:\app`.
-async function runCase(label, { userText, projectText, quotesText, homeVar = 'HOME', cwd = '/fake-project', runRejects = false } = {}) {
+// `homeVar` picks which environment variable carries the home directory,
+// `cwd` what $.session.cwd() answers and `pluginRoot` where the plugin sits -
+// all so a case can stand in for Windows, where $HOME is unset and a path
+// looks like `D:\app` (the band reads "Windows" off the plugin root).
+async function runCase(label, { userText, projectText, quotesText, homeVar = 'HOME', cwd = '/fake-project', pluginRoot = '/fake-plugin-root', runRejects = false } = {}) {
   const home = '/fake-home'
   const files = {}
   if (userText !== undefined) files[`${home}/.claude/stock-band.json`] = userText
@@ -77,7 +78,7 @@ async function runCase(label, { userText, projectText, quotesText, homeVar = 'HO
         return { exitCode: 0, stdout: '', stderr: '' }
       },
     },
-    plugin: { root: '/fake-plugin-root' },
+    plugin: { root: pluginRoot },
     ui: {
       log: m => logs.push(m),
       invalidate: () => {},
@@ -159,7 +160,16 @@ const d = await runCase('(d) shioaji stale falls through to yahoo this tick', {
     shioaji: { interval: 10 },
   }),
 })
-const dOk = d.processRuns.length === 1 && d.logs.some(l => l.includes('query1.finance.yahoo.com')) && d.p?.sourceLabel === 'Yahoo 延遲'
+// ...and off Windows its spawn is still the `/bin/sh` + `nohup` wrapper,
+// with no `--detach` (that is Windows' stand-in, see (i))
+const dArgv = d.processRuns[0]?.argv ?? []
+const dOk =
+  d.processRuns.length === 1 &&
+  dArgv[0] === '/bin/sh' &&
+  dArgv.some(a => String(a).includes('nohup')) &&
+  !dArgv.includes('--detach') &&
+  d.logs.some(l => l.includes('query1.finance.yahoo.com')) &&
+  d.p?.sourceLabel === 'Yahoo 延遲'
 console.log(`(d) PASS=${dOk}\n`)
 
 // (e) ["capital", "yahoo"], same fallthrough as (d) but through the other
@@ -234,6 +244,34 @@ const hOk =
   h.p?.sourceLabel === 'Yahoo 延遲'
 console.log(`(h) PASS=${hOk}\n`)
 
-const allOk = aOk && bOk && cOk && dOk && eOk && fOk && gOk && hOk
+// (i) 永豐 on Windows (a drive-letter plugin root): no /bin/sh or nohup
+// there, so the spawn is the plain argv, like 群益's in (e) - python, the
+// script, and `--log <runtime dir>stock-shioaji.log` plus `--detach` so the
+// script backgrounds itself and run() returns at once. Still falls through
+// to Yahoo in the same tick while its file is stale.
+const i = await runCase('(i) windows: shioaji spawns the plain --detach argv', {
+  homeVar: 'USERPROFILE',
+  cwd: 'D:\\fake-project',
+  pluginRoot: 'C:\\fake-plugin-root',
+  userText: JSON.stringify({ shioaji: { python: 'C:/venv/Scripts/python.exe', env: '/nonexistent-env-file' } }),
+  projectText: JSON.stringify({ market: 'tw', twSources: ['shioaji', 'yahoo'] }),
+})
+const iArgv = i.processRuns[0]?.argv ?? []
+const iLog = iArgv[iArgv.indexOf('--log') + 1]
+const iOk =
+  i.processRuns.length === 1 &&
+  iArgv[0] === 'C:/venv/Scripts/python.exe' &&
+  String(iArgv[1]).endsWith('fetch-quotes-shioaji.py') &&
+  !iArgv.includes('/bin/sh') &&
+  !iArgv.some(a => String(a).includes('nohup')) &&
+  iArgv.includes('--detach') &&
+  iArgv.includes('--futures') &&
+  iLog === '/fake-home/.claude/stock-band/D--fake-project/stock-shioaji.log' &&
+  i.logs.some(l => l.includes('query1.finance.yahoo.com')) &&
+  i.p?.sourceLabel === 'Yahoo 延遲'
+console.log(`(i) argv=${iArgv.join(' | ')}`)
+console.log(`(i) PASS=${iOk}\n`)
+
+const allOk = aOk && bOk && cOk && dOk && eOk && fOk && gOk && hOk && iOk
 console.log(allOk ? 'ALL PASS' : 'SOME FAILED')
 process.exit(allOk ? 0 : 1)

@@ -48,9 +48,10 @@ export type Config = {
    * `scripts/fetch-quotes-shioaji.py` / `scripts/fetch-quotes-capital.py`
    * itself (see feedTwFetcher below) and reads back the quotes file it
    * writes, rather than calling an HTTP endpoint the way the other two do.
-   * Those two are also platform-split, because their SDKs are: 永豐's shioaji
-   * is a POSIX-only Python package and the band spawns it with `nohup`;
-   * 群益's SKCOM is a Windows COM server. Listing the one this machine cannot
+   * Their SDKs differ by platform: 永豐's shioaji is a Python package for
+   * macOS, Linux and Windows (spawned under `nohup` on the first two, and
+   * with the script's own `--detach` on Windows - see shioajiSpec), while
+   * 群益's SKCOM is a Windows-only COM server. Listing the one this machine cannot
    * run is harmless - it just never produces a fresh file, and the tick falls
    * through to the next entry.
    * The shipped default is `["yahoo"]` alone - the rest are opt-in,

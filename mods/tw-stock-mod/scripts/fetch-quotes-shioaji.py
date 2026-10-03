@@ -40,7 +40,14 @@ Three ways to run it:
 
   * spawned BY the band itself, when `stock-band.json` sets
     `"twSource": "shioaji"` (hooks/register.tsx's spawnShioaji). That path
-    always passes `--out-dir`, `--heartbeat` and `--pidfile`:
+    always passes `--out-dir`, `--heartbeat` and `--pidfile`, and on Windows
+    `--log` and `--detach` too:
+      - `--detach` (Windows): this process re-launches itself detached (a
+        DETACHED_PROCESS, since there is no `nohup` or `/bin/sh` there) with
+        its output appended to --log, and returns at once - what lets the
+        band's one-shot `$.process.run` resolve while the fetcher keeps going
+        past it. macOS/Linux get the same from the band's `nohup ... &`
+        wrapper and never pass it. See _common.relaunch_detached.
       - `--heartbeat FILE`: the band rewrites this file on every tick it
         wants the Shioaji route, as `{"ts": <ms>, "markets": ["tw", "tf"]}`
         naming which markets to work this tick (stock rows only while "tw"
@@ -95,6 +102,7 @@ from _common import (
     log,
     read_env_file,
     read_watchlist,
+    relaunch_detached,
     release_pidfile,
     runtime_dir,
     user_home,
@@ -1171,10 +1179,13 @@ def check_login(values: dict, shioaji_ok: bool) -> bool:
 
 
 def check_platform() -> bool:
+    """Every platform shioaji ships a wheel for runs this route; only the way
+    the band launches it differs, so this reports which one rather than
+    refusing any. Still returns a bool so run_check keeps one shape."""
     if sys.platform == "win32":
-        print("❌ 永豐路線只支援 macOS／Linux（band 用 nohup 啟動）")
-        return False
-    print(f"✅ 平台 {sys.platform}")
+        print(f"✅ 平台 {sys.platform}（band 用 --detach 讓腳本自己脫離背景執行，不經 nohup）")
+    else:
+        print(f"✅ 平台 {sys.platform}（band 用 nohup 背景執行）")
     return True
 
 
@@ -1206,6 +1217,8 @@ def main() -> None:
     parser.add_argument("--futures", default="", help="comma-separated 期貨合約代號（月合約或 R1/R2 別名，如 TXFR1,SRFJ6）；空值本身不會啟動期貨工作，但簽署期貨帳戶若有庫存部位，仍會驅動期貨快照與庫存檔")
     parser.add_argument("--heartbeat", default="", help="path the band keeps rewriting while it wants this route, as {\"ts\": ms, \"markets\": [\"tw\"|\"tf\"]} (a bare ms number, the pre-T4 form, still means both markets); missing or >90s old exits this process, and each tick works only the markets named (empty disables the check and works every market, for a by-hand run)")
     parser.add_argument("--pidfile", default="", help="path holding this fetcher's pid; a live pid already there exits this run at once instead of double-fetching the same project")
+    parser.add_argument("--log", default="", help="where this fetcher's output goes and what its size cap trims; with --detach, the file the detached child appends to (default: stock-shioaji.log in the out dir)")
+    parser.add_argument("--detach", action="store_true", help="re-launch self detached and return at once (what the band spawns with on Windows, where there is no nohup)")
     parser.add_argument("--check", action="store_true", help="diagnose the environment (Python version, shioaji install, env file, a real login, platform) and exit; writes nothing, needs no --codes")
     args = parser.parse_args()
 
@@ -1236,9 +1249,22 @@ def main() -> None:
         args.heartbeat = os.path.abspath(os.path.expanduser(args.heartbeat))
     if args.pidfile:
         args.pidfile = os.path.abspath(os.path.expanduser(args.pidfile))
+    if args.log:
+        args.log = os.path.abspath(os.path.expanduser(args.log))
 
     out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else runtime_dir(home, project_str)
     out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = Path(args.log) if args.log else out_dir / "stock-shioaji.log"
+
+    # --detach: the launcher only starts the real fetcher and returns - before
+    # the chdir below, the pidfile claim, the signal handlers and the login,
+    # all of which belong to the child. The child starts in this process's
+    # cwd so a relative --env / --out-dir / --project default resolves there
+    # exactly as it did here (it chdir()s into out_dir itself right after).
+    if args.detach:
+        relaunch_detached(os.path.abspath(__file__), log_path, cwd=os.getcwd())
+        return
+
     # Shioaji writes its own shioaji.log into whatever directory the process
     # runs from - there is no config knob to point it elsewhere - so this
     # must chdir into out_dir before shioaji is imported anywhere below,
@@ -1256,10 +1282,11 @@ def main() -> None:
     futures_account_path = out_dir / "futures-account.json"
     futures_codes = split_futures_codes(args.futures)
 
-    # The band appends this process's stderr to stock-shioaji.log and the SDK
-    # keeps shioaji.log, both in out_dir, both for good: cut them back now and
+    # The band appends this process's stderr to stock-shioaji.log (through
+    # nohup's `>>`, or --detach's --log on Windows) and the SDK keeps
+    # shioaji.log, both in out_dir, both for good: cut them back now and
     # every LOG_CAP_EVERY_S while running (see cap_log)
-    log_paths = [out_dir / "stock-shioaji.log", out_dir / "shioaji.log"]
+    log_paths = [log_path, out_dir / "shioaji.log"]
 
     def cap_logs() -> None:
         for path in log_paths:

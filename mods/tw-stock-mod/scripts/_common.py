@@ -3,7 +3,8 @@ What fetch-quotes-shioaji.py, fetch-quotes-capital.py and order-shioaji.py
 share: the runtime-dir rule (which must match runtimeDir() in
 hooks/constants.ts), env-file parsing, the watchlist read, the pidfile
 protocol, the heartbeat age, the atomic file write, the give-up threshold,
-the log line and its size cap, and the held-codes tracker. Each script imports it from
+the log line and its size cap, `--detach`'s self-relaunch, and the held-codes
+tracker. Each script imports it from
 its own folder - running `python scripts/<script>.py` puts that folder first
 on sys.path.
 
@@ -17,6 +18,7 @@ import math
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -446,6 +448,95 @@ def cap_log(path: Path, max_bytes: int = LOG_MAX_BYTES, keep_bytes: int = LOG_KE
         return True
     except OSError:
         return False
+
+
+# --- --detach ----------------------------------------------------------------
+
+
+def open_append_log(path: Path):
+    """
+    The log a detached fetcher's stdout/stderr are pointed at, opened so that
+    every write lands at the file's CURRENT end - what cap_log() relies on
+    when it cuts the file back in place.
+
+    POSIX: plain `ab` is O_APPEND in the kernel, the same as the band's own
+    `>>"$log"`. Windows has no kernel O_APPEND: Python's `a` mode is the C
+    runtime seeking to the end before each write of its OWN fd, and a child
+    handed that handle writes wherever the shared file pointer was left. Cut
+    the file back and the child's next line lands at the old offset, padding
+    the gap with NULs (measured: a 100 KB log cut to 20 bytes came back as
+    100 KB of NULs). A handle opened with FILE_APPEND_DATA and no
+    FILE_WRITE_DATA is the kernel's own append - every write goes to the
+    end - and DuplicateHandle (how Popen hands it over) keeps that access.
+    """
+    if os.name != "nt":
+        return open(path, "ab")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    file_append_data = 0x0004
+    synchronize = 0x00100000
+    share_all = 0x1 | 0x2 | 0x4  # read, write, delete: cap_log and readers still open it
+    open_always = 4
+    file_attribute_normal = 0x80
+    invalid_handle = wintypes.HANDLE(-1).value
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    handle = kernel32.CreateFileW(str(path), file_append_data | synchronize, share_all, None, open_always, file_attribute_normal, None)
+    if not handle or handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return open(msvcrt.open_osfhandle(handle, os.O_APPEND | os.O_WRONLY), "ab")
+
+
+def relaunch_detached(script: str, log_path: Path, cwd: str | None = None, argv: list[str] | None = None, popen=subprocess.Popen) -> None:
+    """
+    `--detach`: hand the real work to a detached child and return, so the
+    band's one-shot `$.process.run` resolves at once instead of waiting out a
+    long-lived fetcher's pipes. Windows' counterpart of the `nohup ... &`
+    wrapper hooks/register.tsx uses on macOS/Linux: there is no `nohup` (nor
+    `/bin/sh`) there, and `start /b` would put the quoting of a python path
+    with spaces in cmd.exe's hands, so the child is launched from Python where
+    the argument list stays a list.
+
+    `script` is the caller's own absolute path - this file is not the one to
+    re-run. The child gets the same arguments minus `--detach` (`argv`
+    defaults to sys.argv[1:]), its stdin from /dev/null and its output
+    appended to `log_path` (see open_append_log). On Windows it is a
+    DETACHED_PROCESS in a new process group: no console to lose, and nothing
+    the launching process's exit takes down with it. Elsewhere - only a
+    by-hand `--detach`, the band never asks for one there - a new session does
+    the same job. close_fds keeps the launcher's own stdout/stderr pipes out of
+    the child, which is what lets the band's run() see them close.
+
+    `cwd` is where the child starts, before it chdir()s into its out dir:
+    by default the log's folder (群益's historic choice); the caller's own cwd
+    keeps a relative --env / --out-dir meaning the same in the child as it
+    did here. `popen` is injectable for tests.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    child = [sys.executable, script] + [a for a in args if a != "--detach"]
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    options: dict = {}
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        options["start_new_session"] = True
+    with open_append_log(log_path) as log_file:
+        popen(
+            child,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            close_fds=True,
+            cwd=cwd if cwd is not None else str(log_path.parent),
+            **options,
+        )
 
 
 # --- held codes --------------------------------------------------------------

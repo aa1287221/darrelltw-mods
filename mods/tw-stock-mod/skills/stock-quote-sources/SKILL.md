@@ -19,7 +19,7 @@ README's [Taiwan futures (tf)](../../README.md#taiwan-futures-tf) section.
 | What the user wants | Route |
 | --- | --- |
 | Just works, no setup | Yahoo — already the default for both markets |
-| Real-time Taiwan prices, has a 永豐/Sinopac account (macOS/Linux) | Shioaji, `twSources: ["shioaji"]` — the band runs the fetcher itself |
+| Real-time Taiwan prices, has a 永豐/Sinopac account (macOS, Linux or Windows) | Shioaji, `twSources: ["shioaji"]` — the band runs the fetcher itself |
 | Real-time Taiwan prices, has a 群益/Capital account (Windows) | Capital, `twSources: ["capital"]` — the band runs the fetcher itself |
 | Prices from their own broker or a paid vendor | The quotes-file override, fed by a script |
 | Specifically 富果/Fugle | Not built in — write a small fetcher into the override (§5 of the reference) |
@@ -44,8 +44,11 @@ The band spawns `scripts/fetch-quotes-shioaji.py` itself once Taiwan needs a
 feed, and keeps it fed with a heartbeat file (all in the runtime dir,
 `~/.claude/stock-band/<project-slug>/`, never the project's `.claude/`) —
 nothing to run by hand, nothing to leave a terminal open for. `python` can
-point at a venv's own interpreter (e.g. `~/some/venv/.venv/bin/python3`) if
-the system `python3` does not have `shioaji` installed. Footer tag: `永豐
+point at a venv's own interpreter (e.g. `~/some/venv/.venv/bin/python3`, or
+`~/some/venv/Scripts/python.exe` on Windows) if the system `python3` does not
+have `shioaji` installed. On Windows the band passes `--detach` and the script
+detaches itself (there is no `nohup`), the same way the 群益 route does.
+Footer tag: `永豐
 即時`. The same script also writes `stock-holdings.json` (runtime dir) every
 tick (from `list_positions`), which is what feeds the 損益 view. First run
 `<python> "${CLAUDE_PLUGIN_ROOT}/scripts/fetch-quotes-shioaji.py" --check` to confirm the account,

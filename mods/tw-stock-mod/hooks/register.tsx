@@ -1,6 +1,6 @@
 /* @jsx h */
 import type { Register } from 'claude-code'
-import { ACCOUNT_LINES, BARS_MAX_AGE_MS, BARS_STALE_MS, CHART_BARS, COINGECKO_MARKETS_URL, CLOSE_GRACE_MS, CONFIG_PATH, CRYPTO_COOLDOWN_MS, CRYPTO_LOW_TOKENS, CRYPTO_SUPPLY_COOLDOWN_MS, CRYPTO_SUPPLY_TTL_MS, FEED_BACKOFF_MAX_MS, HOLDINGS_PATH, IN_FLIGHT_STUCK_MS, PIONEX_TICKERS_URL, PNL_CHROME_ROWS, QUOTES_PATH, QUOTE_STALE_MS, REQUESTS_PER_HOUR, SNOOZE_MS, SPARK_BATCH, TABLE_CHROME_ROWS, TW_YAHOO_INDEX, USER_CONFIG_REL, US_INDEX_SYMBOL, US_INDICES, runtimeDir } from './constants.ts'
+import { ACCOUNT_LINES, BARS_MAX_AGE_MS, BARS_STALE_MS, CHART_BARS, COINGECKO_MARKETS_URL, CLOSE_GRACE_MS, CONFIG_PATH, CRYPTO_COOLDOWN_MS, CRYPTO_LOW_TOKENS, CRYPTO_SUPPLY_COOLDOWN_MS, CRYPTO_SUPPLY_TTL_MS, FEED_BACKOFF_MAX_MS, HOLDINGS_PATH, IN_FLIGHT_STUCK_MS, PIONEX_TICKERS_URL, PNL_CHROME_ROWS, QUOTES_PATH, QUOTE_STALE_MS, REQUESTS_PER_HOUR, SNOOZE_MS, SPARK_BATCH, TABLE_CHROME_ROWS, TW_YAHOO_INDEX, USER_CONFIG_REL, US_INDEX_SYMBOL, US_INDICES, isWindowsPath, runtimeDir } from './constants.ts'
 import { CRYPTO_COINGECKO_ID, MARKETS, currentSession, hasFutures, hhmm, lastCloseAt, localParts, phaseOf, pickMarket, sessionNote, taipeiNote } from './markets.ts'
 import type { MarketId, MarketMode, MarketSwitcher, Phase, SortKey, Ticker, TwSourceName, View } from './markets.ts'
 import { PNL_SORT_KEYS, PNL_SORT_LABELS, TIMEFRAMES, demoBars, demoPrice, quoteRow, roundPrice, sortHoldings } from './quotes.ts'
@@ -28,7 +28,7 @@ import type { AccountLive, AccountSummary, BoardProps as ClientBoardProps } from
 // feed that answers with one request whatever the list length.
 // `twSources` (an order of preference, e.g. `["shioaji", "yahoo"]`) tries
 // the exchange's own real-time intraday endpoint (`mis`), 永豐's real-time
-// feed (`shioaji`, macOS/Linux) or 群益's (`capital`, Windows) first, falling
+// feed (`shioaji`, any OS) or 群益's (`capital`, Windows) first, falling
 // through to the next entry for a tick that source has nothing fresh for; the
 // shipped default is `["yahoo"]` alone. A market the feed cannot reach at all
 // falls back to a deterministic sine walk off each symbol's previous close,
@@ -1975,19 +1975,42 @@ export const register: Register = on => {
 
     /**
      * `"shioaji"` in `twSources` (and 台指期's only route): 永豐's Python SDK,
-     * macOS/Linux only. `nohup ... >>log 2>&1 &` wrapped in `/bin/sh -c` is
-     * what outlives the one-shot run() call - redirecting the script's
-     * output to the log file gives the wrapper's OWN short-lived pipes
-     * something to close immediately, and `&` backgrounds the real script
-     * before that happens. One spec serves both markets (see spawnFetcher):
-     * `--futures` is always passed, as `""` without a list, so a fetcher
-     * started for 台股 already knows the contracts 夜盤 will ask for.
+     * which ships for macOS, Linux and Windows alike - only the way the
+     * fetcher is kept alive past the one-shot run() call differs.
+     *
+     * macOS/Linux: `nohup ... >>log 2>&1 &` wrapped in `/bin/sh -c` -
+     * redirecting the script's output to the log file gives the wrapper's
+     * OWN short-lived pipes something to close immediately, and `&`
+     * backgrounds the real script before that happens.
+     *
+     * Windows (the plugin root is a drive-letter or UNC path, see
+     * isWindowsPath in constants.ts): there is no `/bin/sh` and no `nohup`,
+     * so this takes 群益's way (feedTwCapital) - the plain argv with `--log`
+     * and `--detach`, and the script re-launches itself as a DETACHED_PROCESS
+     * and returns at once.
+     *
+     * One spec serves both markets (see spawnFetcher): `--futures` is always
+     * passed, as `""` without a list, so a fetcher started for 台股 already
+     * knows the contracts 夜盤 will ask for.
      */
     const shioajiSpec = (): FetcherSpec => {
       const python = expandHome(config.shioaji.python)
       const script = `${$.plugin.root}/scripts/fetch-quotes-shioaji.py`
       const logPath = `${runtime}stock-shioaji.log`
       const futures = config.lists.tf.map(t => t.code).join(',')
+      if (isWindowsPath($.plugin.root)) {
+        return {
+          route: 'shioaji',
+          label: '永豐',
+          python,
+          script,
+          interval: config.shioaji.interval,
+          extraArgs: ['--env', expandHome(config.shioaji.env), '--futures', futures, '--log', logPath, '--detach'],
+          logPath,
+          pidPath: `${runtime}stock-shioaji.pid`,
+          wrap: args => [python, script, ...args],
+        }
+      }
       return {
         route: 'shioaji',
         label: '永豐',

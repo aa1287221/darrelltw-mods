@@ -31,6 +31,18 @@ export function runtimeDir(home: string, project: string): string {
   return `${home}/${RUNTIME_DIR_ROOT}/${slug}/`
 }
 
+// Whether an absolute path is a native Windows one: a drive letter (`C:\`,
+// `C:/`) or a UNC share (`\\server\share`). The hooks API has no OS getter,
+// so the band asks this of `$.plugin.root` - the directory the fetcher
+// scripts are run from, which the host always hands over as an absolute
+// native path: `C:\...` (or a share) on Windows, `/...` on macOS, Linux and
+// WSL (`/mnt/c/...` included). That is exactly the line that matters - is
+// there a `/bin/sh` to wrap a spawn in - and it costs no extra environment
+// read. A POSIX path never starts with either shape.
+export function isWindowsPath(path: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
+}
+
 export const DEFAULT_REFRESH_MS = 3000
 export const QUOTE_STALE_MS = 120_000
 // how far ahead of the band's clock a quotes file's asOf may be (writers are

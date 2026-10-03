@@ -18,7 +18,7 @@
 
 現況：**三個市場都由 hooks 模組自己抓**，tw/us 預設都是 Yahoo（免金鑰、台美
 一支 API 搞定），crypto 預設是 Pionex（免金鑰，見 §11）。台股要盤中真即時，
-macOS／Linux 接永豐 Shioaji（見 §8）、Windows 接群益 Capital（見 §10）；其他
+接永豐 Shioaji（macOS／Linux／Windows 都行，見 §8）或群益 Capital（只有 Windows，見 §10）；其他
 券商／付費行情走 `.claude/stock-quotes.json` 這個 override 檔案接縫（見
 §9）——這個接縫目前只服務 tw/us，crypto 還沒接進去。
 
@@ -456,8 +456,14 @@ swagger 實查有 143 支端點，全部是 `exchangeReport/*` 這類收盤後�
 失敗。所以在 Windows 上，台股即時只剩 `mis`（證交所，免帳號）可選——這條補上
 的是「有券商帳號、而且人在 Windows」的那一格。
 
-兩條路線剛好互為鏡像：**永豐只跑 POSIX（band 用 nohup 啟動），群益只跑
+當時兩條路線剛好互為鏡像：**永豐只跑 POSIX（band 用 nohup 啟動），群益只跑
 Windows（SKCOM 是 COM DLL，沒有 macOS／Linux 版）。**
+
+> 後來（v0.13.29）永豐也能在 Windows 跑了：shioaji 本身就有 win_amd64 wheel，
+> 卡住的只有上面那個 `/bin/sh` + `nohup` 包裝。現在 band 在 Windows（plugin
+> root 是磁碟機代號或 UNC 路徑）上照群益的做法，直接傳 `--log` + `--detach`
+> 的純 argv，由腳本自己用 DETACHED_PROCESS 脫離；`--check` 也不再把 win32
+> 判成失敗。群益仍然只有 Windows 版。
 
 ### 10.2 用到的 API（讀過原始碼／官方文件）
 
@@ -584,7 +590,7 @@ stdout=log, stderr=log)` 重開一個自己然後立刻返回。心跳檔、pid 
 
 | | Yahoo | 證交所 MIS | 永豐 Shioaji | 群益 Capital |
 | --- | --- | --- | --- | --- |
-| 平台 | 都可以 | 都可以 | macOS／Linux | **Windows** |
+| 平台 | 都可以 | 都可以 | macOS／Linux／Windows | **Windows** |
 | 帳號 | 不用 | 不用 | 永豐帳戶＋API | 群益帳戶＋API＋證券帳戶 |
 | 前置 | 無 | 無 | `pip install shioaji` | 解壓 SDK＋`regsvr32`＋`pip install comtypes` |
 | 延遲 | 約 20 分 | 即時 | 即時 | 即時 |
