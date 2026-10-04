@@ -1,5 +1,6 @@
 ---
 description: 用永豐 Shioaji 下單、查委託狀態、取消委託——模擬優先
+disable-model-invocation: true
 ---
 
 # 下單 / 查詢 / 取消
