@@ -72,7 +72,9 @@ def test_relaunch_detaches_the_platform_way(tmp_path):
     _common.relaunch_detached("s.py", tmp_path / "x.log", argv=[], popen=FakePopen)
     (_, kwargs), = FakePopen.calls
     if os.name == "nt":
-        expected = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        # a window-less console, not DETACHED_PROCESS's none: under a venv's
+        # stub python.exe that left the base interpreter a visible new one
+        expected = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         assert kwargs["creationflags"] == expected
         assert "start_new_session" not in kwargs
     else:

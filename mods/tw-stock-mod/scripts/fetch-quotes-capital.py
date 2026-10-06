@@ -45,11 +45,11 @@ Three ways to run it:
   * spawned BY the band itself, when `stock-band.json` puts `"capital"` in
     `twSources` (hooks/register.tsx's feedTwCapital). That path always passes
     `--out-dir`, `--log`, `--detach`, `--heartbeat` and `--pidfile`:
-      - `--detach`: this process re-launches itself detached (a real
-        Windows DETACHED_PROCESS, since there is no `nohup` here) with its
-        output pointed at --log, and returns at once. It is what lets the
-        band's one-shot `$.process.run` resolve while the fetcher keeps
-        going past it.
+      - `--detach`: this process re-launches itself detached (in a new
+        process group with a window-less console of its own, since there is
+        no `nohup` here) with its output pointed at --log, and returns at
+        once. It is what lets the band's one-shot `$.process.run` resolve
+        while the fetcher keeps going past it.
       - `--heartbeat FILE`: the band rewrites this file on every tick it
         wants the 群益 route. Once FILE is missing or more than 90s old this
         process exits by itself - the band closed, or moved to the US board,
