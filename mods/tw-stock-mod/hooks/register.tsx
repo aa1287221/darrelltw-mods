@@ -764,6 +764,11 @@ let requestBars: ((market: MarketId, code: string) => void) | undefined
 // feed has no snapshot for, so a switch does not sit on 示範資料 until the
 // next scheduled tick comes round
 let requestFeed: (() => void) | undefined
+// Whether this session's band has been drawn on the desktop Code tab yet:
+// set by the first desktop ui.render (which then asks for a feed tick), reset
+// by session.start, and gating nothing but that request and spareSpawnDue. A
+// terminal frame never sets it, so it cannot change what a terminal spawns.
+let drawnOnDesktop = false
 let feedInFlightSince = 0 // same convention as barsInFlightSince
 let config: Config = defaultConfig()
 let modeOverride: MarketMode | undefined
@@ -1848,7 +1853,9 @@ export const register: Register = on => {
      * time on top of itself, and a script that died is retried at most once
      * a minute. The heartbeat itself is feedOnce's (writeHeartbeat), written
      * before any route runs, so the script's first-tick exemption still
-     * sees a fresh one.
+     * sees a fresh one. "Once at session start" holds only for a stale file
+     * on the terminal; on the desktop a fresh one gets that spawn too - see
+     * spareSpawnDue.
      *
      * Both broker routes share one heartbeat file and one quotes file,
      * which is why listing both in `twSources` is pointless rather than
@@ -1918,6 +1925,22 @@ export const register: Register = on => {
       }
     }
 
+    /**
+     * The one exception to "a fresh file means a fetcher is feeding it", and
+     * only once the band has been drawn on the desktop (drawnOnDesktop): the
+     * desktop app runs inside a Windows job, and quitting the app takes the
+     * detached fetcher down with it. So at the next session start the file
+     * can still be fresh from a fetcher that is already dead, and the stale
+     * rule alone left 報價 and 期貨庫存 frozen until it went stale (up to
+     * QUOTE_STALE_MS). There, each route gets one spawn even while its file
+     * is fresh - once per module (lastSpawn is never reset), and a desktop
+     * restart is a new module. A spare is harmless: the fetcher claims its
+     * pidfile before it logs in, and one that finds a live owner there exits
+     * without logging in. Only the freshness test is bypassed - the markets
+     * wanted, 收起 and the 60s clock still decide as for any spawn.
+     */
+    const spareSpawnDue = (route: TwSourceName): boolean => drawnOnDesktop && !fetcherStateFor(route).lastSpawn
+
     const feedTwFetcher = async (now: number, spec: FetcherSpec): Promise<boolean> => {
       const state = fetcherStateFor(spec.route)
 
@@ -1956,7 +1979,11 @@ export const register: Register = on => {
       }
 
       const stale = !runtimeQuotesFresh
-      if (!stale) return true
+      if (!stale) {
+        // fresh data is still in use either way; the spawn is the desktop's spare (spareSpawnDue)
+        if (spareSpawnDue(spec.route)) await spawnFetcher(now, spec)
+        return true
+      }
 
       await spawnFetcher(now, spec)
 
@@ -2101,10 +2128,12 @@ export const register: Register = on => {
      * 台指期: 永豐 is the only route, so there is nothing to fall through to
      * and no warning to raise - a stale futures file is drawn as no-data by
      * the poll. All this does is keep the fetcher alive (the heartbeat, in
-     * feedOnce) and (re)spawn it on the shared rule when its file is stale.
+     * feedOnce) and (re)spawn it on the shared rule when its file is stale -
+     * or, on the desktop, once while it is fresh (spareSpawnDue; the tf
+     * route is always the shioaji spec, so it shares that route's entry).
      */
     const feedTf = async (now: number) => {
-      if (futuresQuotesFresh) return
+      if (futuresQuotesFresh && !spareSpawnDue('shioaji')) return
       await spawnFetcher(now, shioajiSpec())
     }
 
@@ -2279,6 +2308,10 @@ export const register: Register = on => {
       feed(true).catch(err => $.ui.log(`tw-stock-mod: feed failed: ${err}`))
     }
 
+    // per session, like the timer's clocks below, and outside the feed gate
+    // so a feed: "off" session cannot inherit the last one's desktop draw
+    drawnOnDesktop = false
+
     if (config.feed !== 'off') {
       // sized off the holdings the boot poll above already read; see
       // httpTickAt for holdings that widen the feed later
@@ -2317,6 +2350,16 @@ export const register: Register = on => {
     if (e.props.hasSurvey || (e.surface !== 'terminal' && e.surface !== 'desktop')) return next(e)
     const now = await $.clock.now()
     if (!ready) return next(e)
+    // The first desktop frame asks for a feed tick, so spareSpawnDue's spawn
+    // goes out with it instead of waiting for the next timer tick (a tick
+    // already in flight holds the request back; the flag stays up, so the
+    // first tick after it spawns). The flag goes up before the call, so this
+    // fires once a session, never per frame; nothing here is awaited and
+    // nothing drawn below depends on it. A terminal frame never sets it.
+    if (e.surface === 'desktop' && !drawnOnDesktop) {
+      drawnOnDesktop = true
+      requestFeed?.()
+    }
 
     const { Box, Button, Client, Text, Select } = await $.ui.resolve(e)
     // Capability check, not a surface-name check: terminal and desktop both

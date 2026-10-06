@@ -3,8 +3,8 @@
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross / sticky-rank /
 # file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view /
-# fit-rows / desktop-cells / pytest / feed-errors / feed-budget / spawn-safety / sources-order / close-snapshot / account-summary /
-# crypto-feed / crypto-sort / market-select against them (feed-errors, spawn-safety, sources-order, close-snapshot,
+# fit-rows / desktop-cells / pytest / feed-errors / feed-budget / spawn-safety / desktop-respawn / sources-order / close-snapshot / account-summary /
+# crypto-feed / crypto-sort / market-select against them (feed-errors, spawn-safety, desktop-respawn, sources-order, close-snapshot,
 # account-summary, crypto-feed, crypto-sort and market-select build their own stub config
 # in-process instead, so they need no fixture directory) plus
 # tsc (typecheck), oxlint (lint), check-engine-rules.sh, `claude plugin validate` (when the CLI is on PATH)
@@ -335,6 +335,7 @@ run_check "pytest"         run_pytest
 run_check "feed-errors"    node "$SCRIPT_DIR/feed-errors.mjs" "$OUT/register.js"
 run_check "feed-budget"    node "$SCRIPT_DIR/feed-budget.mjs" "$OUT/register.js"
 run_check "spawn-safety"   node "$SCRIPT_DIR/spawn-safety.mjs" "$OUT/register.js"
+run_check "desktop-respawn" node "$SCRIPT_DIR/desktop-respawn.mjs" "$OUT/register.js"
 run_check "sources-order"  node "$SCRIPT_DIR/sources-order.mjs" "$OUT/register.js"
 run_check "close-snapshot" node "$SCRIPT_DIR/close-snapshot.mjs" "$OUT/register.js" "$OUT/markets.js"
 run_check "account-summary" node "$SCRIPT_DIR/account-summary.mjs" "$OUT/register.js" "$OUT/board.js"
