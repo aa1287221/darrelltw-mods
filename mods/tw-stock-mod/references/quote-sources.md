@@ -209,8 +209,13 @@ same script itself, detached (`$.process.run(['/bin/sh', '-c', 'nohup ... &'],
 while the script keeps going past it; see the function's own comment for why).
 On Windows, which has neither `/bin/sh` nor `nohup`, the band runs the plain
 argv with `--log` and `--detach` instead, and the script re-launches itself
-as a `DETACHED_PROCESS` child appending to `stock-shioaji.log` and returns at
-once — the same trick §4's 群益 route uses.
+as a detached child appending to `stock-shioaji.log` and returns at once —
+the same trick §4's 群益 route uses. The child gets a window-less console of
+its own (`CREATE_NO_WINDOW`, in a new process group), not none at all
+(`DETACHED_PROCESS`): the venv's `Scripts\python.exe` is a stub that starts
+the base interpreter as its own child, and a console-less parent would leave
+that one a brand-new, visible console — a Windows Terminal window for as
+long as the fetcher runs.
 The band and the script then talk over two files instead of a socket:
 
 - **The heartbeat** (`stock-band.heartbeat`, in the runtime dir
@@ -453,7 +458,8 @@ the band falls back to its own feed 120 seconds after the file goes stale.
 90-second heartbeat timeout and the same once-a-minute respawn rule — with one
 difference that matters if you are reading the code: there is no `nohup` on
 Windows, so the script detaches **itself**. The band passes `--detach`, and the
-script re-launches a `DETACHED_PROCESS` child pointed at `--log`
+script re-launches a detached child (a window-less console of its own, so no
+terminal window — see §3) pointed at `--log`
 (`stock-capital.log`, runtime dir) and returns at once, which is what lets the
 band's one-shot `$.process.run` resolve while the fetcher keeps going.
 

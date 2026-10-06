@@ -42,12 +42,13 @@ Three ways to run it:
     `"twSource": "shioaji"` (hooks/register.tsx's spawnShioaji). That path
     always passes `--out-dir`, `--heartbeat` and `--pidfile`, and on Windows
     `--log` and `--detach` too:
-      - `--detach` (Windows): this process re-launches itself detached (a
-        DETACHED_PROCESS, since there is no `nohup` or `/bin/sh` there) with
-        its output appended to --log, and returns at once - what lets the
-        band's one-shot `$.process.run` resolve while the fetcher keeps going
-        past it. macOS/Linux get the same from the band's `nohup ... &`
-        wrapper and never pass it. See _common.relaunch_detached.
+      - `--detach` (Windows): this process re-launches itself detached (in
+        a new process group with a window-less console of its own, since
+        there is no `nohup` or `/bin/sh` there) with its output appended to
+        --log, and returns at once - what lets the band's one-shot
+        `$.process.run` resolve while the fetcher keeps going past it.
+        macOS/Linux get the same from the band's `nohup ... &` wrapper and
+        never pass it. See _common.relaunch_detached.
       - `--heartbeat FILE`: the band rewrites this file on every tick it
         wants the Shioaji route, as `{"ts": <ms>, "markets": ["tw", "tf"]}`
         naming which markets to work this tick (stock rows only while "tw"

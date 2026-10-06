@@ -464,6 +464,9 @@ Windows（SKCOM 是 COM DLL，沒有 macOS／Linux 版）。**
 > root 是磁碟機代號或 UNC 路徑）上照群益的做法，直接傳 `--log` + `--detach`
 > 的純 argv，由腳本自己用 DETACHED_PROCESS 脫離；`--check` 也不再把 win32
 > 判成失敗。群益仍然只有 Windows 版。
+>
+> （2026-10-06，v0.13.36：脫離的旗標已改成 `CREATE_NO_WINDOW`，不然 fetcher
+> 活多久就掛著一個 Windows Terminal 視窗，原因見 §10.5 末尾。）
 
 ### 10.2 用到的 API（讀過原始碼／官方文件）
 
@@ -568,6 +571,21 @@ fetcher 的管線不會自己關。永豐那條靠 `nohup ... >>log 2>&1 &` 解�
 stdout=log, stderr=log)` 重開一個自己然後立刻返回。心跳檔、pid 檔、120 秒過期、
 一分鐘只重生一次這些規則跟永豐完全共用（`register.tsx` 的 `feedTwFetcher`
 現在是兩條路線共同的那一份）。
+
+> **2026-10-06（v0.13.36）更正：旗標改成
+> `CREATE_NO_WINDOW|CREATE_NEW_PROCESS_GROUP`。** 用 `DETACHED_PROCESS` 時，
+> 永豐 fetcher 在 Windows 11 上會開出一個 Windows Terminal 視窗，fetcher 活多久
+> 它就掛多久。原因在 venv：band 用的 python 若是 venv 裡的 `Scripts\python.exe`
+> （例如慣用的 `~/.claude/stock-band-venv`），它不是直譯器本身，只是一個會再把
+> base interpreter（venv `home` 底下那個 `python.exe`）開成自己 child 的
+> stub。`DETACHED_PROCESS` 讓 stub 完全沒有
+> console，而 base python 是 console 程式，從沒有 console 的 parent 開出來時系統
+> 會另外配一個全新的 console 給它——Windows 11 的預設終端機就把那個 console
+> 交給 Windows Terminal，變成一個看得見的視窗。`CREATE_NO_WINDOW` 改成給 stub
+> 一個沒有視窗的 console，base python 直接繼承它，不會再配新的。仍然是新的
+> process group，發起它的 process 結束也帶不走它。實測：stub 底下只有一個
+> 沒有視窗的 conhost，base python 沒有自己的 conhost，也沒有新的 Windows
+> Terminal／OpenConsole `-Embedding` process。
 
 ### 10.6 順手修掉的 Windows 前置問題
 

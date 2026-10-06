@@ -192,9 +192,11 @@ def _windows_pid_alive(pid: int, since: float | None = None, kernel32=None) -> b
     """
     Windows has no `kill -0`: os.kill(pid, 0) there is not a probe at all -
     signal 0 is CTRL_C_EVENT, so it calls GenerateConsoleCtrlEvent, which
-    either fails from a console-less (DETACHED_PROCESS) fetcher or sends the
-    target a Ctrl-C. Ask the kernel instead, and answer "not ours" whenever
-    the process cannot be ours:
+    never asks whether the pid lives: it fails from a process with no
+    console, and from one with a console (a detached fetcher has a
+    window-less one of its own, see relaunch_detached) it can deliver a
+    Ctrl-C rather than answer. Ask the kernel instead, and answer "not
+    ours" whenever the process cannot be ours:
       - it cannot be opened: gone, or another user's or a protected process
         (ERROR_ACCESS_DENIED) - a fetcher this user started always opens,
         the same reasoning as EPERM on POSIX;
@@ -507,11 +509,17 @@ def relaunch_detached(script: str, log_path: Path, cwd: str | None = None, argv:
     `script` is the caller's own absolute path - this file is not the one to
     re-run. The child gets the same arguments minus `--detach` (`argv`
     defaults to sys.argv[1:]), its stdin from /dev/null and its output
-    appended to `log_path` (see open_append_log). On Windows it is a
-    DETACHED_PROCESS in a new process group: no console to lose, and nothing
-    the launching process's exit takes down with it. Elsewhere - only a
-    by-hand `--detach`, the band never asks for one there - a new session does
-    the same job. close_fds keeps the launcher's own stdout/stderr pipes out of
+    appended to `log_path` (see open_append_log). On Windows it gets a
+    console of its own with no window (CREATE_NO_WINDOW) rather than none at
+    all (DETACHED_PROCESS): a venv's Scripts\\python.exe is not the
+    interpreter but a stub that starts the base one as its own child, and a
+    console program started by a console-less parent is handed a brand-new
+    console - a visible window (Windows Terminal, on Windows 11) for the
+    fetcher's whole life. The base interpreter inherits the window-less one
+    instead. It is still a new process group, and still nothing the
+    launching process's exit takes down with it. Elsewhere - only a by-hand
+    `--detach`, the band never asks for one there - a new session does the
+    same job. close_fds keeps the launcher's own stdout/stderr pipes out of
     the child, which is what lets the band's run() see them close.
 
     `cwd` is where the child starts, before it chdir()s into its out dir:
@@ -524,7 +532,7 @@ def relaunch_detached(script: str, log_path: Path, cwd: str | None = None, argv:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     options: dict = {}
     if os.name == "nt":
-        options["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
         options["start_new_session"] = True
     with open_append_log(log_path) as log_file:

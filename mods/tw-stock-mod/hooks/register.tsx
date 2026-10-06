@@ -1986,8 +1986,9 @@ export const register: Register = on => {
      * Windows (the plugin root is a drive-letter or UNC path, see
      * isWindowsPath in constants.ts): there is no `/bin/sh` and no `nohup`,
      * so this takes 群益's way (feedTwCapital) - the plain argv with `--log`
-     * and `--detach`, and the script re-launches itself as a DETACHED_PROCESS
-     * and returns at once.
+     * and `--detach`, and the script re-launches itself detached (a new
+     * process group with a window-less console of its own, see
+     * _common.relaunch_detached) and returns at once.
      *
      * One spec serves both markets (see spawnFetcher): `--futures` is always
      * passed, as `""` without a list, so a fetcher started for 台股 already
@@ -2033,9 +2034,10 @@ export const register: Register = on => {
      * `"capital"` in `twSources`: 群益's SKCOM, a Windows COM server. There
      * is no `nohup` here and no shell worth trusting with the quoting of a
      * python path that may sit under `Program Files`, so the script detaches
-     * ITSELF: `--detach` makes it re-launch a DETACHED_PROCESS child with
-     * `--log` for output and return at once, which is what lets run()
-     * resolve. The wrapper is therefore just the plain argv.
+     * ITSELF: `--detach` makes it re-launch a detached child (a window-less
+     * console of its own, so no terminal window) with `--log` for output and
+     * return at once, which is what lets run() resolve. The wrapper is
+     * therefore just the plain argv.
      */
     const feedTwCapital = (now: number): Promise<boolean> => {
       const python = expandHome(config.capital.python)
