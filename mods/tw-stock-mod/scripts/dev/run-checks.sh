@@ -169,9 +169,12 @@ JSON
 # names a futures code - which must never price the tf table. The harness
 # writes the runtime-dir futures-quotes.json itself, stamped off its clock.
 mkdir -p "$FIXTURES/tf-quotes/.claude" "$FIXTURES/tf-override/.claude"
+# "sort": "change" keeps path 8's next-symbol walk (SRFJ6 first, then TXFR1) -
+# the walk is about the alias row's chart, not the order; tf's default is "list".
 cat > "$FIXTURES/tf-quotes/.claude/stock-band.json" <<'JSON'
 {
   "market": "tf",
+  "sort": "change",
   "feed": "auto",
   "twSources": ["yahoo"],
   "pageMs": 0,
@@ -201,6 +204,29 @@ cat > "$FIXTURES/tf-override/.claude/stock-quotes.json" <<'JSON'
     "2222": { "price": 102, "prevClose": 100, "name": "乙" },
     "SRFJ6": { "price": 999, "prevClose": 100 }
   }
+}
+JSON
+
+# tf-list: the user's six-contract 台指期 list with NO `sort` key - the rows
+# keep the config's order (tf's default is "list") and the footer index is
+# the TXFR1 > MXFR1 > TMFR1 contract. The harness writes its quotes file.
+mkdir -p "$FIXTURES/tf-list/.claude"
+cat > "$FIXTURES/tf-list/.claude/stock-band.json" <<'JSON'
+{
+  "market": "tf",
+  "feed": "auto",
+  "twSources": ["yahoo"],
+  "pageMs": 0,
+  "tw": [{ "code": "2330", "name": "台積電", "prevClose": 1000 }],
+  "us": [],
+  "futures": [
+    { "code": "SRFR1", "name": "小0050近" },
+    { "code": "SRFR2", "name": "小0050次" },
+    { "code": "QFFR1", "name": "小台積電近" },
+    { "code": "QFFR2", "name": "小台積電次" },
+    { "code": "TMFR1", "name": "微台指近" },
+    { "code": "TMFR2", "name": "微台指次" }
+  ]
 }
 JSON
 
@@ -324,7 +350,7 @@ run_check "rank-cross"     node "$SCRIPT_DIR/rank-cross.mjs"  "$OUT/board.js" "$
 run_check "sticky-rank"    node "$SCRIPT_DIR/sticky-rank.mjs" "$OUT/register.js" "$FIXTURES/sticky-rank"
 net_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/file-bars"
 run_check "tf-market"      node "$SCRIPT_DIR/tf-market.mjs"   "$OUT/register.js" "$FIXTURES/tf-market" "$FIXTURES/tf-plain"
-run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-quotes" "$FIXTURES/tf-override"
+run_check "tf-quotes"      node "$SCRIPT_DIR/tf-quotes.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-quotes" "$FIXTURES/tf-override" "$FIXTURES/tf-list"
 run_check "tf-feed"        node "$SCRIPT_DIR/tf-feed.mjs"     "$OUT/register.js" "$FIXTURES/tf-feed"
 run_check "tf-pnl"         node "$SCRIPT_DIR/tf-pnl.mjs"      "$OUT/register.js" "$OUT/board.js" "$FIXTURES/tf-pnl" "$FIXTURES/tf-plain"
 run_check "tabs"           node "$SCRIPT_DIR/tabs.mjs"        "$OUT/register.js" "$FIXTURES/tf-pnl" "$FIXTURES/tf-plain"

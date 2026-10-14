@@ -6,7 +6,7 @@
 // project guards the stock side: its project-level `.claude/stock-quotes.json`
 // override still drives 台股 exactly as before and never leaks into tf.
 //
-// Usage: node tf-quotes.mjs $OUT/register.js $OUT/board.js <tf-proj> <tw-proj>
+// Usage: node tf-quotes.mjs $OUT/register.js $OUT/board.js <tf-proj> <tw-proj> <tf-list-proj>
 // <tf-proj>/.claude/stock-band.json pins `market: "tf"` with feed "auto" (so
 // the feedBars path is live and only the tf short-circuit keeps Yahoo out);
 // <tw-proj> pins tw, feed off, with an override quotes file and a `futures`
@@ -17,7 +17,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { ok, done } from './assert.mjs'
 globalThis.h = (t, p, ...k) => ({ type: t, props: p ?? {}, kids: k.flat() })
 globalThis.Fragment = 'Fragment'
-const [, , regPath, boardPath, tfDir, twDir] = process.argv
+const [, , regPath, boardPath, tfDir, twDir, listDir] = process.argv
 
 const TAIPEI = 8
 const taipei = (day, hh, mm) => Date.UTC(2026, 8, day, hh - TAIPEI, mm)
@@ -269,10 +269,79 @@ ok(r.market === 'tw' && r.source === 'file', `tw override still drives 台股: $
 ok(r.quotes.find(x => x.code === '1111')?.price === 105, 'tw override price wins (1111 = 105)')
 ok(r.quotes.every(x => x.decimals === undefined), 'stock rows carry no decimals field (board default 2, unchanged)')
 ok(r.sourceLabel === '' , `override without a source name keeps the generic label: "${r.sourceLabel}"`)
+// no `sort` key: 台股 still ranks by change% (tw's own defaultSort). The list
+// is reversed so the config order and the change order disagree.
+await tw.setConfig({ tw: [{ code: '2222', name: '乙', prevClose: 100 }, { code: '1111', name: '甲', prevClose: 100 }] })
+;({ props: r } = await tw.draw())
+ok(r.market === 'tw' && r.sorted === true && r.quotes.map(x => x.code).join() === '1111,2222',
+  `台股 with no sort key still sorts by change% (1111 +5% before 2222 +2%): ${r.quotes.map(x => x.code).join()} sorted=${r.sorted}`)
 await tw.setConfig({ market: 'tf' })
 ;({ props: r } = await tw.draw())
 console.log('tf rows in the tw project:', r.quotes.map(x => `${x.code} price=${x.price} noData=${!!x.noData}`).join('  '))
 ok(r.market === 'tf' && r.quotes.length === 1 && r.quotes[0].noData === true, 'a stock override (no market field) never prices tf')
 ok(tw.fetched.length === 0, 'feed off: the tw project made no request')
+
+// --- path 12: the six-contract list with no `sort` key keeps the config's
+// order, and the footer index follows TXFR1 > MXFR1 > TMFR1 > the file's first key
+const LIST_CODES = ['SRFR1', 'SRFR2', 'QFFR1', 'QFFR2', 'TMFR1', 'TMFR2']
+const LIST_PRICES = {
+  SRFR1: [100, 100], SRFR2: [101, 100], QFFR1: [98, 100], QFFR2: [105, 100], TMFR1: [19950, 19900], TMFR2: [19990, 19900],
+  MXFR1: [19700, 19650], TXFR1: [47557, 47428],
+}
+const listRuntime = `${runtimeDirFor(listDir)}`
+const writeListFile = async keys => {
+  const quotes = Object.fromEntries(keys.map(c => [c, { price: LIST_PRICES[c][0], prevClose: LIST_PRICES[c][1] }]))
+  await mkdir(listRuntime, { recursive: true })
+  await writeFile(`${listRuntime}futures-quotes.json`, JSON.stringify({ asOf: CLOCK - 10_000, dataAt: CLOCK - 15_000, market: 'tf', source: '永豐', quotes }, null, 1))
+}
+const cfgFile = `${listDir}/.claude/stock-band.json`
+const readCfg = async () => JSON.parse(await readFile(cfgFile, 'utf8'))
+const FUTURES = (await readCfg()).futures
+await writeListFile(LIST_CODES)
+const listBand = await boot(listDir, 'tflist')
+let { props: lq } = await listBand.draw()
+const codes = () => lq.quotes.map(r => r.code)
+console.log('list rows:', lq.quotes.map(r => `${r.code} pct=${r.pct.toFixed(3)}`).join('  '), `sorted=${lq.sorted}`)
+ok(lq.market === 'tf' && lq.quotes.length === 6, `(1) pinned tf with the six futures: ${lq.market} ${lq.quotes.length}`)
+ok(codes().join() === LIST_CODES.join(), `(1) rows come in the config's futures order: ${codes().join(' ')}`)
+ok(lq.sorted === false, `(1) props.sorted is false for tf's default list order: ${lq.sorted}`)
+ok(lq.index.name === '微台指近', `(2) footer names TMFR1 from the config entry: ${lq.index.name}`)
+ok(lq.index.value === 19950 && lq.index.change === 50 && Math.abs(lq.index.pct - pct(19950, 19900)) < 1e-9,
+  `(2) footer value/change/pct are TMFR1's price and prevClose: ${lq.index.value} ${lq.index.change} ${lq.index.pct}`)
+
+// (3) an explicit sort:'change' still ranks tf by 今日%, then the key goes away
+await listBand.setConfig({ sort: 'change' })
+;({ props: lq } = await listBand.draw())
+const pcts = lq.quotes.map(r => r.pct)
+ok(lq.sorted === true && pcts.every((v, i) => i === 0 || pcts[i - 1] >= v),
+  `(3) sort:'change' orders tf rows by 今日% descending: ${codes().join(' ')} sorted=${lq.sorted}`)
+ok(codes()[0] === 'QFFR2', `(3) biggest mover QFFR2 (+5%) leads: ${codes()[0]}`)
+{
+  const cur = await readCfg()
+  delete cur.sort
+  await writeFile(cfgFile, JSON.stringify(cur, null, 2))
+}
+await listBand.poll()
+;({ props: lq } = await listBand.draw())
+ok(codes().join() === LIST_CODES.join() && lq.sorted === false, `(3) without the key the list order returns: ${codes().join(' ')}`)
+
+// (4) footer precedence: TXFR1 > MXFR1 > TMFR1 > the file's first key
+await listBand.setConfig({ futures: [...FUTURES, { code: 'MXFR1', name: '小台近' }, { code: 'TXFR1', name: '台指近' }] })
+await writeListFile([...LIST_CODES, 'MXFR1'])
+await listBand.poll()
+;({ props: lq } = await listBand.draw())
+ok(lq.index.name === '小台近' && lq.index.value === 19700, `(4) MXFR1 in config and file beats TMFR1: ${lq.index.name} ${lq.index.value}`)
+await writeListFile([...LIST_CODES, 'MXFR1', 'TXFR1'])
+await listBand.poll()
+;({ props: lq } = await listBand.draw())
+ok(lq.index.name === '台指近' && lq.index.value === 47557, `(4) TXFR1 in config and file beats MXFR1 and TMFR1: ${lq.index.name} ${lq.index.value}`)
+await writeListFile(['SRFR2', 'SRFR1', 'QFFR1', 'QFFR2', 'TMFR2'])
+await listBand.poll()
+;({ props: lq } = await listBand.draw())
+ok(lq.index.name === '小0050次' && lq.index.value === 101,
+  `(4) no TXFR1/MXFR1/TMFR1 in the file: the file's first key (SRFR2) is the footer: ${lq.index.name} ${lq.index.value}`)
+await listBand.setConfig({ futures: FUTURES })
+await writeListFile(LIST_CODES)
+ok(listBand.fetched.length === 0, `tf-list: no request of any kind: ${listBand.fetched.length}`)
 
 done()
