@@ -2273,7 +2273,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
       // Column-major off the existing sort: the first column is ranks
       // 1..quoteRows, the next the ranks after, so the biggest gainers head
       // the first column and the biggest fallers end the last one under the
-      // default change% sort. There is no single "this row" to stripe when
+      // change% sort. There is no single "this row" to stripe when
       // it can hold unrelated symbols, so the top-mover highlight is
       // single-column only.
       for (let i = 0; i < quoteRows; i++) {

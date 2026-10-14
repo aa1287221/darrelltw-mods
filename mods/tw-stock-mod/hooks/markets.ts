@@ -197,7 +197,7 @@ type MarketConf = {
    * what `sort: undefined` resolves to for THIS market (see effectiveSort) -
    * the per-market default the old single global `defaultConfig().sort`
    * used to hardcode. tw/us keep the original 'change'; crypto opens on
-   * 'marketcap', at the user's request (2026-09-19); tf keeps the futures
+   * 'marketcap', at the user's request (2026-09-19); tf opens on the futures
    * list's own order ('list').
    */
   defaultSort: SortKey

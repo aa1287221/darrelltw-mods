@@ -57,7 +57,7 @@ const SRF_5 = walk(109.4, 40, 5 * MIN, taipei(17, 19, 40), 0.25, 2)
 // a 2-point range at 0 decimals: interpolated labels round to the same text
 // (47,429 twice) unless the axis dedups them - the screenshot's bug, in miniature
 const MXF_5 = Array.from({ length: 30 }, (_, i) => [47429, 47430, 47428, i % 2 ? 47430 : 47429, 40 + (i % 7), taipei(17, 20, 30) + i * 5 * MIN])
-const SRF_PREV = Number((SRF_5[SRF_5.length - 1][3] + 0.3).toFixed(2)) // a down day, so it sorts behind TXFR1
+const SRF_PREV = Number((SRF_5[SRF_5.length - 1][3] + 0.3).toFixed(2)) // a down day; TXFR1 still opens first (it leads the futures list, tf's default order)
 const futuresFile = asOf => ({
   asOf,
   dataAt: asOf - 5_000,
