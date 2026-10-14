@@ -448,10 +448,12 @@ function buildProps(
     }
   }
 
-  // tf has no index feed: the footer shows 台指近 (TXFR1, else the first
-  // contract) from the fresh file, and 0 with no file - never a demo walk.
+  // tf has no index feed: the footer shows the first of TXFR1/MXFR1/TMFR1 the
+  // fresh file has (the index-family contracts), else its first contract.
   const tfIdxCode =
-    market === 'tf' && usedFile && quotesFile ? (quotesFile.quotes.TXFR1 ? 'TXFR1' : Object.keys(quotesFile.quotes)[0]) : undefined
+    market === 'tf' && usedFile && quotesFile
+      ? (['TXFR1', 'MXFR1', 'TMFR1'].find(c => quotesFile.quotes[c]) ?? Object.keys(quotesFile.quotes)[0])
+      : undefined
   const tfIdx = tfIdxCode ? quotesFile?.quotes[tfIdxCode] : undefined
   const tfPrev = tfIdx?.prevClose ?? 0
   const idxName = tfIdxCode ? (list.find(t => t.code === tfIdxCode)?.name ?? tfIdxCode) : conf.indexName

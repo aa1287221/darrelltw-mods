@@ -14,7 +14,7 @@ export type Config = {
   /**
    * undefined means "no explicit choice" - effectiveSort() then resolves it
    * off MARKETS[market].defaultSort, so each market keeps its own default
-   * (crypto: marketcap, tw/us/tf: change) instead of one hardcoded global
+   * (crypto: marketcap, tw/us: change, tf: list) instead of one hardcoded global
    * value. See parseConfigRoot for how an explicit `"sort"` in the config
    * file overrides this.
    */

@@ -235,7 +235,7 @@ highlighted top mover:
   (變更$ has no room next to a second symbol), filled column-major off the
   current sort: the first column is the top ranks on the page and the last
   the bottom ones, so the biggest gainers head the first column and the
-  biggest fallers end the last one under the default change% sort. A
+  biggest fallers end the last one under the change% sort (台股/美股's default). A
   6-column gutter separates the columns so 變更% and the next 代號 do not read
   as one run of digits, and the two-column table caps at 104 columns (the
   single-column one caps at 74). **Below 77 columns it falls back to the
@@ -243,10 +243,13 @@ highlighted top mover:
   columns (代號 + a name + 價格 + 變更%; see `MIN_HALF_WIDTH` in
   `hooks/board.tsx`), and two of those plus the gutter is 76 out of
   `width - 1`; each further column costs another 41.
-- **Rows are sorted by change%** (hence `↓變更%` in the header); the biggest
-  mover gets the highlighted row in the single-column table. Two-column mode
-  drops the highlight — a row there can hold two unrelated symbols, so there
-  is no single "this row" to stripe. `"sort": "list"` keeps your own order.
+- **Rows are sorted by change%** on 台股 and 美股 (hence `↓變更%` in the
+  header); the biggest mover gets the highlighted row in the single-column
+  table. Two-column mode drops the highlight — a row there can hold two
+  unrelated symbols, so there is no single "this row" to stripe. 台指期 keeps
+  your `futures` order by default (see [Taiwan futures](#taiwan-futures-tf)).
+  `"sort": "list"` keeps your own order on any market; `"sort": "change"`
+  ranks 台指期 by change% too.
   The order holds still between page turns: it is refreshed at each page turn
   (`翻頁` or the automatic one) and each market switch, not on every quote, so
   between those moments a row keeps its symbol and only its price flaps — the
@@ -421,7 +424,7 @@ its `shioaji`/`capital` block (`interval`, `indices`) still merges key by key.
 | `marketSwitcher` | `"tabbar"` | how the band switches market/holdings stops. `tabbar` (this fork's default, issue #9) draws one plain tab per stop — 美股 / [美股庫存] / 台股 / 台股庫存 / [台指期] / [期貨庫存] / [加密貨幣], the bracketed ones only when configured or held — with the current one marked `[台指期]`; the row never collapses, the session notes after it give way instead. Upstream's three alternatives: `select` draws a `市場 ▾` dropdown, `tabs` draws upstream's own tab Buttons (台股 first, `·庫存` for the holdings stops, collapsing to `cycle` when the terminal is too narrow), `cycle` draws one `‹ 台股 1/7 ›` Button that walks the stops in order. An unrecognized value falls back to `tabbar` |
 | `refreshMs` | `3000` | how often the module rebuilds the snapshot (min 1000; fixed at session start — changing it needs `/reload-plugins`). `1000` redraws every second, which is what makes the 永豐 tick overlay visible — see [Taiwan futures (tf)](#taiwan-futures-tf) |
 | `chartRows` | `16` | how tall the trend view is, in rows (min 8; clamped to the band's `maxRows − 2` at render so it never scrolls). `8` is the old one-screen layout; under 12 the volume rows go — see [The trend view](#the-trend-view-k-bars) |
-| `sort` | per market | `change` = by change% desc, `list` = your order; `marketcap` / `volume` are crypto-only (CoinGecko supply × live price / Pionex 24h USDT turnover) and fall back to `change` on the other markets. Unset, 台股/美股/台指期 open on `change` and 加密貨幣 on `marketcap` |
+| `sort` | per market | `change` = by change% desc, `list` = your order; `marketcap` / `volume` are crypto-only (CoinGecko supply × live price / Pionex 24h USDT turnover) and fall back to `change` on the other markets. Unset, 台股/美股 open on `change`, 台指期 on `list` (the `futures` order) and 加密貨幣 on `marketcap` |
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
 | `columns` | `"auto"` | how many symbols a row draws: `auto` = the fewest of 1–4 that hold the watchlist in the band's quote rows, as many as the terminal's width allows (1 when the list is 5 symbols or fewer; 2 from 77 columns, 3 from 118, 4 from 159); `1`/`2`/`3`/`4` force it, capped by the same width rule (a 74-column terminal draws one column whatever this says) — see [What the band shows](#what-the-band-shows) |
 | `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only. `tf` is not a value here — a non-empty `futures` list feeds itself automatically whenever `feed` is not `"off"`, on top of whatever this says, since it costs no HTTP request — see [Taiwan futures (tf)](#taiwan-futures-tf) |
@@ -884,6 +887,13 @@ there is no built-in list and no 20-symbol cap (a futures market costs no
 Yahoo request), so watch as many contracts as your account can price. An
 entry with no string `code` is dropped and logged once; it does not break
 the rest of the list. `"market": "tf"` pins a session to it.
+
+**Row order and footer.** 台指期 rows keep the `futures` list's own order
+(its default sort is `list`, unlike 台股/美股's `change`), so list the contracts
+in the order you want them; `"sort": "change"` ranks them by 今日% instead. The
+footer index card follows the index family: the first of `TXFR1`, `MXFR1`,
+`TMFR1` that the fresh quotes file carries, under its config name (台指近,
+小台近, 微台指近), else the file's first contract. With no fresh file it reads 0.
 
 **Codes: alias or month.** List a contract by its own month code (`TXFJ6`,
 `SRFJ6`) or by 永豐's continuous alias (`TXFR1` near month, `TXFR2` next
