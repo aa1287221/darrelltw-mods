@@ -206,6 +206,8 @@ export type BoardProps = {
    * one-line rows of fixed-width cells and pixel Boxes (see deskBoard).
    */
   desktop?: true
+  /** set only by the K 線 pane: its volume panel grows with the rows (see chartGeom) */
+  tallVolume?: true
 }
 
 // `turn` is the change the rows last turned for, and `since` is when that turn
@@ -1372,6 +1374,7 @@ const BAR_STRIDE = 2 // one candle column + one gap column while they fit
 const CHART_RIGHT_CAP = 134
 const VOLUME_ROWS = 2
 const VOLUME_MIN_ROWS = 12 // under this the two volume rows would starve the plot
+const TALL_VOLUME_MIN_ROWS = 24 // the pane's tall chart: from here the volume panel is a sixth of the rows
 const REF_LINE = '#3d4450' // the 昨結 dotted line and the session-boundary rule
 const REF_LABEL = '#5a6370'
 const TAG_INK = '#0d1117' // text on the filled last-price tag
@@ -1391,8 +1394,9 @@ function shadeOf(color: string): string {
 
 /** rows of the chart view: title, plot rows, axis, volume rows (16+ rows only), footer */
 type ChartGeom = { plot: number; volume: number; axisRow: number; footRow: number }
-function chartGeom(rows: number, hasVolume: boolean): ChartGeom {
-  const volume = rows >= VOLUME_MIN_ROWS && hasVolume ? VOLUME_ROWS : 0
+function chartGeom(rows: number, hasVolume: boolean, tall = false): ChartGeom {
+  const want = tall && rows >= TALL_VOLUME_MIN_ROWS ? Math.max(VOLUME_ROWS, Math.floor(rows / 6)) : VOLUME_ROWS
+  const volume = rows >= VOLUME_MIN_ROWS && hasVolume ? want : 0
   const plot = rows - 3 - volume
   return { plot, volume, axisRow: 1 + plot, footRow: rows - 1 }
 }
@@ -1861,7 +1865,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     const plotW = Math.max(10, chartRight - lay.badgeCol - AXIS_W)
     const bars = q.bars ?? []
     const hasVolume = bars.some(b => (b[4] ?? 0) > 0)
-    const geom = chartGeom(rows.length, hasVolume)
+    const geom = chartGeom(rows.length, hasVolume, props.tallVolume)
     const win = barWindow(bars, plotW)
     const last = bars[bars.length - 1]
 

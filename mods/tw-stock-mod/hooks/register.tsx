@@ -1,6 +1,6 @@
 /* @jsx h */
 import type { Register } from 'claude-code'
-import { ACCOUNT_LINES, BARS_MAX_AGE_MS, BARS_STALE_MS, CHART_BARS, COINGECKO_MARKETS_URL, CLOSE_GRACE_MS, CONFIG_PATH, CRYPTO_COOLDOWN_MS, CRYPTO_LOW_TOKENS, CRYPTO_SUPPLY_COOLDOWN_MS, CRYPTO_SUPPLY_TTL_MS, FEED_BACKOFF_MAX_MS, HOLDINGS_PATH, IN_FLIGHT_STUCK_MS, PIONEX_TICKERS_URL, PNL_CHROME_ROWS, QUOTES_PATH, QUOTE_STALE_MS, REQUESTS_PER_HOUR, SNOOZE_MS, SPARK_BATCH, TABLE_CHROME_ROWS, TW_YAHOO_INDEX, USER_CONFIG_REL, US_INDEX_SYMBOL, US_INDICES, isWindowsPath, runtimeDir } from './constants.ts'
+import { ACCOUNT_LINES, BARS_MAX_AGE_MS, BARS_STALE_MS, CHART_BARS, CHART_ROWS_MIN, COINGECKO_MARKETS_URL, CLOSE_GRACE_MS, CONFIG_PATH, CRYPTO_COOLDOWN_MS, CRYPTO_LOW_TOKENS, CRYPTO_SUPPLY_COOLDOWN_MS, CRYPTO_SUPPLY_TTL_MS, FEED_BACKOFF_MAX_MS, HOLDINGS_PATH, IN_FLIGHT_STUCK_MS, PIONEX_TICKERS_URL, PNL_CHROME_ROWS, QUOTES_PATH, QUOTE_STALE_MS, REQUESTS_PER_HOUR, SNOOZE_MS, SPARK_BATCH, TABLE_CHROME_ROWS, TW_YAHOO_INDEX, USER_CONFIG_REL, US_INDEX_SYMBOL, US_INDICES, isWindowsPath, runtimeDir } from './constants.ts'
 import { CRYPTO_COINGECKO_ID, MARKETS, currentSession, hasFutures, hhmm, lastCloseAt, localParts, phaseOf, pickMarket, sessionNote, taipeiNote } from './markets.ts'
 import type { MarketId, MarketMode, MarketSwitcher, Phase, SortKey, Ticker, TwSourceName, View } from './markets.ts'
 import { PNL_SORT_KEYS, PNL_SORT_LABELS, TIMEFRAMES, demoBars, demoPrice, quoteRow, roundPrice, sortHoldings } from './quotes.ts'
@@ -881,6 +881,75 @@ let lastPnlShown: PricedHolding[] = []
 let pnlSortKey: PnlSortKey = 'totalPnl'
 let pnlSortDir: 'asc' | 'desc' = 'desc'
 
+// --- K 線 pane (prototype, see prototype/chart-pane.md) -------------------
+// The pane follows its own code (paneFocusCode); keepBandState keeps the band's
+// page and sort state out of its frames. viewportCols is the last width a
+// ui.render reported, which the 寬 width is measured from.
+const CHART_PANE = 'stock-chart'
+let paneOpen = false
+let chartPaneOn = false // TW_STOCK_CHART_PANE=1, read once in session.start; off = base behaviour
+let paneFocusCode: string | undefined
+let paneWide = false
+let viewportCols: number | undefined
+
+/** the slice of the host the pane helpers use; the real `$` satisfies it */
+type PaneHost = {
+  ui: {
+    open(args: { id: string; title: string; focus: true; closeOnEscape: true; rows: number; columns?: number }): Promise<{ isPlaced: boolean; reason?: string }>
+    close(args: { id: string }): Promise<unknown>
+    log(message: string): void
+  }
+}
+
+/** buildProps writes this module's page and sort state; the pane's frame gives all of it back */
+function keepBandState<T>(draw: () => T): T {
+  const saved = { page, lastPageCount, stickyOrder, rerank, turnSeq, lastShown, lastShownMarket, lastPnlShown }
+  try {
+    return draw()
+  } finally {
+    page = saved.page
+    lastPageCount = saved.lastPageCount
+    stickyOrder = saved.stickyOrder
+    rerank = saved.rerank
+    turnSeq = saved.turnSeq
+    lastShown = saved.lastShown
+    lastShownMarket = saved.lastShownMarket
+    lastPnlShown = saved.lastPnlShown
+  }
+}
+
+/** 寬: 60% of the viewport, kept between 100 columns and the viewport less 40; 140 until a render has said otherwise */
+function paneColumns(): number {
+  const vc = viewportCols ?? 140
+  return Math.min(Math.max(Math.floor(vc * 0.6), 100), vc - 40)
+}
+
+/** every open sets all of the pane's fields, so a retitle or a width change passes them again */
+async function openChartPane($: PaneHost, code: string, name: string): Promise<boolean> {
+  paneFocusCode = code
+  const opened = await $.ui.open({
+    id: CHART_PANE,
+    title: `K線 ${code} ${name}`,
+    focus: true,
+    closeOnEscape: true,
+    rows: 30, // only the inline placement reads it; the dock ignores it
+    ...(paneWide ? { columns: paneColumns() } : {}),
+  })
+  paneOpen = opened.isPlaced
+  if (opened.isPlaced) return true
+  $.ui.log(`tw-stock-mod: K 線 pane 沒有開成（${opened.reason}）`)
+  // left open but undrawn, it would show up later on top of the band's chart
+  await $.ui.close({ id: CHART_PANE })
+  return false
+}
+
+/** 趨勢圖 and a row pick: the pane on `code`; a host that will not place it gets the band's own chart view */
+async function showChartPane($: PaneHost, code: string, name: string): Promise<void> {
+  if (await openChartPane($, code, name)) return
+  view = 'chart'
+  focusCode = code
+}
+
 function resetPnlScroll() {
   pnlScroll = 0
 }
@@ -1193,6 +1262,7 @@ function foldedFooter(props: BoardProps): string {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
+    chartPaneOn = (await $.env.get('TW_STOCK_CHART_PANE')) === '1'
 
     try {
       const manifest = JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
@@ -2346,6 +2416,106 @@ export const register: Register = on => {
     return r
   })
 
+  // Registered above the band's hook: the dev-harness stubs keep one handler per
+  // event name (last one wins); the engine itself dispatches by filter.
+  // The K 線 pane: one symbol's chart in its own Client, built off paneFocusCode
+  // and kept out of the band's state (keepBandState).
+  on('ui.render', { component: 'Pane', requestId: CHART_PANE }, async ($, e) => {
+    const { Box, Button, Client, Text } = await $.ui.resolve(e)
+    if (!Client) return <Text dimColor>K 線 pane 只在終端與桌面版顯示</Text>
+    const now = await $.clock.now()
+    const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
+    const bodyRows = e.props.scroll?.bodyRows ?? 24
+    const chartRows = Math.max(CHART_ROWS_MIN, bodyRows - 2)
+    const mode = modeOverride ?? config.market
+    const market = pickMarket(now, mode, hasFutures(config)).market
+    const fit: Fit = { ...fitBand(config, 0, cols), adaptive: true, chartRows }
+    const props = keepBandState(() =>
+      buildProps(now, config, quotesFor(market, now), mode, 'chart', paneFocusCode, fit, 'full'),
+    )
+    const q = props.quotes[props.focus]
+    if (paneOpen && q && props.source !== 'demo') requestBars?.(props.market, q.code)
+    const rowCount = props.quotes.length
+    const chartControls = (q?.bars?.length ?? 0) > 0
+    const step = (by: number) => async () => {
+      const n = Math.max(1, rowCount)
+      const target = props.quotes[(props.focus + by + n) % n]
+      if (target) await openChartPane($, target.code, target.name)
+      $.ui.invalidate('ui.render')
+    }
+    const onWide = async () => {
+      paneWide = !paneWide
+      if (q) await openChartPane($, q.code, q.name)
+      $.ui.invalidate('ui.render')
+    }
+    const onBand = async () => {
+      await $.ui.close({ id: CHART_PANE })
+      if (paneFocusCode !== undefined) {
+        view = 'chart'
+        focusCode = paneFocusCode
+      }
+      $.ui.invalidate('ui.render')
+    }
+    const onTimeframe = (tf: Timeframe) => () => {
+      timeframe = tf
+      $.ui.invalidate('ui.render')
+    }
+    const onChartMode = (m: ChartMode) => () => {
+      chartModeBy[props.market] = m
+      $.ui.invalidate('ui.render')
+    }
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row">
+          <Button key="stock-chart:prev" label="◀ 上一檔" onPress={step(-1)} />
+          <Button key="stock-chart:next" label={`下一檔 ▶ ${props.focus + 1}/${rowCount}`} onPress={step(1)} />
+          {chartControls ? <Text> </Text> : null}
+          {chartControls
+            ? props.timeframes.flatMap((tf, i) => [
+                i > 0 ? <Text key={`stock-chart:tf:${tf}:gap`}> </Text> : null,
+                <Button
+                  key={`stock-chart:tf:${tf}`}
+                  label={tf === props.timeframe ? `[${tf}分]` : `${tf}分`}
+                  plain
+                  dimColor={tf !== props.timeframe}
+                  onPress={onTimeframe(tf)}
+                />,
+              ])
+            : null}
+          {chartControls ? <Text> </Text> : null}
+          {chartControls
+            ? (['candle', 'line'] as ChartMode[]).map(m => (
+                <Button
+                  key={`stock-chart:mode:${m}`}
+                  label={m === props.chartMode ? `[${m === 'candle' ? 'K線' : '曲線'}]` : m === 'candle' ? 'K線' : '曲線'}
+                  plain
+                  dimColor={m !== props.chartMode}
+                  onPress={onChartMode(m)}
+                />
+              ))
+            : null}
+          <Button key="stock-chart:wide" label={paneWide ? '寬度 [寬]' : '寬度 [預設]'} onPress={onWide} />
+          <Button key="stock-chart:band" label="回 band" onPress={onBand} />
+          <Button key="stock-chart:close" label="關閉" onPress={() => $.ui.close({ id: CHART_PANE })} />
+        </Box>
+        <Text dimColor>{`pane ${cols}×${bodyRows} ${e.props.placement} · 寬度要求 ${paneWide ? `${paneColumns()} 欄` : '預設'}`}</Text>
+        <Client
+          key="stock-chart:board"
+          module="./board.tsx"
+          width={cols}
+          height={chartRows}
+          props={{ ...props, tallVolume: true, ...(e.surface === 'desktop' ? { desktop: true } : {}) }}
+        />
+      </Box>
+    )
+  })
+
+  // Esc, the person's close mark and 關閉 all arrive here: the pane is no longer up.
+  on('ui.close', async ($, e, next) => {
+    if (e.id === CHART_PANE) paneOpen = false
+    return next(e)
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     // AbovePrompt is raised on terminal and desktop only, and those are the
     // two tables that carry a `Client` for board.tsx (d.ts Elements).
@@ -2395,6 +2565,7 @@ export const register: Register = on => {
       )
     }
 
+    if (e.viewport?.columns) viewportCols = e.viewport.columns
     // bodyColumns is the band's own width (narrower than the viewport with a
     // Pane docked beside the transcript); a stub host may give neither
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
@@ -2555,11 +2726,20 @@ export const register: Register = on => {
     // One button used to do all three jobs - enter the chart, step to the next
     // symbol, and fall back to the table on the last one - which left no way
     // back to the symbol you just passed and no way out except walking to the
-    // end. The chart view now gets its own three buttons, and 趨勢圖 only ever
-    // opens the view.
-    const onTrend = () => {
-      view = 'chart'
-      focusCode = props.quotes[0]?.code
+    // end. 趨勢圖 now opens the K 線 pane on the first row, and the band keeps its table.
+    const onTrend = async () => {
+      const first = props.quotes[0]
+      if (chartPaneOn && first) await showChartPane($, first.code, first.name)
+      else {
+        view = 'chart'
+        focusCode = first?.code
+      }
+      $.ui.invalidate('ui.render')
+    }
+    // the band's chart row opens the pane on its focused row and puts the band back on the table
+    const onOpenPane = async () => {
+      const q = props.quotes[props.focus]
+      if (q && (await openChartPane($, q.code, q.name))) view = 'table'
       $.ui.invalidate('ui.render')
     }
     const step = (by: number) => () => {
@@ -2769,6 +2949,7 @@ export const register: Register = on => {
               <Button key="stock-band:next" label={`下一檔 ▶ ${props.focus + 1}/${rowCount}`} onPress={onNext} />
             ) : null}
             {chart ? <Button key="stock-band:list" label="回清單" onPress={onList} /> : null}
+            {chart && chartPaneOn ? <Button key="stock-band:pane" label="開 pane" onPress={onOpenPane} /> : null}
             {/* the timeframe and K線/曲線 pairs read like the tab row: plain,
                 the active one bracketed, the rest dim */}
             {chartControls && props.timeframes.length > 0 ? <Text> </Text> : null}
@@ -2848,7 +3029,7 @@ export const register: Register = on => {
     )
   })
 
-  // Clicking a quote in the table opens its trend chart. The board hit-tests
+  // Clicking a quote in the table opens its K 線 pane. The board hit-tests
   // the pointer (a Client has no Button) and posts the row it landed on; this
   // is the other end of that. It is a shortcut, not a replacement: the table
   // is not on screen in chart view, so 上一檔 / 下一檔 / 回清單 stay the only
@@ -2887,12 +3068,16 @@ export const register: Register = on => {
     if (typeof pick !== 'number' || !Number.isInteger(pick) || pick < 0 || pick >= shownCount) {
       return next(e)
     }
-    view = 'chart'
     // `pick` is the position the board actually drew the click on - resolve
     // it against `lastShown` (this module's record of that same drawn page)
     // to the code sitting there, not the position itself, so a rank cross
     // on the very next render cannot walk the chart onto some other symbol.
-    focusCode = lastShown[pick]?.code
+    const row = lastShown[pick]
+    if (chartPaneOn && row) await showChartPane($, row.code, row.name)
+    else {
+      view = 'chart'
+      focusCode = row?.code
+    }
     $.ui.invalidate('ui.render')
     return {}
   })

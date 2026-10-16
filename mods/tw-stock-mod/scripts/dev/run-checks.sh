@@ -3,7 +3,7 @@
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross / sticky-rank /
 # file-bars / tf-market / tf-quotes / tf-feed / tf-pnl / tabs / chart-view /
-# fit-rows / desktop-cells / pytest / feed-errors / feed-budget / spawn-safety / desktop-respawn / sources-order / close-snapshot / account-summary /
+# fit-rows / desktop-cells / chart-pane / pytest / feed-errors / feed-budget / spawn-safety / desktop-respawn / sources-order / close-snapshot / account-summary /
 # crypto-feed / crypto-sort / market-select against them (feed-errors, spawn-safety, desktop-respawn, sources-order, close-snapshot,
 # account-summary, crypto-feed, crypto-sort and market-select build their own stub config
 # in-process instead, so they need no fixture directory) plus
@@ -357,6 +357,7 @@ run_check "tabs"           node "$SCRIPT_DIR/tabs.mjs"        "$OUT/register.js"
 run_check "chart-view"     node "$SCRIPT_DIR/chart-view.mjs"  "$OUT/register.js" "$OUT/board.js" "$FIXTURES/chart-view" "$FIXTURES/chart-view-tw"
 run_check "fit-rows"       node "$SCRIPT_DIR/fit-rows.mjs"    "$OUT/register.js" "$OUT/board.js" "$FIXTURES/fit-rows"
 run_check "desktop-cells"  node "$SCRIPT_DIR/desktop-cells.mjs" "$OUT/register.js" "$OUT/board.js" "$FIXTURES/desktop-cells"
+run_check "chart-pane"     node "$SCRIPT_DIR/chart-pane.mjs" "$OUT/register.js" "$OUT/board.js" "$FIXTURES/chart-pane"
 run_check "pytest"         run_pytest
 run_check "feed-errors"    node "$SCRIPT_DIR/feed-errors.mjs" "$OUT/register.js"
 run_check "feed-budget"    node "$SCRIPT_DIR/feed-budget.mjs" "$OUT/register.js"
