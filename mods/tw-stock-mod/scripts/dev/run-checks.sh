@@ -57,6 +57,17 @@ if ! (cd "$MOD_DIR" && "${ESBUILD[@]}" hooks/markets.ts --bundle --format=esm --
   echo "esbuild markets.ts FAILED" >&2
   exit 1
 fi
+# chart-pane P12 compares the gate-off band with base: base's hooks come from git (the prototype's base commit)
+rm -rf "$OUT/base-src" && mkdir -p "$OUT/base-src"
+if ! git -C "$MOD_DIR" archive a3a198b hooks | tar -x -C "$OUT/base-src"; then
+  echo "git archive a3a198b hooks FAILED" >&2
+  exit 1
+fi
+if ! (cd "$OUT/base-src" && "${ESBUILD[@]}" hooks/register.tsx --bundle --format=esm --jsx-factory=h \
+  --jsx-fragment=Fragment --external:claude-code --outfile="$OUT/base-register.js"); then
+  echo "esbuild base register.tsx FAILED" >&2
+  exit 1
+fi
 
 # --- fixtures ----------------------------------------------------------
 # feed-idle: real network, real live feed - one TW code keeps the request
@@ -357,7 +368,7 @@ run_check "tabs"           node "$SCRIPT_DIR/tabs.mjs"        "$OUT/register.js"
 run_check "chart-view"     node "$SCRIPT_DIR/chart-view.mjs"  "$OUT/register.js" "$OUT/board.js" "$FIXTURES/chart-view" "$FIXTURES/chart-view-tw"
 run_check "fit-rows"       node "$SCRIPT_DIR/fit-rows.mjs"    "$OUT/register.js" "$OUT/board.js" "$FIXTURES/fit-rows"
 run_check "desktop-cells"  node "$SCRIPT_DIR/desktop-cells.mjs" "$OUT/register.js" "$OUT/board.js" "$FIXTURES/desktop-cells"
-run_check "chart-pane"     node "$SCRIPT_DIR/chart-pane.mjs" "$OUT/register.js" "$OUT/board.js" "$FIXTURES/chart-pane"
+run_check "chart-pane"     node "$SCRIPT_DIR/chart-pane.mjs" "$OUT/register.js" "$OUT/board.js" "$FIXTURES/chart-pane" "$OUT/base-register.js"
 run_check "pytest"         run_pytest
 run_check "feed-errors"    node "$SCRIPT_DIR/feed-errors.mjs" "$OUT/register.js"
 run_check "feed-budget"    node "$SCRIPT_DIR/feed-budget.mjs" "$OUT/register.js"

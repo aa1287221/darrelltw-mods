@@ -886,7 +886,6 @@ let pnlSortDir: 'asc' | 'desc' = 'desc'
 // page and sort state out of its frames. viewportCols is the last width a
 // ui.render reported, which the 寬 width is measured from.
 const CHART_PANE = 'stock-chart'
-let paneOpen = false
 let chartPaneOn = false // TW_STOCK_CHART_PANE=1, read once in session.start; off = base behaviour
 let paneFocusCode: string | undefined
 let paneWide = false
@@ -925,7 +924,7 @@ function paneColumns(): number {
 }
 
 /** every open sets all of the pane's fields, so a retitle or a width change passes them again */
-async function openChartPane($: PaneHost, code: string, name: string): Promise<boolean> {
+async function openChartPane($: PaneHost, code: string, name: string, onUnplaced?: () => void): Promise<boolean> {
   paneFocusCode = code
   const opened = await $.ui.open({
     id: CHART_PANE,
@@ -935,8 +934,8 @@ async function openChartPane($: PaneHost, code: string, name: string): Promise<b
     rows: 30, // only the inline placement reads it; the dock ignores it
     ...(paneWide ? { columns: paneColumns() } : {}),
   })
-  paneOpen = opened.isPlaced
   if (opened.isPlaced) return true
+  onUnplaced?.()
   $.ui.log(`tw-stock-mod: K 線 pane 沒有開成（${opened.reason}）`)
   // left open but undrawn, it would show up later on top of the band's chart
   await $.ui.close({ id: CHART_PANE })
@@ -945,9 +944,10 @@ async function openChartPane($: PaneHost, code: string, name: string): Promise<b
 
 /** 趨勢圖 and a row pick: the pane on `code`; a host that will not place it gets the band's own chart view */
 async function showChartPane($: PaneHost, code: string, name: string): Promise<void> {
-  if (await openChartPane($, code, name)) return
-  view = 'chart'
-  focusCode = code
+  await openChartPane($, code, name, () => {
+    view = 'chart'
+    focusCode = code
+  })
 }
 
 function resetPnlScroll() {
@@ -2421,6 +2421,7 @@ export const register: Register = on => {
   // The K 線 pane: one symbol's chart in its own Client, built off paneFocusCode
   // and kept out of the band's state (keepBandState).
   on('ui.render', { component: 'Pane', requestId: CHART_PANE }, async ($, e) => {
+    if (e.viewport?.columns) viewportCols = e.viewport.columns
     const { Box, Button, Client, Text } = await $.ui.resolve(e)
     if (!Client) return <Text dimColor>K 線 pane 只在終端與桌面版顯示</Text>
     const now = await $.clock.now()
@@ -2434,7 +2435,7 @@ export const register: Register = on => {
       buildProps(now, config, quotesFor(market, now), mode, 'chart', paneFocusCode, fit, 'full'),
     )
     const q = props.quotes[props.focus]
-    if (paneOpen && q && props.source !== 'demo') requestBars?.(props.market, q.code)
+    if (q && props.source !== 'demo') requestBars?.(props.market, q.code)
     const rowCount = props.quotes.length
     const chartControls = (q?.bars?.length ?? 0) > 0
     const step = (by: number) => async () => {
@@ -2510,13 +2511,9 @@ export const register: Register = on => {
     )
   })
 
-  // Esc, the person's close mark and 關閉 all arrive here: the pane is no longer up.
-  on('ui.close', async ($, e, next) => {
-    if (e.id === CHART_PANE) paneOpen = false
-    return next(e)
-  })
-
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // before the early returns below: a band frame the survey or a non-terminal surface skips still reports the width
+    if (e.viewport?.columns) viewportCols = e.viewport.columns
     // AbovePrompt is raised on terminal and desktop only, and those are the
     // two tables that carry a `Client` for board.tsx (d.ts Elements).
     if (e.props.hasSurvey || (e.surface !== 'terminal' && e.surface !== 'desktop')) return next(e)
@@ -2565,7 +2562,6 @@ export const register: Register = on => {
       )
     }
 
-    if (e.viewport?.columns) viewportCols = e.viewport.columns
     // bodyColumns is the band's own width (narrower than the viewport with a
     // Pane docked beside the transcript); a stub host may give neither
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80

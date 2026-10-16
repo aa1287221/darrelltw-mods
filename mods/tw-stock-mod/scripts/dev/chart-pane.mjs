@@ -7,15 +7,16 @@
 // onto page 2 and rewrites the quotes so two ranks cross). With the gate off
 // (TW_STOCK_CHART_PANE unset) the band behaves as base (P12).
 //
-// Usage: node chart-pane.mjs $OUT/register.js $OUT/board.js <fixture-dir>
-// Writes its own projects under <fixture-dir>/ (no network, fixed clock).
+// Usage: node chart-pane.mjs $OUT/register.js $OUT/board.js <fixture-dir> $OUT/base-register.js
+// Writes its own projects under <fixture-dir>/ (no network, mutable clock from 2026-09-17).
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { ok, done } from './assert.mjs'
 globalThis.h = (t, p, ...k) => ({ type: t, props: p ?? {}, kids: k.flat() })
 globalThis.Fragment = 'Fragment'
-const [, , regPath, boardPath, fixtureDir] = process.argv
+const [, , regPath, boardPath, fixtureDir, baseRegPath] = process.argv
 
 const CLOCK = 1789596000000 // 2026-09-17 10:00 台北, 台股盤中 (chart-nav's clock)
+const PAGE_TURN_WINDOW_MS = 2500 // register.tsx PAGE_TURN_WINDOW_MS
 const PANE = 'stock-chart'
 const CODES = ['1101', '1102', '1103', '1104', '1105', '1106', '1107', '1108']
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -48,14 +49,14 @@ const board = (await import(boardPath)).default
 let bootSeq = 0
 
 /** one fresh register.js on its own project dir; `rig.calls` records the $.ui calls */
-async function boot(dir, quotes = quoteFile(PRICES, CLOCK), gate = true) {
+async function boot(dir, quotes = quoteFile(PRICES, CLOCK), gate = true, reg = regPath) {
   await mkdir(`${dir}/.claude`, { recursive: true })
   await writeFile(`${dir}/.claude/stock-band.json`, JSON.stringify(cfg))
   await writeFile(`${dir}/.claude/stock-quotes.json`, JSON.stringify(quotes))
   const timers = []
   const hooks = []
   const calls = { open: [], close: [], log: [], invalidate: 0 }
-  const rig = { calls, timers, openAnswer: { isPlaced: true }, writeQuotes: async q => writeFile(`${dir}/.claude/stock-quotes.json`, JSON.stringify(q)) }
+  const rig = { calls, timers, now: CLOCK, openAnswer: { isPlaced: true }, writeQuotes: async q => writeFile(`${dir}/.claude/stock-quotes.json`, JSON.stringify(q)) }
   /** runs every hook registered for `event` whose filter matches `e`, in order; `fallback` is the end of the chain */
   const run = (event, e, fallback) => {
     const list = hooks.filter(x => x.event === event && Object.entries(x.filter ?? {}).every(([k, v]) => e[k] === v))
@@ -63,7 +64,7 @@ async function boot(dir, quotes = quoteFile(PRICES, CLOCK), gate = true) {
     return step(0, e)
   }
   const $ = {
-    clock: { now: async () => CLOCK, every: (ms, fn) => timers.push(fn) },
+    clock: { now: async () => rig.now, every: (ms, fn) => timers.push(fn) },
     fs: { read: async p => (await readFile(p.startsWith('/') ? p : `${dir}/${p}`)).toString() },
     ui: {
       log: m => calls.log.push(String(m)),
@@ -87,7 +88,7 @@ async function boot(dir, quotes = quoteFile(PRICES, CLOCK), gate = true) {
     plugin: { root: dir },
     process: { run: async () => { throw new Error('chart-pane: no spawn expected') } },
   }
-  const { register } = await import(`${regPath}?chart-pane=${++bootSeq}`)
+  const { register } = await import(`${reg}?chart-pane=${++bootSeq}`)
   register((event, a, b) => hooks.push({ event, filter: typeof a === 'object' ? a : undefined, fn: typeof a === 'function' ? a : b }))
   await run('session.start', {}, () => ({}))
   return { rig, run }
@@ -206,8 +207,8 @@ await scenario('P3', async () => {
 })
 
 /** one run of P4's frame sequence; `withPane` adds the opened pane and its renders between the band's frames */
-async function sequence(dir, withPane, gate = true) {
-  const { rig, run } = await boot(dir, undefined, gate)
+async function sequence(dir, withPane, gate = true, reg = regPath) {
+  const { rig, run } = await boot(dir, undefined, gate, reg)
   const frames = []
   let paneDraws = 0
   let band = await drawBand(run)
@@ -219,10 +220,15 @@ async function sequence(dir, withPane, gate = true) {
   await frame()
   if (withPane) { if (gate) await pick(run, 0); await paneFrame() } // opens on rank 6 (1106), which sits on page 2
   await press(band, l => l.startsWith('翻頁'))
-  await frame() // back on page 1
+  await frame() // back on page 1, inside the page-turn window: the rank-cross check is off
+  await paneFrame() // the pane draws page 2 in that same window
+  // the window closes: the band's rank-cross check now compares against lastShown, which the pane also writes
+  rig.now += PAGE_TURN_WINDOW_MS + 1000
+  await frame()
   await paneFrame()
+  await frame()
   for (const fn of rig.timers) { await fn(); await sleep(400) }
-  await rig.writeQuotes(quoteFile(Q2, CLOCK + 1000))
+  await rig.writeQuotes(quoteFile(Q2, rig.now))
   for (const fn of rig.timers) { await fn(); await sleep(400) }
   await frame()
   await paneFrame()
@@ -283,6 +289,14 @@ await scenario('P7', async () => {
   ok(!w200.back && !w150.back, 'P7 預設 opens with no columns')
   const none = await widthAt(`${fixtureDir}/p7-none`, null)
   ok(none.wide === 100, `P7 viewport never seen (140): 寬 opens at 100 columns (${none.wide})`)
+  // the band's width counts even on a frame it skips (hasSurvey), and a pane frame counts as well
+  const { rig, run } = await boot(`${fixtureDir}/p7-band-skip`)
+  await drawBand(run, { viewport: 200, props: { hasSurvey: true } })
+  await press(await drawPane(run, { viewport: null }), l => l.startsWith('寬度'))
+  ok(rig.calls.open.at(-1)?.columns === 120, `P7 band frame at 200 skipped by hasSurvey still sets the width: 寬 at 120 (${rig.calls.open.at(-1)?.columns})`)
+  const pane = await boot(`${fixtureDir}/p7-pane-only`)
+  await press(await drawPane(pane.run, { viewport: 200 }), l => l.startsWith('寬度'))
+  ok(pane.rig.calls.open.at(-1)?.columns === 120, `P7 a pane frame at 200 sets the width: 寬 at 120 (${pane.rig.calls.open.at(-1)?.columns})`)
 })
 
 await scenario('P8', async () => {
@@ -342,23 +356,36 @@ await scenario('P11', async () => {
   ok(bandAfter?.focus === focusBefore, `P11 band focus unchanged (${bandAfter?.focus} vs ${focusBefore})`)
 })
 
-// P12 (gate off, the env unset): 趨勢圖 and a row pick enter the band chart as on base, and the pane is never opened
-await scenario('P12', async () => {
-  const { rig, run } = await boot(`${fixtureDir}/p12`, undefined, false)
-  await press(await drawBand(run), '趨勢圖')
-  const chart = await drawBand(run)
-  ok(chart.client?.view === 'chart' && focusCode(chart.client ?? {}) === '1101', `P12 gate off: 趨勢圖 enters the band chart on the first row (${chart.client?.view})`)
-  ok(chart.client?.view === 'chart' && !chart.btns.some(b => b.label === '開 pane'), 'P12 gate off: the band chart row has no 開 pane button')
-  const pk = await boot(`${fixtureDir}/p12-pick`, undefined, false)
+// P12 (gate off, the env unset): the band behaves as base - 趨勢圖 and a row pick enter the band chart,
+// no pane is opened, and the band's frames equal base's (base = the same register.tsx from git, $OUT/base-register.js)
+/** the band's Client props after 趨勢圖, and after a row pick, for one register */
+async function enterChart(dir, reg) {
+  const trend = await boot(`${dir}-trend`, undefined, false, reg)
+  await press(await drawBand(trend.run), '趨勢圖')
+  const chart = await drawBand(trend.run)
+  const pk = await boot(`${dir}-pick`, undefined, false, reg)
   await drawBand(pk.run)
   await pick(pk.run, 2)
   const picked = await drawBand(pk.run)
-  ok(picked.client?.view === 'chart' && focusCode(picked.client ?? {}) === '1103', `P12 gate off: a row pick enters the band chart on that row (${picked.client?.view})`)
-  ok(rig.calls.open.length === 0 && rig.calls.close.length === 0 && pk.rig.calls.open.length === 0, `P12 gate off: no $.ui.open / $.ui.close (${rig.calls.open.length + pk.rig.calls.open.length} open, ${rig.calls.close.length} close)`)
+  return { chart, picked, opens: trend.rig.calls.open.length + pk.rig.calls.open.length, closes: trend.rig.calls.close.length + pk.rig.calls.close.length }
+}
+await scenario('P12', async () => {
+  const off = await enterChart(`${fixtureDir}/p12`, regPath)
+  const base = await enterChart(`${fixtureDir}/p12-base`, baseRegPath)
+  ok(off.chart.client?.view === 'chart' && focusCode(off.chart.client ?? {}) === '1101', `P12 gate off: 趨勢圖 enters the band chart on the first row (${off.chart.client?.view})`)
+  ok(off.chart.client?.view === 'chart' && !off.chart.btns.some(b => b.label === '開 pane'), 'P12 gate off: the band chart row has no 開 pane button')
+  ok(off.picked.client?.view === 'chart' && focusCode(off.picked.client ?? {}) === '1103', `P12 gate off: a row pick enters the band chart on that row (${off.picked.client?.view})`)
+  ok(off.opens === 0 && off.closes === 0, `P12 gate off: no $.ui.open / $.ui.close (${off.opens} open, ${off.closes} close)`)
+  const same = JSON.stringify([off.chart.client, off.picked.client]) === JSON.stringify([base.chart.client, base.picked.client])
+  ok(same, 'P12 gate off: 趨勢圖 and the row pick draw the band exactly as base')
+  const plainBase = await sequence(`${fixtureDir}/p12-base-seq`, false, false, baseRegPath)
   const plain = await sequence(`${fixtureDir}/p12-plain`, false, false)
   const drawn = await sequence(`${fixtureDir}/p12-drawn`, true, false)
+  const baseDiff = plainBase.frames.findIndex((f, i) => f !== plain.frames[i])
+  ok(plain.frames.length === plainBase.frames.length && baseDiff < 0, `P12 gate off: band frames over the P4 sequence equal base${baseDiff < 0 ? '' : ` (first diff at frame ${baseDiff})`}`)
   const diff = plain.frames.findIndex((f, i) => f !== drawn.frames[i])
   ok(plain.frames.length === drawn.frames.length && diff < 0 && drawn.calls.open.length === 0, `P12 gate off: band frames identical with pane renders in between${diff < 0 ? '' : ` (first diff at frame ${diff})`}`)
+  ok(drawn.paneDraws > 0, `P12 positive control: the pane drew during the gate-off sequence (${drawn.paneDraws} draws)`)
 })
 
 done()
