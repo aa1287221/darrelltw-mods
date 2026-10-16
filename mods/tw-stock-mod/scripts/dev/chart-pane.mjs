@@ -4,7 +4,8 @@
 // width, the no-Client fallback, board.tsx's tall volume panel, and the band's
 // isolation: its Client props for one fixed frame sequence are identical with
 // and without pane renders in between (P4 - the sequence moves the opened code
-// onto page 2 and rewrites the quotes so two ranks cross). With the gate off
+// onto page 2 and rewrites the quotes so two ranks cross; P4b-P4e cover the
+// re-rank, auto-page and 損益 page-turn state). With the gate off
 // (TW_STOCK_CHART_PANE unset) the band behaves as base (P12).
 //
 // Usage: node chart-pane.mjs $OUT/register.js $OUT/board.js <fixture-dir> $OUT/base-register.js
@@ -47,6 +48,7 @@ const Q2 = { ...PRICES, '1106': 110, '1101': 101 } // 1106 jumps from rank 6 to 
 
 const board = (await import(boardPath)).default
 let bootSeq = 0
+let BAND_ROWS = 20 // P4d-P4e shrink the band so it pages sooner and its 損益 page is shorter than the pane's
 
 /** one fresh register.js on its own project dir; `rig.calls` records the $.ui calls */
 async function boot(dir, quotes = quoteFile(PRICES, CLOCK), gate = true, reg = regPath) {
@@ -113,7 +115,7 @@ const collect = tree => {
 async function drawBand(run, { viewport = 120, props = {} } = {}) {
   const e = {
     component: 'AbovePrompt',
-    props: { maxRows: 20, bodyColumns: 120, ...props },
+    props: { maxRows: BAND_ROWS, bodyColumns: 120, ...props },
     surface: 'terminal',
     ...(viewport === null ? {} : { viewport: { columns: viewport } }),
   }
@@ -206,8 +208,9 @@ await scenario('P3', async () => {
   ok(noScroll.clientProps?.height === 22, `P3 missing scroll.bodyRows falls back to 24 rows (height ${noScroll.clientProps?.height})`)
 })
 
-/** one run of P4's frame sequence; `withPane` adds the opened pane and its renders between the band's frames */
-async function sequence(dir, withPane, gate = true, reg = regPath) {
+/** one run of P4's frame sequence; `withPane` adds the opened pane and its renders between the band's frames;
+ * `tail` appends a 翻頁 press whose band frame comes after a pane frame (P4b: the re-rank a press asks for) */
+async function sequence(dir, withPane, gate = true, reg = regPath, tail = false) {
   const { rig, run } = await boot(dir, undefined, gate, reg)
   const frames = []
   let paneDraws = 0
@@ -233,6 +236,7 @@ async function sequence(dir, withPane, gate = true, reg = regPath) {
   await frame()
   await paneFrame()
   await frame()
+  if (tail) { await press(band, l => l.startsWith('翻頁')); await paneFrame(); await frame() }
   return { frames, paneDraws, calls: rig.calls }
 }
 
@@ -244,6 +248,83 @@ await scenario('P4', async () => {
   ok(a.frames.at(-1) !== a.frames[3], 'P4 the quotes rewrite changes what the band draws (positive control)')
   const diff = a.frames.findIndex((f, i) => f !== b.frames[i])
   ok(a.frames.length === b.frames.length && diff < 0, `P4 band Client props identical with and without pane renders${diff < 0 ? '' : ` (first diff at frame ${diff})`}`)
+})
+
+/** P4 with the band's last press a 翻頁 whose frame comes after one pane frame: the re-rank that press asks for */
+await scenario('P4b', async () => {
+  const a = await sequence(`${fixtureDir}/p4b-band`, false, true, regPath, true)
+  const b = await sequence(`${fixtureDir}/p4b-pane`, true, true, regPath, true)
+  const diff = a.frames.findIndex((f, i) => f !== b.frames[i])
+  ok(a.frames.length === b.frames.length && diff < 0, `P4b 翻頁 then a pane frame then a band frame: band frames identical${diff < 0 ? '' : ` (first diff at frame ${diff})`}`)
+})
+
+/** a short band pages on its own clock (pageMs); the pane's frames must not change which page the band turns to */
+await scenario('P4d', async () => {
+  cfg.pageMs = 1000
+  BAND_ROWS = 6
+  try {
+    const autoPage = async (dir, withPane) => {
+      const { rig, run } = await boot(dir)
+      const frames = []
+      const frame = async () => { frames.push(JSON.stringify((await drawBand(run)).client ?? null)) }
+      const pane = async () => { if (withPane) await drawPane(run) }
+      await frame()
+      await pane()
+      for (let k = 0; k < 4; k++) {
+        await pane()
+        rig.now += 5000
+        for (const fn of rig.timers) { await fn(); await sleep(300) }
+        await frame()
+      }
+      return frames
+    }
+    const a = await autoPage(`${fixtureDir}/p4d-band`, false)
+    const b = await autoPage(`${fixtureDir}/p4d-pane`, true)
+    const diff = a.findIndex((f, i) => f !== b[i])
+    ok(a.length === b.length && diff < 0, `P4d auto page on a short band: band frames identical with pane renders${diff < 0 ? '' : ` (first diff at frame ${diff})`}`)
+    ok(a.some((f, i) => i > 0 && f !== a[i - 1]), 'P4d positive control: the band paged on its own clock')
+  } finally {
+    cfg.pageMs = 0
+    BAND_ROWS = 20
+  }
+})
+
+/** 損益 on a band that fits 3 holdings rows: the pane fits 5, so its scroll clamp differs and it writes a different lastPnlShown */
+await scenario('P4e', async () => {
+  cfg.holdings = { tw: CODES.slice(0, 6).map((c, i) => ({ code: c, name: `測${i + 1}`, qty: 1000, cost: 100 })), us: [], tf: [], crypto: [] }
+  cfg.holdingsSource = 'config'
+  BAND_ROWS = 7
+  try {
+    const pnlTurn = async (dir, withPane) => {
+      const { rig, run } = await boot(dir)
+      const frames = []
+      const frame = async () => { const b = await drawBand(run); frames.push(JSON.stringify(b.client ?? null)); return b }
+      const pane = async () => { if (withPane) await drawPane(run) }
+      let b = await frame()
+      await press(b, l => l === '台股庫存')
+      b = await frame()
+      await pane()
+      await press(b, l => l.startsWith('翻頁'))
+      b = await frame()
+      await pane()
+      rig.now += PAGE_TURN_WINDOW_MS + 1000
+      b = await frame()
+      await pane()
+      await press(b, l => l.startsWith('翻頁'))
+      await pane()
+      await frame()
+      return frames
+    }
+    const a = await pnlTurn(`${fixtureDir}/p4e-band`, false)
+    const b = await pnlTurn(`${fixtureDir}/p4e-pane`, true)
+    const diff = a.findIndex((f, i) => f !== b[i])
+    ok(a.length === b.length && diff < 0, `P4e 損益 page turn after a pane frame: band frames identical${diff < 0 ? '' : ` (first diff at frame ${diff})`}`)
+    ok(a.some(f => f.includes('"view":"pnl"')), 'P4e positive control: the band is on 損益 and turns its page')
+  } finally {
+    delete cfg.holdings
+    delete cfg.holdingsSource
+    BAND_ROWS = 20
+  }
 })
 
 await scenario('P5', async () => {
