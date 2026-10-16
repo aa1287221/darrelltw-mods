@@ -2439,6 +2439,8 @@ export const register: Register = on => {
       return <Text dimColor>{`K 線 pane n/a（${err instanceof Error ? err.message : String(err)}）`}</Text>
     }
     const q = props.quotes[props.focus]
+    // a market switch can drop the code; follow the row the pane draws so 回 band lands on it
+    if (q) paneFocusCode = q.code
     if (q && props.source !== 'demo') requestBars?.(props.market, q.code)
     const rowCount = props.quotes.length
     const chartControls = (q?.bars?.length ?? 0) > 0

@@ -415,6 +415,8 @@ await scenario('P10', async () => {
   const chart = { ...base, view: 'chart', layout: 'full', focus: 0, timeframes: [], timeframe: '5', chartMode: 'candle' }
   const tall44 = drawBoard({ ...chart, boardRows: 44, chartRows: 44, tallVolume: true })
   ok(tall44.length === 44 && volumeRow(tall44) === 44 - 1 - 7, `P10 44 rows with tallVolume: volume label on row ${44 - 1 - 7} (got ${volumeRow(tall44)})`)
+  // every bar with volume lights its bottom pixel, so the panel's last row is never blank
+  ok(/[█▀▄]/.test(tall44[44 - 2] ?? ''), `P10 44 rows with tallVolume: the volume bars reach the panel's bottom row (${JSON.stringify((tall44[44 - 2] ?? '').trim().slice(0, 30))})`)
   const plain44 = drawBoard({ ...chart, boardRows: 44, chartRows: 44 })
   ok(volumeRow(plain44) === 44 - 1 - 2, `P10 44 rows without tallVolume keep 2 volume rows (label on row ${44 - 1 - 2}, got ${volumeRow(plain44)})`)
   const short16 = drawBoard({ ...chart, boardRows: 16, chartRows: 16, tallVolume: true })

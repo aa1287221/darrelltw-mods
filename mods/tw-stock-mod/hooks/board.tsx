@@ -1465,8 +1465,8 @@ function candlePixels(win: BarWindow, market: MarketId, sc: Scale, width: number
 }
 
 /** each bar's volume as a 2-row half-block histogram in the bar's tone */
-function volumePixels(win: BarWindow, market: MarketId, width: number): { px: Pixels; max: number } {
-  const levels = VOLUME_ROWS * 2
+function volumePixels(win: BarWindow, market: MarketId, width: number, volRows = VOLUME_ROWS): { px: Pixels; max: number } {
+  const levels = volRows * 2
   const px = blankPixels(width, levels)
   let max = 0
   for (const bar of win.bars) max = Math.max(max, bar[4] ?? 0)
@@ -1922,7 +1922,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
 
       // the volume rows, under the axis, sharing the bars' columns
       if (geom.volume > 0) {
-        const vol = volumePixels(win, props.market, plotW)
+        const vol = volumePixels(win, props.market, plotW, geom.volume)
         const volCells: Cell[][] = Array.from({ length: geom.volume }, () =>
           Array.from({ length: plotW }, () => ({ ch: ' ' }) as Cell),
         )
