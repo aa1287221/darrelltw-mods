@@ -2431,9 +2431,13 @@ export const register: Register = on => {
     const mode = modeOverride ?? config.market
     const market = pickMarket(now, mode, hasFutures(config)).market
     const fit: Fit = { ...fitBand(config, 0, cols), adaptive: true, chartRows }
-    const props = keepBandState(() =>
-      buildProps(now, config, quotesFor(market, now), mode, 'chart', paneFocusCode, fit, 'full'),
-    )
+    let props: BoardProps
+    try {
+      props = keepBandState(() => buildProps(now, config, quotesFor(market, now), mode, 'chart', paneFocusCode, fit, 'full'))
+    } catch (err) {
+      // a throw would unload the pane (d.ts PaneCloseOrigin); one line says what failed instead
+      return <Text dimColor>{`K 線 pane n/a（${err instanceof Error ? err.message : String(err)}）`}</Text>
+    }
     const q = props.quotes[props.focus]
     if (q && props.source !== 'demo') requestBars?.(props.market, q.code)
     const rowCount = props.quotes.length
