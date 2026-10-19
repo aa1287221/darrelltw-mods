@@ -1263,6 +1263,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     chartPaneOn = (await $.env.get('TW_STOCK_CHART_PANE')) === '1'
+    // debug log only, and only when on, so the gate-off path stays identical to base
+    if (chartPaneOn) $.ui.log('chart pane gate on (TW_STOCK_CHART_PANE=1)', { to: 'debug' })
 
     try {
       const manifest = JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
